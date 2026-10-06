@@ -12,15 +12,15 @@
     "core/delivery.ts": "49801096f2c1bd4dcc8cb64fae2215e84ab74c4c5aed51931a27859c92cf8dce",
     "core/event-safety.ts": "0f7c9c77a2d6a0d75f2f755ce79cb3e321856d5e219e6e4dd5c1f12b58eb4eba",
     "core/faults.ts": "1b8e5615c3e93db552ce05410b1ba246dfed6a5fbff7120dc48cb514b8f4d004",
-    "core/hosted-regressions.test.ts": "6b34ead97bf6b9e714723475473651dba1fbfc7de98c4873120a77cf73a04c2c",
+    "core/hosted-regressions.test.ts": "21ecd84f09ec92bde633026bc86ad8102968b5c5b20a1fef0935d070d802da0a",
     "core/index.ts": "10321ec383d92f9097dcee3c70a7396168c449a9c5926ec20e5b838647b8a697",
     "core/isolation.test.ts": "dc100ec58cb6d008c3cd60921e03bbc1ba9f98f756ad84b0e11cbd84acc2447a",
     "core/late-review-regressions.test.ts": "f743f30e053cae79f697412f3171f83ae45524c116623823467275dbb027be8f",
     "core/lock.test.ts": "eed1b01f1d21c33b629adffd7fa1ba8a887fc670ee9389a69e6ed49150ed2d02",
-    "core/lock.ts": "e7f08079edd256d5c603e75b06fa804c5676d2277af8d6fc6bcdd294c3870397",
+    "core/lock.ts": "05bbbe0ca8df6f91b862fdeb029d7e4fbc5b964b29fc15f023e9d8e5233c8737",
     "core/native-compaction.test.ts": "e1bb45b88ae2089b49da6b0106e3abfd400e8dfd23af11e7e5362009c5457039",
     "core/participation.test.ts": "4b77377ac94cfb840630d670e9186c835be933ef5d12962f1e4b6fdc157244c7",
-    "core/participation.ts": "d6a6e431817ff528d3f1904dd3646a660b1d664095c14ff2f960a5c7f43cd7b7",
+    "core/participation.ts": "30857407e0b75b0fc7926720e547b606a2d48cdac111ec8cdfd484a0d42bfb7f",
     "core/publication-regressions.test.ts": "ff76c328698a5924d6abd71b82561c62e5c43f0a4f09e27de413887329e28661",
     "core/read.test.ts": "fc4992bf8c39fa37958b14c1d523534dbdb800b27e5d1e7436033586f7ba6b9a",
     "core/recall.test.ts": "8618810feaf916d5c27aa12020d3772b55b4fc77b8296ad43f7cdf472e95ef80",
@@ -33,12 +33,13 @@
     "core/session.ts": "a54c9ee29cf7655c129e1435164eeaa05c1cfdae9b2d849799183542288a74d6",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "ab4a64136955a7cabc5700ba1b9012786c54470339c71a0ff23aca3ec4ee34af",
+    "core/store.ts": "77806e5be14bc143b301ef0cdede8dc674665113bd7b3d7bb30af648aaac9085",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
     "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c",
     "core/wave7-regressions.test.ts": "871cd6a907cc3cec553f545afebeb70666a0febe1909437cb9956b6d376256f3",
-    "core/wave8-regressions.test.ts": "67f5a78fc0a2e4c2f995d9e735262b5c421d93067c7e1598785055545b7ccdac"
+    "core/wave8-regressions.test.ts": "67f5a78fc0a2e4c2f995d9e735262b5c421d93067c7e1598785055545b7ccdac",
+    "core/wave9-regressions.test.ts": "0b67ef7c47ee2b736d643eddc424d6b4ee615718e3d9548fb878714fc1e8f21a"
   },
   "importedPaths": [
     ".gitignore",
@@ -107,7 +108,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "ced4d442d5166a69ab815efbd719fc19f746cc39",
+  "corePatchCommit": "72ff2e2f2b41f99fbb4dd857f3c91e6fbfacda7b",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -121,6 +122,7 @@
     "Late hosted-review corrections: bounded descriptor lock reads with declared-field projection and transient publication protection; bounded frame-key repair and anchored private-state publication; structured runner-event replay and complete HEAD validation. Setup refuses recognized credential-bearing configuration before before/after and repair backup copies; conservative parsing has documented limits. Synthetic offline evidence only.",
     "Wave7 repairs: supplied setup environment controls CE/XDG/HOME state and participation; managed ownership verified before writes; temporary and orphan revision cleanup anchored; stale citation ranges validated and relocation work bounded. Codex actual descendant subtree declarations refuse without config mutation or activation. Synthetic offline evidence only, no auth/model calls or installation pointer repair.",
     "Validation exposed a pre-existing lock-descriptor turnover race: path mismatches still refuse before payload reads, and only lock reads retry within the existing 100ms deadline. Persistent unsafe names still throw and are never eligible for dead-holder takeover. Deterministic unlink and persistent refusal/acquire controls are synthetic.",
-    "Wave8 local source correction: invalid no-HEAD Working Context entries are preserved/refused instead of deleted or cleared; runner events receive conservative credential omission before storage/rendering, with explicit inspection limits and synthetic accessor/schema controls. Setup validates watched roots before runner commands and Claude enable validates ledger first, failing explicitly off. No historical data scrub, real credentials, model calls, or publication in this repair phase."
+    "Wave8 local source correction: invalid no-HEAD Working Context entries are preserved/refused instead of deleted or cleared; runner events receive conservative credential omission before storage/rendering, with explicit inspection limits and synthetic accessor/schema controls. Setup validates watched roots before runner commands and Claude enable validates ledger first, failing explicitly off. No historical data scrub, real credentials, model calls, or publication in this repair phase.",
+    "Wave9 local source correction: participation records are flushed before rename and their directory/root afterward; Event Log operations retain one verified parent descriptor through lease acquisition, recursive stale cleanup, mutation and release. Codex missing/moved-project uninstall validates pointers and ledgers, preserves backups, skips project writes and reports manual cleanup. Synthetic-only validation; no model calls or publication."
   ]
 }
