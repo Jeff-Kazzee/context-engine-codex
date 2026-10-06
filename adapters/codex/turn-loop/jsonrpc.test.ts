@@ -83,7 +83,8 @@ test('server-to-client requests are refused, never left hanging', async () => {
 test('if the server exits, pending requests reject instead of hanging', async () => {
   const { rpc } = fake({ exitOn: 'thread/start' });
   try {
-    await assert.rejects(rpc.request('thread/start', {}), /exited/);
+    // EOF can arrive before the process exit event; either signal closes the transport.
+    await assert.rejects(rpc.request('thread/start', {}), /app-server (?:exited|output is closed|input is closed)/);
   } finally {
     await rpc.close();
   }
