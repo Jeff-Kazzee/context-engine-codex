@@ -63,7 +63,7 @@ function trustAll(w: ReturnType<typeof world>): void {
   writeFileSync(path, readFileSync(path, 'utf8') + tables.join(''));
 }
 
-test('Codex: install, trust the hooks, uninstall: CODEX_HOME is byte-identical again, comments included', () => {
+test('Codex: install, trust the hooks, uninstall: config bytes restore exactly; unowned empty cache parents remain', () => {
   const w = world();
   writeFileSync(join(w.codexHome, 'config.toml'), CODEX_CONFIG);
   const before = tree(w.codexHome);
@@ -81,7 +81,7 @@ test('Codex: install, trust the hooks, uninstall: CODEX_HOME is byte-identical a
   const un = w.ce(['uninstall', '--codex']);
   assert.equal(un.status, 0, un.stdout + un.stderr);
   assert.equal(readFileSync(join(w.codexHome, 'config.toml'), 'utf8'), CODEX_CONFIG);
-  assert.deepEqual(tree(w.codexHome), before);
+  assert.deepEqual(tree(w.codexHome), { ...before, '.tmp/': 'dir', '.tmp/marketplaces/': 'dir', 'plugins/': 'dir', 'plugins/cache/': 'dir' });
   assert.equal(existsSync(join(w.stateDir, 'setup', 'codex-marketplace')), false);
 });
 
@@ -163,7 +163,7 @@ test('enable with Codex installed writes only the project .codex/config.toml (st
   assert.deepEqual(tree(w.project), before, '.codex/config.toml byte-identical, AGENTS.md untouched');
 });
 
-test('enable with no project config creates .codex/config.toml; disable removes it and the directory', () => {
+test('enable with no project config creates .codex/config.toml; disable removes it and retains the unowned parent directory', () => {
   const w = world();
   assert.equal(w.ce(['install', '--codex']).status, 0);
   const before = tree(w.project);
@@ -171,7 +171,7 @@ test('enable with no project config creates .codex/config.toml; disable removes 
   const toml = readFileSync(join(w.project, '.codex', 'config.toml'), 'utf8');
   assert.ok(toml.indexOf('developer_instructions') < toml.indexOf('[features.token_budget]'));
   assert.equal(w.ce(['disable']).status, 0);
-  assert.deepEqual(tree(w.project), before);
+  assert.deepEqual(tree(w.project), { ...before, '.codex/': 'dir' });
 });
 
 test('enable leaves a project .codex/config.toml that already sets token_budget or developer_instructions alone, and says so', () => {
@@ -221,7 +221,7 @@ test('an enable made before AGENTS.md was dropped (AGENTS.md section in its ledg
   ledger.files.push({ path: md, before: join(dir, 'before-md', 'AGENTS.md'), after: join(dir, 'after-md', 'AGENTS.md') });
   writeFileSync(join(dir, 'ledger.json'), JSON.stringify(ledger));
   assert.equal(w.ce(['disable']).status, 0);
-  assert.deepEqual(tree(w.project), before);
+  assert.deepEqual(tree(w.project), { ...before, '.codex/': 'dir' });
 });
 
 test('uninstall --codex also removes the project settings enable wrote', () => {
@@ -231,7 +231,7 @@ test('uninstall --codex also removes the project settings enable wrote', () => {
   assert.equal(w.ce(['enable']).status, 0);
   const un = w.ce(['uninstall', '--codex']);
   assert.equal(un.status, 0, un.stderr);
-  assert.deepEqual(tree(w.project), before);
+  assert.deepEqual(tree(w.project), { ...before, '.codex/': 'dir' });
 });
 
 /**

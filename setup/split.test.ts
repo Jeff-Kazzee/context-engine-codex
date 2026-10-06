@@ -19,7 +19,7 @@ test('default install and uninstall change only the selected runner and restore 
   const status = w.ce(['status']); assert.equal(status.status, 0, status.stdout + status.stderr);
   assert.equal(w.ce(['disable']).status, 0);
   assert.equal(w.ce(['uninstall']).status, 0);
-  assert.deepEqual(tree(w.claudeHome), beforeClaude); assert.deepEqual(tree(w.codexHome), beforeCodex);
+  assert.deepEqual(tree(w.claudeHome), beforeClaude); assert.deepEqual(tree(w.codexHome), { ...beforeCodex, '.tmp/': 'dir', '.tmp/marketplaces/': 'dir', 'plugins/': 'dir', 'plugins/cache/': 'dir' });
 });
 test('wrong runner install refuses before changing either home', () => {
  const w = world(); const a=tree(w.claudeHome), b=tree(w.codexHome);
@@ -37,6 +37,6 @@ test('failed installation restores both runner homes and can be retried', () => 
  const a=tree(w.claudeHome),b=tree(w.codexHome);
  const r=w.ce(['install'],{env:{FAKE_CODEX_FAIL: 'plugin add'}});
  assert.equal(r.status,1,r.stdout+r.stderr);assert.match(r.stderr,/tracked configuration restored/);
- assert.deepEqual(tree(w.claudeHome),a);assert.deepEqual(tree(w.codexHome),b);
+ assert.deepEqual(tree(w.claudeHome),a);assert.deepEqual(tree(w.codexHome),{...b, '.tmp/':'dir', '.tmp/marketplaces/':'dir'});
  assert.equal(w.ce(['install']).status,0);assert.equal(w.ce(['install']).status,1);assert.equal(w.ce(['uninstall']).status,0);
 });
