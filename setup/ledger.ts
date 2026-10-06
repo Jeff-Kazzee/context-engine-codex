@@ -220,7 +220,9 @@ export function assess(l: Ledger, rules: Record<string, Rule>): Record<string, b
       const stripped = rule.strip(t, before);
       return before === null && stripped !== t && rule.empty?.(stripped) ? '\u0000absent' : rule.canon(stripped);
     };
-    out[f.path] = form(now) === form(after);
+    // A concurrent edit during installation is already present in `after`.
+    // Byte restoration is safe only when unmanaged content also matches the original.
+    out[f.path] = form(now) === form(after) && form(after) === form(before);
   }
   return out;
 }

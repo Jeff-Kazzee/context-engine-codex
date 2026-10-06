@@ -9,8 +9,8 @@
 // goes through the `context-engine` CLI, which also serializes concurrent hooks of one session.
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { locallyEnabled } from './activation.ts';
 import type * as Core from '../../../../core/index.ts';
 import type * as Guidance from '../../guidance.ts';
@@ -158,7 +158,7 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
       if (bytes === 'too-large') return `${notReset} Your Working Context exceeds the 16 MiB read limit. Offload large content with source pointers before resetting.`;
       if (Buffer.isBuffer(bytes)) text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     } catch {}
-    return text.trim() ? null : `${notReset} Your Working Context ${path} is missing or empty. Write the current task, decisions and next step into it.`;
+    return lib.parseTurns(text).some(turn => turn.text.trim() !== '') ? null : `${notReset} Your Working Context ${path} is missing or empty. Write the current task, decisions and next step into it.`;
   }
   // The marker is a tool turn, which folds to user and merges into a user turn before it (separated
   // by a blank line), so look at the last paragraph of the last turn, not at its start. (Checking the
@@ -169,7 +169,7 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
   if (result.receipt?.kind === 'restored') {
     return `${notReset} ${result.receipt.text} Read ${path} again and make sure it holds the current task.`;
   }
-  if (!result.revision) {
+  if (!result.revision || !result.turns?.some(turn => turn.text.trim() !== '')) {
     return `${notReset} Your Working Context ${path} is missing or empty and there is no earlier revision to restore. Write the current task, decisions and next step into it.`;
   }
   try {
@@ -202,7 +202,10 @@ function touchesWorkingContext(input: HookInput): boolean {
   const read = /^\s*(?:cat|head|tail)\s+(['"]?)([^\s'";|&<>]+)\1\s*$/.exec(command);
   const truncate = /^\s*:\s*>\s*(['"]?)([^\s'";|&<>]+)\1\s*$/.exec(command);
   const coreRead = /^[ \t]*context-engine(?:-codex)?[ \t]+read(?:[ \t]+(?:[A-Za-z0-9_.:/=-]+|"[A-Za-z0-9_.:/=-]+"|'[A-Za-z0-9_.:/=-]+'|"\$CODEX_THREAD_ID"))*[ \t]*$/.test(command);
-  return (!!read && managedPath(read[2]!)) || (!!truncate && managedPath(truncate[2]!)) || coreRead;
+  const nodeRead = /^[ \t]*(?:node|\/[^\s'";|&<>`$]+\/node)[ \t]+(?:"([^"`$]+)"|'([^']+)'|([^\s'";|&<>`$]+))[ \t]+(read(?:[ \t]+(?:[A-Za-z0-9_.:/=-]+|"[A-Za-z0-9_.:/=-]+"|'[A-Za-z0-9_.:/=-]+'|"\$CODEX_THREAD_ID"))*[ \t]*)$/.exec(command);
+  const cli = process.env.CONTEXT_ENGINE_CLI || fileURLToPath(new URL('../../../../core/cli.ts', import.meta.url));
+  const directRead = !!nodeRead && resolve(input.cwd, nodeRead[1] ?? nodeRead[2] ?? nodeRead[3]!) === resolve(cli);
+  return (!!read && managedPath(read[2]!)) || (!!truncate && managedPath(truncate[2]!)) || coreRead || directRead;
 }
 
 function emit(output: Record<string, unknown>): void {

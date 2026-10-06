@@ -58,7 +58,7 @@ const recordedPointer = (ctx: SetupContext, root: string) => {
 function codexConfigRule(): Rule {
   const top = blockRule(TOML_TOP_MARKERS);
   const table = blockRule(TOML_MARKERS);
-  return { strip: (text, before) => table.strip(top.strip(text, before), before), canon: table.canon };
+  return { strip: (text, before) => table.strip(top.strip(text, before), before), canon: table.canon, empty: (text) => text.trim() === '' };
 }
 
 function projectRules(root: string): Record<string, Rule> {
@@ -151,7 +151,7 @@ export function codexTrusts(ctx: SetupContext, root: string): boolean {
   }
 }
 
-function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
+function writeCodexProjectFiles(ctx: SetupContext, root: string, disabled = false): string[] {
   const config = codexConfig(root);
   const existingBytes=safeRead(config);assertBackupSafe(config,existingBytes);
   const existing = existingBytes?.toString('utf8') ?? null;
@@ -160,7 +160,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
   if (!old && existing !== null && [TOML_MARKERS.begin, TOML_MARKERS.end, TOML_TOP_MARKERS.begin, TOML_TOP_MARKERS.end].some(marker => existing.includes(marker))) {
     throw new SetupError(`Codex: ${config} contains unowned Context Engine markers; configuration was left unchanged`);
   }
-  if (old && codexProjectSettings(root,experimentOn('stale-refs')?['stale-refs']:[])) return ['Codex: project settings already in place'];
+  if (!disabled && old && codexProjectSettings(root,experimentOn('stale-refs')?['stale-refs']:[])) return ['Codex: project settings already in place'];
   const unmanaged = existing === null ? null : codexConfigRule().strip(existing, old?.files[0]?.before ? safeRead(old.files[0].before)!.toString('utf8') : null);
   // Parse statement keys with their table prefix; strings/comments are never declarations.
   const settings = unmanaged === null ? null : projectTomlSettings(unmanaged);
@@ -179,7 +179,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
     extra: { projectRoot: root },
   });
   const experiments = experimentOn('stale-refs') ? ['stale-refs'] : [];
-  const toml = projectCodexToml({ experiments });
+  const toml = disabled ? { top: 'developer_instructions = ""\n', table: '[features.token_budget]\nenabled = false\n' } : projectCodexToml({ experiments });
   let ledger: Ledger;
   try {
     safeWrite(config, appendBlock(prependBlock(unmanaged, toml.top, TOML_TOP_MARKERS), toml.table, TOML_MARKERS));
@@ -206,7 +206,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
     throw new SetupError(`Codex project setup failed and was rolled back: ${e instanceof Error ? e.message : String(e)}`);
   }
   const lines = [
-    `Codex: wrote developer_instructions and [features.token_budget] to ${config} (byte backup: ${join(ledger.dir, 'before')}); nothing else, so other projects are unchanged`,
+    `Codex: wrote ${disabled ? 'a scoped override for inherited Context Engine settings' : 'developer_instructions and [features.token_budget]'} to ${config} (byte backup: ${join(ledger.dir, 'before')}); other projects are unchanged`,
   ];
   if (!codexTrusts(ctx, root)) lines.push(`Codex: this project is not trusted in ${join(ctx.codexHome, 'config.toml')}, so Codex ignores ${config} until you trust it (Codex asks when it starts here)`);
   return lines;
@@ -238,14 +238,32 @@ export function revertAllCodexProjects(ctx: SetupContext): string[] {
 }
 
 export function enableProject(ctx: SetupContext, projectRoot: string): string[] {
+  const config = codexConfig(projectRoot), ptr = pointer(ctx, projectRoot);
+  let priorPointer: Buffer | null = null;
+  let snap: ReturnType<typeof takeSnapshot> | undefined;
   let setupLines: string[];
-  try { setupLines = installedLedger(ctx, 'codex') ? writeCodexProjectFiles(ctx, projectRoot) : ['Codex: adapter not installed (`context-engine-codex install --codex`).']; }
+  try {
+    if (installedLedger(ctx, 'codex')) {
+      priorPointer = safeRead(ptr);
+      snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: 'enable-publication', files: [config], watch: [join(projectRoot, '.codex')], namespaced: [] });
+      setupLines = writeCodexProjectFiles(ctx, projectRoot);
+    } else setupLines = ['Codex: adapter not installed (`context-engine-codex install --codex`).'];
+    setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'on' });
+  }
   catch (e) {
     // An inherited/previous opt-in must not leave hooks active after setup fails.
-    setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'off' });
+    const errors: unknown[] = [e];
+    try { setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'off' }); } catch (error) { errors.push(error); }
+    try {
+      if (snap) {
+        rollbackSnapshot(snap, projectRules(projectRoot));
+        if (priorPointer) safeWrite(ptr, priorPointer);
+        else if (existsSync(ptr)) unlinkSync(ptr);
+      }
+    } catch (error) { errors.push(error); }
+    if (errors.length > 1) throw new AggregateError(errors, 'Codex activation failed; rollback was incomplete; backups are preserved');
     throw e;
   }
-  setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'on' });
   const rec = findRecord({ projectRoot, stateDir: dirname(ctx.setupDir) })!;
   const lines = [`Context Engine enabled for ${rec.project} and its subdirectories (new sessions).`];
   if (killSwitchOn(ctx.env)) lines.push('Note: the kill switch CONTEXT_ENGINE=off is set in this shell, so the adapters stay off where it is set.');
@@ -259,5 +277,12 @@ export function disableProject(ctx: SetupContext, projectRoot: string): string[]
   const lines = [`Context Engine disabled for ${p.project} and its subdirectories (new sessions; a running Codex session stops at its next hook).`];
   const ptr = pointer(ctx, p.project!);
   if (existsSync(ptr)) lines.push(...revertCodexProjectFiles(ctx,ptr));
+  for (let ancestor = dirname(projectRoot); ancestor !== projectRoot; ancestor = dirname(ancestor)) {
+    if (codexProjectSettings(ancestor)) {
+      lines.push(...writeCodexProjectFiles(ctx, projectRoot, true));
+      break;
+    }
+    if (dirname(ancestor) === ancestor) break;
+  }
   return lines;
 }

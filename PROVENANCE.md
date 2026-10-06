@@ -1,5 +1,7 @@
 # Provenance
 
+The Wave10 coordinated repair pins `c5aa0f8adf77488c6e387667805ba54232908bea` from the Claude distribution, with 37 identical shared core files in both runtime repositories. New controls use synthetic filesystem failures and runner doubles. They import no private captures or credentials and do not extend the prior live-trial acceptance to these revised heads. Source review, publication, owner merge approval and runtime acceptance remain separate gates.
+
 The independently implemented Context Engine core is MIT-licensed (see `LICENSE`). This file lists every external
 source the code draws on, with its license and what was used.
 

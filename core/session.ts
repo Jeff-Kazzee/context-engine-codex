@@ -8,7 +8,7 @@
 // - The Working Context is a materialized view of HEAD. A runner append commits first and then
 //   rewrites the file; HEAD.materialized says whether that rewrite finished.
 // - record() always syncs first, so a runner append never overwrites an uncommitted model edit.
-import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { crashPoint } from './faults.ts';
 import { acquireLock, holderFor, isAlive, readLock, releaseLock, serialized, type LockHolder } from './lock.ts';
@@ -281,9 +281,9 @@ class Core {
       workingContextPath: this.l.workingContext,
       stateDir: this.l.stateDir,
       frameKey: sessionFrameKey(this.l.stateDir),
-      sync: () => this.guard(() => this.checkBudget(this.checkRefs(this.deliver(this.sync())))),
-      record: (events) => this.guard(() => this.checkBudget(this.checkRefs(this.record(events)))),
-      nativeCompaction: (events) => this.guard(() => this.checkBudget(this.checkRefs(this.record(events, true)))),
+      sync: () => this.guard(() => this.deliver(this.checkBudget(this.checkRefs(this.sync())))),
+      record: (events) => this.guard(() => this.deliver(this.checkBudget(this.checkRefs(this.record(events))))),
+      nativeCompaction: (events) => this.guard(() => this.deliver(this.checkBudget(this.checkRefs(this.record(events, true))))),
       close: () => this.guard(() => this.close()),
     };
   }
@@ -402,6 +402,7 @@ class Core {
 
   private commit(text: string, kind: CommitKind, through?: number): Head {
     const prev = this.head();
+    if (prev?.rev === Number.MAX_SAFE_INTEGER) throw new Error('revision counter exhausted; start a new session');
     const rev = (prev?.rev ?? 0) + 1;
     atomicWrite(join(this.l.revisions, `${rev}.md`), text, 'snapshot-tmp');
     crashPoint('before-head');
@@ -423,7 +424,6 @@ class Core {
 
   private writeWorkingContext(text: string): void {
     assertWorkingContextDir(this.l.workingContext);
-    mkdirSync(dirname(this.l.workingContext), { recursive: true, mode: 0o700 });
     atomicWrite(this.l.workingContext, text, 'wc-tmp', 0o600);
   }
 
@@ -493,14 +493,18 @@ class Core {
     }
     if (replace && events.every((e) => stringField(e, 'text')!.trim() === '')) throw new Error('nativeCompaction() needs the runner result: at least one non-empty event');
     const retained = events.map(retainRunnerEvent);
-    const synced = this.deliver(this.sync());
+    const synced = this.sync();
+    if (synced.receipt) this.pendingReceipt = synced.receipt;
     if (events.length === 0) return synced;
     this.lastSeq = Math.max(this.lastSeq, this.head()?.through ?? 0);
-    const numbered: Pending[] = retained.map((event) => ({ seq: ++this.lastSeq, event }));
+    if (retained.length > Number.MAX_SAFE_INTEGER - this.lastSeq) throw new Error('Event Log sequence exhausted; start a new session');
+    if (this.head()?.rev === Number.MAX_SAFE_INTEGER) throw new Error('revision counter exhausted; start a new session');
+    const numbered: Pending[] = retained.map((event, i) => ({ seq: this.lastSeq + i + 1, event }));
     const replacement: Replacement | undefined = replace
       ? { kind: 'native-compaction', reason: 'over-budget', approxTokensBefore: approxTokens(synced.chars), budgetTokens: this.budgetTokens }
       : undefined;
     appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(replacement ? { replace: replacement } : {}) });
+    this.lastSeq += numbered.length;
     if (replacement) numbered[0]!.replace = replacement;
     this.unapplied.push(...numbered);
     crashPoint('after-log');

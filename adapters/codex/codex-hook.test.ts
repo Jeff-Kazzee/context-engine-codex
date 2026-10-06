@@ -55,6 +55,31 @@ test('compound core-read commands retain their additional tool output', () => {
   assert.equal(r.status, 0, r.stderr); assert.ok(wc(f).includes('REQUIRED_SENTINEL'));
 });
 
+test('wave10: direct Node core read avoids copying Working Context tool output into itself', () => {
+  const f = enabledFixture(); assert.equal(hook(f, prompt('ORIGINAL_TASK')).status, 0);
+  const before = wc(f);
+  const r = hook(f, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: `node "${CLI}" read --session ${SID}` }, tool_response: before + 'SELF_COPY_SENTINEL' });
+  assert.equal(r.status, 0, r.stderr); assert.equal(wc(f), before);
+  const ordinary = hook(f, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: `node "${CLI}" read --session ${SID} && printf EXTRA` }, tool_response: 'COMPOUND_NODE_OUTPUT' });
+  assert.equal(ordinary.status, 0, ordinary.stderr); assert.match(wc(f), /COMPOUND_NODE_OUTPUT/);
+});
+
+test('wave10: header-only Working Context refuses new_context', () => {
+  const f = enabledFixture(); assert.equal(hook(f, prompt('ORIGINAL_TASK')).status, 0);
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\n');
+  const r = hook(f, { hook_event_name: 'PreToolUse', tool_name: 'new_context', tool_input: {} });
+  assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /not reset|missing or empty/);
+});
+
+test('wave10: unavailable-core PreCompact rejects header-only context and allows a valid body', () => {
+  const f = enabledFixture(); assert.equal(hook(f, prompt('ORIGINAL_TASK')).status, 0);
+  const broken = { CONTEXT_ENGINE_CLI: 'nonexistent-context-engine-test-only' };
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\n');
+  const refused = hook(f, { hook_event_name: 'PreCompact' }, broken); assert.equal(refused.status, 0); assert.match(refused.stdout, /missing or empty/);
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nVALID_CURRENT_TASK\n');
+  const allowed = hook(f, { hook_event_name: 'PreCompact' }, broken); assert.equal(allowed.status, 0); assert.equal(allowed.stdout, '');
+});
+
 /** Shared budget 26,000 tokens: minus the 24,000-token Pinned Prefix reserve, halved: 1,000 tokens. */
 const SMALL = { CONTEXT_ENGINE_BUDGET_TOKENS: '26000' };
 const out = (tokens: number) => 'x'.repeat(tokens * 4);

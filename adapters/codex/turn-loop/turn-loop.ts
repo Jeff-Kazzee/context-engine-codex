@@ -254,7 +254,14 @@ class TurnLoop {
     const input = [...receipts.map((r) => ({ type: 'text', text: r.text })), { type: 'text', text: prompt }];
     const { turnId, status, items, usage, error } = await this.startAndWait(threadId, input);
     const finalMessage = agentMessages(items).at(-1) ?? '';
-    const recorded = this.session.record([{ role: 'user', text: prompt }, ...items.flatMap(toEvents)]);
+    let recorded;
+    try { recorded = this.session.record([{ role: 'user', text: prompt }, ...items.flatMap(toEvents)]); }
+    catch (e) {
+      // The server completed work that the durable context did not record. Never reuse it.
+      this.unavailable = true;
+      await this.rpc.close();
+      throw e;
+    }
     if (recorded.receipt) this.pendingReceipts.push(recorded.receipt);
     return {
       mode: MODE,

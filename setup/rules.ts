@@ -111,6 +111,7 @@ export function tomlTablesRule(ours: RegExp, emptyParents: RegExp): Rule {
   };
   return {
     strip,
+    empty: (text) => text.trim() === '',
     canon: (text) =>
       text
         .split('\n')

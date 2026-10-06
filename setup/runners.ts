@@ -4,7 +4,7 @@
 import { spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveStateRoot } from '../core/store.ts';
 import type { Rule } from './ledger.ts';
@@ -25,8 +25,8 @@ export function setupContext(env: NodeJS.ProcessEnv = process.env): SetupContext
     env,
     checkout: fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, ''),
     setupDir: join(resolveStateRoot(undefined, env), 'setup'),
-    claudeHome: env.CLAUDE_CONFIG_DIR || join(home, '.claude'),
-    codexHome: env.CODEX_HOME || join(home, '.codex'),
+    claudeHome: resolve(env.CLAUDE_CONFIG_DIR || join(home, '.claude')),
+    codexHome: resolve(env.CODEX_HOME || join(home, '.codex')),
   };
 }
 

@@ -189,7 +189,7 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
     writeFileSync(ignore, '# Context Engine Working Contexts are never committed.\n*\n', { flag: 'wx' });
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-    const existing = readWorkingContextFile(join(managed, '.gitignore'));
+    const existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
     if (rules.at(-1) !== '*') throw new Error('.context-engine/.gitignore must end with a blanket * rule; fix it before enabling Context Engine');

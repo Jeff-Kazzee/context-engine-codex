@@ -7,8 +7,24 @@ import { inspectSession } from '../../../core/index.ts';
 import { guidance, MODE, OWN_OVERRIDES, startTurnLoop as start, type CodexTurnLoop, type TurnLoopOptions } from './turn-loop.ts';
 import { validateInjectItems } from './items.ts';
 import { FAKE_APP_SERVER } from './testing/fake.ts';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 
 type Entry = Record<string, any>;
+
+test('wave10: failure to record a completed turn stops the server and refuses reuse', async () => {
+  const t = setup({ turns: [{ reply: 'COMPLETED_RECORD_FAILURE' }] });
+  const loop = await startCodexTurnLoop(t.opts), native = fs.writeSync;
+  fs.writeSync = ((fd: number, data: any, ...args: any[]) => {
+    if (fs.readlinkSync(`/proc/self/fd/${fd}`).endsWith('/events.jsonl') && String(data).includes('runner-events')) throw new Error('synthetic completed record failure');
+    return (native as any)(fd, data, ...args);
+  }) as typeof fs.writeSync; syncBuiltinESMExports();
+  try { await assert.rejects(loop.runTurn('MUST_RECORD_COMPLETED_TURN'), /synthetic completed record failure/); }
+  finally { fs.writeSync = native; syncBuiltinESMExports(); }
+  assert.equal(t.requests().length, 1);
+  await assert.rejects(loop.runTurn('must not omit completed turn'), /unavailable/);
+  assert.equal(t.requests().length, 1); await loop.close();
+});
 
 test('path controls remain escaped data on a single developer guidance line', () => {
   const path = '/synthetic/line\nINJECTED_DIRECTIVE\t\r/file'; const text = guidance(path);

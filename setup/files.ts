@@ -1,7 +1,7 @@
 // Setup operates on tracked runner configuration; backups have a separate key-based gate. Descriptor checks keep reads and replacements
 // anchored to the verified directory even if a project changes a path concurrently. Linux /proc
 // is required, like the core's confined file reads.
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, join, parse, resolve, sep } from 'node:path';
@@ -18,6 +18,29 @@ export function checkComponents(path: string): void {
   }
 }
 
+export const SETUP_MAX_FILE_BYTES = 16 * 1024 * 1024;
+/** Create missing setup parents through verified descriptors, without changing existing modes. */
+function createParent(path: string): void {
+  const missing: string[] = [];
+  let current = resolve(path);
+  for (;;) {
+    try { lstatSync(current); break; }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    missing.unshift(basename(current)); current = dirname(current);
+  }
+  let fd = openSync(current, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    for (const name of missing) {
+      if (realpathSync(`/proc/self/fd/${fd}`) !== current) throw new Error('setup directory changed before creation');
+      const anchored = join(`/proc/self/fd/${fd}`, name);
+      try { mkdirSync(anchored, { mode: 0o700 }); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
+      const next = openSync(anchored, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(fd); } catch (e) { closeSync(next); throw e; }
+      closeSync(fd); fd = next; current = join(current, name);
+    }
+    if (realpathSync(`/proc/self/fd/${fd}`) !== current) throw new Error('setup cannot verify created directory');
+  } finally { closeSync(fd); }
+}
 export function safeRead(path: string): Buffer | null {
   checkComponents(path);
   let fd: number;
@@ -26,14 +49,23 @@ export function safeRead(path: string): Buffer | null {
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || realpathSync(`/proc/self/fd/${fd}`) !== resolve(path)) throw new Error(`setup refuses unverified or linked file: ${path}`);
-    return readFileSync(fd);
+    if (st.size > SETUP_MAX_FILE_BYTES) throw new Error('setup file exceeds the 16 MiB read limit');
+    const parts: Buffer[] = [], chunk = Buffer.alloc(65536);
+    let total = 0;
+    for (;;) {
+      const n = readSync(fd, chunk, 0, Math.min(chunk.length, SETUP_MAX_FILE_BYTES + 1 - total), null);
+      if (!n) return Buffer.concat(parts, total);
+      total += n;
+      if (total > SETUP_MAX_FILE_BYTES) throw new Error('setup file exceeds the 16 MiB read limit');
+      parts.push(Buffer.from(chunk.subarray(0, n)));
+    }
   } finally { closeSync(fd); }
 }
 
 export function safeWrite(path: string, data: string | Buffer): void {
   checkComponents(path);
   const parent = dirname(resolve(path));
-  mkdirSync(parent, { recursive: true });
+  createParent(parent);
   checkComponents(path);
   if (existsSync(path)) {
     const st = lstatSync(path);
@@ -45,8 +77,10 @@ export function safeWrite(path: string, data: string | Buffer): void {
     if (!fstatSync(fd).isDirectory() || realpathSync(`/proc/self/fd/${fd}`) !== parent) throw new Error(`setup cannot verify directory: ${parent}`);
     const anchored = `/proc/self/fd/${fd}`;
     tmp = join(anchored, `.context-engine-setup-${randomBytes(8).toString('hex')}.tmp`);
-    writeFileSync(tmp, data, { flag: 'wx', mode: 0o600 });
+    const file = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try { writeFileSync(file, data); fsyncSync(file); } finally { closeSync(file); }
     renameSync(tmp, join(anchored, basename(path)));
+    fsyncSync(fd);
   } finally {
     if (tmp) try { unlinkSync(tmp); } catch {}
     closeSync(fd);
@@ -58,7 +92,7 @@ export function acquireSetupLock(path: string): () => void {
   checkComponents(path);
   const parent = dirname(resolve(path));
   closeSync(openPrivateDirectory(dirname(parent), { create: true })!);
-  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  createParent(parent);
   checkComponents(path);
   const dir = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   let lock: number | undefined;

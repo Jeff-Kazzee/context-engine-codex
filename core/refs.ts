@@ -171,7 +171,8 @@ function checkCommit(projectRoot: string, commit: string): Omit<StaleRef, 'marke
 }
 
 function git(cwd: string, ...args: string[]) {
-  return spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  return spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 1000, maxBuffer: 65536,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0' } });
 }
 
 export function staleText(report: StaleReport): string {

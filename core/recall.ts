@@ -11,6 +11,7 @@ import { appendLog, assertSessionId, layout, readLog, readWorkingContextFile, re
 import type { RunnerEvent } from './session.ts';
 import { approxTokens, formatInt } from './size.ts';
 import { SerializeTimeout } from './lock.ts';
+import { retainRunnerEvent } from './event-safety.ts';
 
 export interface SessionRef {
   projectRoot: string;
@@ -169,7 +170,9 @@ const SKIPPED_NOTE = SKIPPED_NOTE_TEXT;
  */
 function account(log: string, entry: Record<string, unknown>): { accounting?: 'skipped'; note?: string } {
   try {
-    appendLog(log, entry, { timeoutMs: 0 });
+    // Queries can contain credentials too; omit their payload from accounting on refusal.
+    const inspected = retainRunnerEvent({ role: 'user', text: '', item: entry });
+    appendLog(log, inspected.retention ? { type: entry.type, retention: inspected.retention } : entry, { timeoutMs: 0 });
     return {};
   } catch (e) {
     if (e instanceof SerializeTimeout) return { accounting: 'skipped', note: SKIPPED_NOTE };
