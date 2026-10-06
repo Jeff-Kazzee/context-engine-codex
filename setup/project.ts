@@ -20,8 +20,9 @@ import { dirname, join } from 'node:path';
 import { experimentOn, findRecord, killSwitchOn, participation, setParticipation } from '../core/index.ts';
 import { projectKey } from '../core/store.ts';
 import { projectCodexToml } from '../adapters/codex/guidance.ts';
-import { describe, installedLedger } from './install.ts';
-import { assess, completeLedger, readLedger, revert, takeSnapshot, type Rule } from './ledger.ts';
+import { describe, installedLedger, SetupError } from './install.ts';
+import { assess, completeLedger, readLedger, revert, rollbackSnapshot, takeSnapshot, type Rule } from './ledger.ts';
+import { safeRead, safeWrite } from './files.ts';
 import { appendBlock, blockRule, prependBlock, type Markers } from './rules.ts';
 import type { SetupContext } from './runners.ts';
 
@@ -43,7 +44,10 @@ export const MD_MARKERS: Markers = {
 const codexConfig = (root: string) => join(root, '.codex', 'config.toml');
 const agentsMd = (root: string) => join(root, 'AGENTS.md');
 const projectsDir = (ctx: SetupContext) => join(ctx.setupDir, 'projects');
-const pointer = (ctx: SetupContext, root: string) => join(projectsDir(ctx), `${projectKey(root)}.json`);
+const pointer = (ctx: SetupContext, root: string) => {
+  const key = projectKey(root);
+  return join(projectsDir(ctx), `${key.length <= 250 ? key : `${key.slice(0, 128)}-${key.slice(-64)}`}.json`);
+};
 
 /** Both marked blocks of the project's .codex/config.toml. */
 function codexConfigRule(): Rule {
@@ -60,7 +64,7 @@ function projectRules(root: string): Record<string, Rule> {
 function topLevelDeveloperInstructions(text: string): boolean {
   for (const line of text.split('\n')) {
     if (/^\s*\[/.test(line)) return false;
-    if (/^\s*developer_instructions\s*=/.test(line)) return true;
+    if (/^\s*(?:developer_instructions|"developer_instructions"|'developer_instructions')\s*=/.test(line)) return true;
   }
   return false;
 }
@@ -68,14 +72,17 @@ function topLevelDeveloperInstructions(text: string): boolean {
 /** Whether Context Engine's Codex settings are in the project's .codex/config.toml. */
 export function codexProjectSettings(root: string): boolean {
   const p = codexConfig(root);
-  return existsSync(p) && readFileSync(p, 'utf8').includes(TOML_MARKERS.begin);
+  try {
+    const text = safeRead(p)?.toString('utf8') ?? '';
+    return [TOML_MARKERS.begin, TOML_MARKERS.end, TOML_TOP_MARKERS.begin, TOML_TOP_MARKERS.end].every(m => text.includes(m));
+  } catch { return false; }
 }
 
 /** Whether the user's Codex config trusts `root` or one of its parents (Codex ignores .codex/config.toml otherwise). */
 export function codexTrusts(ctx: SetupContext, root: string): boolean {
   const p = join(ctx.codexHome, 'config.toml');
   if (!existsSync(p)) return false;
-  const text = readFileSync(p, 'utf8');
+  const text = safeRead(p)?.toString('utf8') ?? '';
   for (let dir = root; ; dir = dirname(dir)) {
     const at = text.indexOf(`[projects.${JSON.stringify(dir)}]`);
     if (at >= 0 && /^\s*trust_level\s*=\s*"trusted"/m.test(text.slice(at).split(/\n\s*\[/)[0]!)) return true;
@@ -84,18 +91,21 @@ export function codexTrusts(ctx: SetupContext, root: string): boolean {
 }
 
 function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
-  if (existsSync(pointer(ctx, root))) return ['Codex: project settings already in place'];
   const config = codexConfig(root);
-  const existing = existsSync(config) ? readFileSync(config, 'utf8') : null;
-  if (existing !== null && /token_budget/.test(existing)) {
-    return [`Codex: ${config} already configures token_budget, so it was left alone; Context Engine's Codex guidance is NOT in effect here`];
+  const existing = safeRead(config)?.toString('utf8') ?? null;
+  const old = existsSync(pointer(ctx, root)) ? readLedger(JSON.parse(readFileSync(pointer(ctx, root), 'utf8')).dir) : null;
+  if (old && codexProjectSettings(root)) return ['Codex: project settings already in place'];
+  const unmanaged = existing === null ? null : codexConfigRule().strip(existing, old?.files[0]?.before ? readFileSync(old.files[0].before, 'utf8') : null);
+  // Check actual table/key declarations, not comments or values containing the name.
+  if (unmanaged !== null && /^\s*(?:\[\s*(?:features|"features"|'features')\s*\.\s*(?:token_budget|"token_budget"|'token_budget')\s*\]|(?:(?:features|"features"|'features')\s*\.\s*)?(?:token_budget|"token_budget"|'token_budget')\s*=)/m.test(unmanaged)) {
+    throw new SetupError(`Codex: ${config} already configures token_budget; Context Engine guidance was not activated`);
   }
-  if (existing !== null && topLevelDeveloperInstructions(existing)) {
-    return [`Codex: ${config} already sets developer_instructions, so it was left alone; Context Engine's Codex guidance is NOT in effect here`];
+  if (unmanaged !== null && topLevelDeveloperInstructions(unmanaged)) {
+    throw new SetupError(`Codex: ${config} already sets developer_instructions; Context Engine guidance was not activated`);
   }
   const snap = takeSnapshot({
     backupRoot: join(ctx.setupDir, 'backups'),
-    kind: `project-${projectKey(root)}`,
+    kind: `project-${projectKey(root).slice(-64)}`,
     files: [config],
     watch: [join(root, '.codex')],
     namespaced: [],
@@ -103,11 +113,21 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
   });
   const experiments = experimentOn('stale-refs') ? ['stale-refs'] : [];
   const toml = projectCodexToml({ experiments });
-  mkdirSync(dirname(config), { recursive: true });
-  writeFileSync(config, appendBlock(prependBlock(existing, toml.top, TOML_TOP_MARKERS), toml.table, TOML_MARKERS));
-  const ledger = completeLedger(snap);
-  mkdirSync(projectsDir(ctx), { recursive: true, mode: 0o700 });
-  writeFileSync(pointer(ctx, root), `${JSON.stringify({ dir: ledger.dir, projectRoot: root })}\n`, { mode: 0o600 });
+  let ledger;
+  try {
+    safeWrite(config, appendBlock(prependBlock(unmanaged, toml.top, TOML_TOP_MARKERS), toml.table, TOML_MARKERS));
+    ledger = completeLedger(snap);
+    // Repair updates the post-edit snapshot while keeping the original rollback bytes.
+    if (old) {
+      ledger.files = ledger.files.map(f => ({ ...f, before: old.files.find(o => o.path === f.path)?.before ?? null }));
+      writeFileSync(join(ledger.dir, 'ledger.json'), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+    }
+    mkdirSync(projectsDir(ctx), { recursive: true, mode: 0o700 });
+    safeWrite(pointer(ctx, root), `${JSON.stringify({ dir: ledger.dir, projectRoot: root })}\n`);
+  } catch (e) {
+    rollbackSnapshot(snap, projectRules(root));
+    throw new SetupError(`Codex project setup failed and was rolled back: ${e instanceof Error ? e.message : String(e)}`);
+  }
   const lines = [
     `Codex: wrote developer_instructions and [features.token_budget] to ${config} (byte backup: ${join(ledger.dir, 'before')}); nothing else, so other projects are unchanged`,
   ];
@@ -134,12 +154,18 @@ export function revertAllCodexProjects(ctx: SetupContext): string[] {
 }
 
 export function enableProject(ctx: SetupContext, projectRoot: string): string[] {
+  let setupLines: string[];
+  try { setupLines = installedLedger(ctx, 'codex') ? writeCodexProjectFiles(ctx, projectRoot) : ['Codex: adapter not installed (`context-engine-codex install --codex`).']; }
+  catch (e) {
+    // An inherited/previous opt-in must not leave hooks active after setup fails.
+    setParticipation({ projectRoot, state: 'off' });
+    throw e;
+  }
   setParticipation({ projectRoot, state: 'on' });
   const rec = findRecord({ projectRoot })!;
   const lines = [`Context Engine enabled for ${rec.project} and its subdirectories (new sessions).`];
   if (killSwitchOn(ctx.env)) lines.push('Note: the kill switch CONTEXT_ENGINE=off is set in this shell, so the adapters stay off where it is set.');
-  if (installedLedger(ctx, 'codex')) lines.push(...writeCodexProjectFiles(ctx, rec.project));
-  else lines.push('Codex: adapter not installed (`context-engine install --codex`).');
+  lines.push(...setupLines);
   return lines;
 }
 

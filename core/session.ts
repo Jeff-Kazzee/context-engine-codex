@@ -8,7 +8,7 @@
 // - The Working Context is a materialized view of HEAD. A runner append commits first and then
 //   rewrites the file; HEAD.materialized says whether that rewrite finished.
 // - record() always syncs first, so a runner append never overwrites an uncommitted model edit.
-import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { crashPoint } from './faults.ts';
 import { acquireLock, holderFor, isAlive, readLock, releaseLock, serialized, type LockHolder } from './lock.ts';
@@ -177,12 +177,17 @@ export function openSession(opts: OpenOptions): OpenResult {
   const me = holderFor(opts.ownerPid ?? process.pid, opts.runner, opts.hardLimit);
   const got = acquireLock(l.lock, me);
   if (got.status === 'refused') return { status: 'refused', holder: got.holder };
-  // Cut a torn Event Log tail before anything else is appended to it.
-  const tornBytes = truncateTornTail(l.events);
-  if (got.takeoverFrom) appendLog(l.events, { type: 'lock-takeover', from: got.takeoverFrom, to: me, reason: 'previous holder is dead' });
-  const core = new Core(l, opts.hardLimit, me, experimentOn('stale-refs', opts.experiments) ? opts.projectRoot : null, opts.budgetTokens ?? null);
-  core.recover(tornBytes);
-  return { status: 'open', session: core.facade() };
+  try {
+    // Cut a torn Event Log tail before anything else is appended to it.
+    const tornBytes = truncateTornTail(l.events);
+    const core = new Core(l, opts.hardLimit, me, experimentOn('stale-refs', opts.experiments) ? opts.projectRoot : null, opts.budgetTokens ?? null);
+    core.recover(tornBytes);
+    if (got.takeoverFrom) appendLog(l.events, { type: 'lock-takeover', from: got.takeoverFrom, to: me, reason: 'previous holder is dead' });
+    return { status: 'open', session: core.facade() };
+  } catch (e) {
+    if (!got.reused) releaseLock(l.lock, me);
+    throw e;
+  }
 }
 
 /**
@@ -266,7 +271,48 @@ class Core {
 
   private guard<T>(fn: () => T): T {
     if (this.closed) throw new Error('session is closed');
-    return fn();
+    const result = fn();
+    if (!this.closed) this.saveRecoveryCheckpoint();
+    return result;
+  }
+
+  // Cache only fully applied recovery state. It is an optimization, never the
+  // source of truth: changed log identity/size/timestamps, HEAD or budget,
+  // missing/corrupt cache and interrupted publication all take the full rebuild.
+  private checkpointLog(): object | null {
+    try {
+      const st = statSync(this.l.events, { bigint: true });
+      if (!st.isFile() || st.nlink !== 1n) return null;
+      return { dev: String(st.dev), ino: String(st.ino), size: String(st.size), mtime: String(st.mtimeNs), ctime: String(st.ctimeNs) };
+    } catch { return null; }
+  }
+
+  private loadRecoveryCheckpoint(): boolean {
+    try {
+      const raw = readBytes(join(this.l.stateDir, 'recovery.json'));
+      if (!raw || raw.length > 4096) return false;
+      const c = JSON.parse(raw.toString('utf8'));
+      const { checksum, ...payload } = c;
+      if (checksum !== sha(JSON.stringify(payload))) return false;
+      const head = this.head();
+      const log = this.checkpointLog();
+      const m = c.memory;
+      const nonnegative = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+      if (c.version !== 1 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readBytes(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
+      this.lastSeq = c.lastSeq;
+      this.memory = { announced: m.announced, growth: [...m.growth], lastTokens: m.lastTokens, loggedBudget: m.loggedBudget };
+      return true;
+    } catch { return false; }
+  }
+
+  private saveRecoveryCheckpoint(): void {
+    try {
+      const head = this.head();
+      const log = this.checkpointLog();
+      if (!log || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
+      const payload = { version: 1, log, head: sha(readBytes(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
+      atomicWrite(join(this.l.stateDir, 'recovery.json'), JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) }), 'recovery-checkpoint-tmp');
+    } catch { /* A cache failure never changes the session result; next open rebuilds. */ }
   }
 
   // ---- reading ----
@@ -501,6 +547,7 @@ class Core {
 
   close(): void {
     appendLog(this.l.events, { type: 'closed', pid: this.me.pid });
+    this.saveRecoveryCheckpoint();
     releaseLock(this.l.lock, this.me);
     this.closed = true;
   }
@@ -536,8 +583,9 @@ class Core {
       }
     }
 
-    const log = readLog(this.l.events);
-    if (this.budgetTokens !== null) this.memory = budgetMemory(log, this.budgetTokens);
+    const cached = this.loadRecoveryCheckpoint();
+    const log = cached ? [] : readLog(this.l.events);
+    if (!cached && this.budgetTokens !== null) this.memory = budgetMemory(log, this.budgetTokens);
     const logged: Pending[] = [];
     for (const entry of log) {
       if (entry.type !== 'runner-events') continue;
@@ -545,7 +593,7 @@ class Core {
       if (entry.replace && batch[0]) batch[0].replace = entry.replace as Replacement;
       logged.push(...batch);
     }
-    this.lastSeq = logged.reduce((m, e) => Math.max(m, e.seq), 0);
+    if (!cached) this.lastSeq = logged.reduce((m, e) => Math.max(m, e.seq), 0);
 
     const synced = this.sync();
     this.pendingReceipt = synced.receipt;

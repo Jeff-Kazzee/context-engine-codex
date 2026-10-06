@@ -4,7 +4,7 @@
 // on demand by regression/setup/run.ts.
 import { test as nodeTest } from 'node:test';
 const applicable = /^(Codex:|--trust-hooks|enable |a project file|an enable made|uninstall --codex|status: when Codex)/;
-const test: typeof nodeTest = ((name: string, ...args: unknown[]) => applicable.test(name) ? (nodeTest as Function)(name, ...args) : undefined) as typeof nodeTest;
+const test: typeof nodeTest = ((name: string, ...args: unknown[]) => applicable.test(name) ? (nodeTest as Function)(name, ...args) : nodeTest(name, { skip: 'Other runtime: tested in the sibling distribution' }, () => {})) as typeof nodeTest;
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -59,7 +59,7 @@ const HOOK_EVENTS = ['pre_tool_use', 'post_tool_use', 'pre_compact', 'user_promp
 /** What approving the hooks in Codex's /hooks writes to config.toml (measured on codex-cli 0.160.0). */
 function trustAll(w: ReturnType<typeof world>): void {
   const path = join(w.codexHome, 'config.toml');
-  const tables = HOOK_EVENTS.map((e) => `\n[hooks.state."context-engine@context-engine:hooks/hooks.json:${e}:0:0"]\ntrusted_hash = "sha256:${'ab'.repeat(32)}"\n`);
+  const tables = HOOK_EVENTS.map((e) => `\n[hooks.state."context-engine@context-engine:hooks/hooks.json:${e}:0:0"]\ntrusted_hash = "sha256:${e.padEnd(64, '0')}"\n`);
   writeFileSync(path, readFileSync(path, 'utf8') + tables.join(''));
 }
 
@@ -73,7 +73,7 @@ test('Codex: install, trust the hooks, uninstall: CODEX_HOME is byte-identical a
   assert.match(config, /\[plugins\."context-engine@context-engine"\]/);
   assert.ok(config.startsWith(CODEX_CONFIG));
   // The installed hook commands call this checkout's CLI.
-  const hooks = readFileSync(join(w.codexHome, 'plugins', 'cache', 'context-engine', 'context-engine', '0.1.0', 'hooks', 'hooks.json'), 'utf8');
+  const hooks = readFileSync(join(w.codexHome, 'plugins', 'cache', 'context-engine', 'context-engine', '0.1.2', 'hooks', 'hooks.json'), 'utf8');
   assert.match(hooks, /CONTEXT_ENGINE_CLI='[^']*\/core\/cli\.ts' node \\"\$PLUGIN_ROOT\/hooks\/codex-hook\.ts\\"/);
   assert.match(inst.stdout, /\/hooks/, 'tells the user the hooks need trust');
   trustAll(w);
@@ -181,9 +181,10 @@ test('enable leaves a project .codex/config.toml that already sets token_budget 
     mkdirSync(join(w.project, '.codex'));
     writeFileSync(join(w.project, '.codex', 'config.toml'), own);
     const en = w.ce(['enable']);
-    assert.match(en.stdout, /already (configures token_budget|sets developer_instructions), so it was left alone/);
+    assert.equal(en.status, 1);
+    assert.match(en.stderr, /already (configures token_budget|sets developer_instructions)/);
     assert.equal(readFileSync(join(w.project, '.codex', 'config.toml'), 'utf8'), own);
-    assert.match(w.ce(['status']).stdout, /Delivery Mode: inactive here \(.*has no Context Engine settings/);
+    assert.equal(JSON.parse(w.ce(['status', '--json']).stdout).participation.active, false);
   }
 });
 

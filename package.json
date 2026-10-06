@@ -1,6 +1,6 @@
 {
   "name": "context-engine-codex",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Model-controlled, editable working context for coding agents (shared core + CLI).",
   "license": "MIT",
   "author": "Jeff Kazzee",

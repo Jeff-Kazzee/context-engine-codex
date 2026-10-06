@@ -2,7 +2,7 @@
 // config file they touch backed up byte for byte first (ledger.ts).
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { assess, completeLedger, type FileReport, type Ledger, readLedger, revert, takeSnapshot } from './ledger.ts';
+import { assess, completeLedger, type FileReport, type Ledger, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
 import { runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
 
 const pointerPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}.json`);
@@ -20,24 +20,31 @@ export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
   const prior = installedLedger(ctx, spec.id);
   if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine uninstall --${spec.id}\` first`);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
-  spec.prepare?.();
-  for (const cmd of spec.install) {
-    const r = runBinary(spec.bin, cmd, ctx.env);
-    if (!r.ok) {
-      // Roll back to exactly what was there before.
-      const l = completeLedger(snap);
-      revert(l, spec.rules, Object.fromEntries(l.files.map((f) => [f.path, true])));
-      throw new SetupError(`${spec.title}: \`${spec.bin} ${cmd.join(' ')}\` failed, so nothing was installed and every file was put back: ${r.output.slice(0, 500)}`);
+  try {
+    spec.prepare?.();
+    for (const cmd of spec.install) {
+      const r = runBinary(spec.bin, cmd, ctx.env);
+      if (!r.ok) {
+        // The transaction catch restores tracked configuration on any failure.
+        throw new SetupError(`${spec.title}: \`${spec.bin} ${cmd.join(' ')}\` failed: ${r.output.slice(0, 500)}`);
+      }
     }
+    const ledger = completeLedger(snap);
+    mkdirSync(ctx.setupDir, { recursive: true, mode: 0o700 });
+    writeFileSync(pointerPath(ctx, spec.id), `${JSON.stringify({ dir: ledger.dir })}\n`, { mode: 0o600 });
+    const changed = ledger.files.filter((f) => !sameBytes(f.before, f.after)).map((f) => f.path);
+    return [
+      `Changed by \`${spec.bin} plugin\`: ${changed.join(', ') || '(no config file)'}`,
+      `Byte backups taken before the change: ${join(ledger.dir, 'before')}`,
+      `New paths outside Context Engine namespaces retained: ${ledger.retainedPaths?.length ?? 0} (ownership unverified; uninstall will leave them alone)`,
+    ];
+  } catch (e) {
+    let retained: string[];
+    try { retained = rollbackSnapshot(snap, spec.rules); }
+    catch (rollbackError) { throw new AggregateError([e, rollbackError], `${spec.title}: install failed and rollback was incomplete; before backups are preserved at ${join(snap.dir, 'before')}`); }
+    try { unlinkSync(pointerPath(ctx, spec.id)); } catch (cleanupError) { if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanupError; }
+    throw new SetupError(`${e instanceof Error ? e.message : String(e)}; tracked configuration restored; ${retained.length} unowned new paths retained; before backups: ${join(snap.dir, 'before')}`, { cause: e });
   }
-  const ledger = completeLedger(snap);
-  mkdirSync(ctx.setupDir, { recursive: true, mode: 0o700 });
-  writeFileSync(pointerPath(ctx, spec.id), `${JSON.stringify({ dir: ledger.dir })}\n`, { mode: 0o600 });
-  const changed = ledger.files.filter((f) => !sameBytes(f.before, f.after)).map((f) => f.path);
-  return [
-    `Changed by \`${spec.bin} plugin\`: ${changed.join(', ') || '(no config file)'}`,
-    `Byte backups taken before the change: ${join(ledger.dir, 'before')}`,
-  ];
 }
 
 function sameBytes(a: string | null, b: string | null): boolean {
@@ -57,6 +64,7 @@ export function uninstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   lines.push(...describe(revert(ledger, spec.rules, unchanged)));
   unlinkSync(pointerPath(ctx, spec.id));
   lines.push(`Backups kept: ${ledger.dir}`);
+  if (ledger.retainedPaths?.length) lines.push(`Unowned new paths retained: ${ledger.retainedPaths.length}`);
   return lines;
 }
 

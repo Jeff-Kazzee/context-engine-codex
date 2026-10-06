@@ -36,7 +36,7 @@ test('failed installation restores both runner homes and can be retried', () => 
  const w=world(); writeFileSync(join(w.claudeHome,'settings.json'),'{}\n'); writeFileSync(join(w.codexHome,'config.toml'),'# keep\n');
  const a=tree(w.claudeHome),b=tree(w.codexHome);
  const r=w.ce(['install'],{env:{FAKE_CODEX_FAIL: 'plugin add'}});
- assert.equal(r.status,1,r.stdout+r.stderr);assert.match(r.stderr,/failed, so nothing was installed/);
+ assert.equal(r.status,1,r.stdout+r.stderr);assert.match(r.stderr,/tracked configuration restored/);
  assert.deepEqual(tree(w.claudeHome),a);assert.deepEqual(tree(w.codexHome),b);
  assert.equal(w.ce(['install']).status,0);assert.equal(w.ce(['install']).status,1);assert.equal(w.ce(['uninstall']).status,0);
 });

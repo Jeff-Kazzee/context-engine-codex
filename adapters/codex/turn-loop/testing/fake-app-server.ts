@@ -17,6 +17,8 @@ interface TurnScript {
   status?: 'completed' | 'failed' | 'interrupted';
   /** Sends a server -> client request (an approval) during the turn and waits for the answer. */
   serverRequest?: boolean;
+  hang?: boolean;
+  ignoreInterrupt?: boolean;
 }
 
 interface Script {
@@ -44,6 +46,7 @@ const waiting = new Map<string | number, (m: Msg) => void>();
 let threadSeq = 0;
 let turnSeq = 0;
 let itemSeq = 0;
+const active = new Map<string, { threadId: string; ignoreInterrupt: boolean }>();
 
 const textOf = (content: unknown): string =>
   Array.isArray(content) ? content.map((p: any) => (typeof p?.text === 'string' ? p.text : JSON.stringify(p))).join('\n') : JSON.stringify(content);
@@ -73,6 +76,10 @@ async function runTurn(threadId: string, turnId: string, input: any[], s: TurnSc
   send({ method: 'thread/tokenUsage/updated', params: { threadId, turnId, tokenUsage: { total: { inputTokens: 10 }, last: { inputTokens: 10 } } } });
   thread.history.push(prompt, { role: 'assistant', text: reply });
   const status = s.status ?? 'completed';
+  if (s.hang) {
+    active.set(turnId, { threadId, ignoreInterrupt: !!s.ignoreInterrupt });
+    return;
+  }
   send({
     method: 'turn/completed',
     params: { threadId, turn: { id: turnId, items: [], status, error: status === 'failed' ? { message: 'scripted failure' } : null } },
@@ -115,6 +122,15 @@ function handle(m: Msg): void {
     }
     case 'thread/unsubscribe':
       return send({ id: m.id, result: { status: 'unsubscribed' } });
+    case 'turn/interrupt': {
+      send({ id: m.id, result: {} });
+      const turn = active.get(p.turnId);
+      if (turn && !turn.ignoreInterrupt) {
+        active.delete(p.turnId);
+        send({ method: 'turn/completed', params: { threadId: turn.threadId, turn: { id: p.turnId, status: 'interrupted' } } });
+      }
+      return;
+    }
     default:
       if (m.id !== undefined) send({ id: m.id, error: { code: -32601, message: `method not found: ${m.method}` } });
   }

@@ -6,6 +6,18 @@ import { tempDir } from '../../../core/testing.ts';
 import { RpcError, spawnJsonRpc } from './jsonrpc.ts';
 import { FAKE_APP_SERVER } from './testing/fake.ts';
 
+test('failed spawn rejects initialize and close settles without an exit event', async () => {
+  const dir = tempDir('missing-codex');
+  const rpc = spawnJsonRpc([join(dir, 'nonexistent-executable')], { cwd: dir });
+  await assert.rejects(rpc.request('initialize'), /could not run/);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([rpc.close(), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('close hung after failed spawn')), 300);
+    })]);
+  } finally { clearTimeout(timer); }
+});
+
 function fake(script: object = {}) {
   const dir = tempDir('fake-codex');
   const logPath = join(dir, 'log.jsonl');

@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { inspectSession, openSession, recall, RECALL_GUIDANCE, RECALL_MAX_BYTES, show, SHOW_MAX_BYTES, type Session } from './index.ts';
-import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fixture, tempDir } from './testing.ts';
 
@@ -204,7 +206,12 @@ test('when the Event Log cannot be appended to (e.g. a sandboxed shell), recall 
   s.close();
   const log = join(inspectSession({ ...f, sessionId: 'S1' }).stateDir, 'events.jsonl');
   const before = readFileSync(log, 'utf8');
-  chmodSync(log, 0o400);
+  const nativeOpen = fs.openSync;
+  fs.openSync = ((path: any, flags: any, ...args: any[]) => {
+    if (path === log && flags === 'a') throw Object.assign(new Error('synthetic append denied'), { code: 'EACCES' });
+    return (nativeOpen as any)(path, flags, ...args);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
   try {
     const r = recall({ ...f, sessionId: 'S1', query: 'parseDate' });
     assert.equal(r.hits.length, 1);
@@ -215,7 +222,8 @@ test('when the Event Log cannot be appended to (e.g. a sandboxed shell), recall 
     assert.match(sh.text, /Invalid Date/);
     assert.equal(sh.accounting, 'skipped');
   } finally {
-    chmodSync(log, 0o600);
+    fs.openSync = nativeOpen;
+    syncBuiltinESMExports();
   }
   assert.equal(readFileSync(log, 'utf8'), before, 'nothing appended');
   assert.equal(recall({ ...f, sessionId: 'S1', query: 'parseDate' }).accounting, undefined, 'writable again: counted, no flag');

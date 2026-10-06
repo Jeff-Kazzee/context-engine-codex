@@ -15,6 +15,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  readSync,
   realpathSync,
   renameSync,
   statSync,
@@ -44,11 +45,14 @@ export function resolveStateRoot(explicit?: string): string {
   return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.local', 'state'), 'context-engine');
 }
 
-/** `<basename>-<8 hex of sha256(realpath)>`: readable, and distinct for same-named projects. */
+/** `<basename>-<sha256(realpath)>`: readable, with collision-resistant project isolation. */
 export function projectKey(projectRoot: string): string {
   const real = realpathSync(projectRoot);
-  const name = basename(real).replace(/[^\w.-]/g, '_') || 'root';
-  return `${name}-${sha(real).slice(0, 8)}`;
+  // Preserve every previously valid state-directory key (255-byte component).
+  // Only longer, previously unusable names need a shorter readable prefix.
+  const raw = basename(real).replace(/[^\w.-]/g, '_') || 'root';
+  const name = raw.length <= 190 ? raw : raw.slice(0, 128);
+  return `${name}-${sha(real)}`;
 }
 
 /** The workspace directory that holds every session's Working Context (self-gitignored). */
@@ -103,7 +107,16 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
   assertWorkingContextDir(l.workingContext);
   // Self-ignoring directory: keeps Working Contexts out of git without editing the project's .gitignore.
   const ignore = join(dirname(dirname(l.workingContext)), '.gitignore');
-  if (!existsSync(ignore)) writeFileSync(ignore, '# Context Engine Working Contexts are never committed.\n*\n');
+  try {
+    // O_EXCL does not follow even a dangling symlink at this name.
+    writeFileSync(ignore, '# Context Engine Working Contexts are never committed.\n*\n', { flag: 'wx' });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    const existing = readWorkingContextFile(ignore);
+    if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
+    const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
+    if (rules.at(-1) !== '*') throw new Error('.context-engine/.gitignore must end with a blanket * rule; fix it before enabling Context Engine');
+  }
 }
 
 const FRAME_KEY = /^[0-9a-f]{32}$/;
@@ -321,7 +334,22 @@ function writeTemp(path: string, data: string, point: CrashPoint, mode: number):
 }
 
 export function atomicWrite(path: string, data: string, point: CrashPoint, mode = 0o600): void {
-  renameSync(writeTemp(path, data, point, mode), path);
+  if (point !== 'wc-tmp') return renameSync(writeTemp(path, data, point, mode), path);
+  // The editable workspace is not private state. Anchor both names to one
+  // verified open directory, so a later parent swap cannot redirect a write.
+  assertWorkingContextDir(path);
+  const parent = dirname(path);
+  const fd = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  let tmp: string | undefined;
+  try {
+    if (!fstatSync(fd).isDirectory() || openedPath(fd) !== parent) throw new Error('Working Context parent could not be verified; refusing to write');
+    const target = join(fdLinkPath(fd), basename(path));
+    tmp = writeTemp(target, data, point, mode);
+    renameSync(tmp, target);
+  } finally {
+    if (tmp) try { unlinkSync(tmp); } catch {}
+    closeSync(fd);
+  }
 }
 
 export function readBytes(path: string): Buffer | undefined {
@@ -370,11 +398,28 @@ export function readLog(path: string): Array<Record<string, unknown>> {
 
 /** Cuts a torn (unterminated) final line off the Event Log. Returns the bytes removed. */
 export function truncateTornTail(path: string): number {
-  const raw = readBytes(path);
-  if (!raw || raw.length === 0 || raw[raw.length - 1] === 0x0a) return 0;
-  const keep = raw.lastIndexOf(0x0a) + 1;
+  let fd: number;
+  try { fd = openSync(path, 'r'); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw e; }
+  let size: number, keep = 0;
+  try {
+    size = fstatSync(fd).size;
+    if (!size) return 0;
+    const tail = Buffer.alloc(1);
+    readSync(fd, tail, 0, 1, size - 1);
+    if (tail[0] === 0x0a) return 0;
+    // Scan only the unterminated suffix, not every historical payload.
+    const block = Buffer.alloc(4096);
+    for (let end = size; end > 0;) {
+      const start = Math.max(0, end - block.length), length = end - start;
+      readSync(fd, block, 0, length, start);
+      const at = block.subarray(0, length).lastIndexOf(0x0a);
+      if (at >= 0) { keep = start + at + 1; break; }
+      end = start;
+    }
+  } finally { closeSync(fd); }
   truncateSync(path, keep);
-  return raw.length - keep;
+  return size! - keep;
 }
 
 /**
@@ -399,4 +444,3 @@ export function removeTemps(privateDirs: string[], sharedDirs: string[]): string
   }
   return removed;
 }
-

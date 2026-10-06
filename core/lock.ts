@@ -62,7 +62,7 @@ export function readLock(path: string): LockHolder | null | 'unreadable' {
 }
 
 export type Acquired =
-  | { status: 'acquired'; takeoverFrom: LockHolder | 'unreadable' | null }
+  | { status: 'acquired'; takeoverFrom: LockHolder | 'unreadable' | null; reused?: boolean }
   | { status: 'refused'; holder: LockHolder };
 
 /**
@@ -84,7 +84,7 @@ export function acquireLock(path: string, me: LockHolder): Acquired {
     if (current !== 'unreadable') {
       if (sameProcess(current, me)) {
         atomicWrite(path, JSON.stringify({ ...me, acquiredAt: current.acquiredAt }), 'lock-tmp');
-        return { status: 'acquired', takeoverFrom: null };
+        return { status: 'acquired', takeoverFrom: null, reused: true };
       }
       if (isAlive(current)) return { status: 'refused', holder: current };
     }

@@ -38,6 +38,23 @@ function hook(f: Fixture, payload: Record<string, unknown>, extraEnv: Record<str
 const wcPath = (f: Fixture) => join(f.projectRoot, '.context-engine', SID, 'context.md');
 const wc = (f: Fixture) => readFileSync(wcPath(f), 'utf8');
 
+test('ordinary tool paths resembling the managed directory remain in Working Context', () => {
+  const f = enabledFixture();
+  const r = hook(f, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: '.context-engineering-notes' }, tool_response: 'NORMAL_TOOL_SENTINEL' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(wc(f).includes('NORMAL_TOOL_SENTINEL'));
+});
+test('shell search mentions of managed paths retain ordinary tool results', () => {
+  const f = enabledFixture();
+  const r = hook(f, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: "rg '.context-engine/' README.md" }, tool_response: 'SEARCH_SENTINEL' });
+  assert.equal(r.status, 0, r.stderr); assert.ok(wc(f).includes('SEARCH_SENTINEL'));
+});
+test('compound core-read commands retain their additional tool output', () => {
+  const f = enabledFixture();
+  const r = hook(f, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'context-engine read && printf REQUIRED_SENTINEL' }, tool_response: 'REQUIRED_SENTINEL' });
+  assert.equal(r.status, 0, r.stderr); assert.ok(wc(f).includes('REQUIRED_SENTINEL'));
+});
+
 /** Shared budget 26,000 tokens: minus the 24,000-token Pinned Prefix reserve, halved: 1,000 tokens. */
 const SMALL = { CONTEXT_ENGINE_BUDGET_TOKENS: '26000' };
 const out = (tokens: number) => 'x'.repeat(tokens * 4);

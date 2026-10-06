@@ -13,6 +13,20 @@ interface HookInfo {
   trustStatus: string;
 }
 
+/** Read current hook trust from the runner. Never edits configuration. */
+export async function currentCodexTrust(ctx: SetupContext, spec: RunnerSpec): Promise<number> {
+  const bin = /\.[cm]?[jt]s$/.test(spec.bin) ? [process.execPath, spec.bin] : [spec.bin];
+  const rpc = spawnJsonRpc([...bin, 'app-server', '--listen', 'stdio://'], { cwd: ctx.codexHome, env: ctx.env, timeoutMs: 10_000 });
+  try {
+    await rpc.request('initialize', { clientInfo: { name: 'context-engine-status', version: '0.1.0' }, capabilities: { experimentalApi: false } });
+    rpc.notify('initialized');
+    const r = await rpc.request<{ data: Array<{ hooks: HookInfo[] }> }>('hooks/list', { cwds: [ctx.codexHome] });
+    const ours = (r.data[0]?.hooks ?? []).filter(h => h.pluginId === CODEX_PLUGIN_ID);
+    if (ours.length !== CODEX_HOOK_COUNT || new Set(ours.map(h => h.key)).size !== CODEX_HOOK_COUNT) return 0;
+    return ours.filter(h => h.trustStatus === 'trusted' && typeof h.currentHash === 'string' && h.currentHash.length > 0).length;
+  } catch { return 0; } finally { await rpc.close(); }
+}
+
 export async function trustCodexHooks(ctx: SetupContext, spec: RunnerSpec): Promise<string[]> {
   const bin = /\.[cm]?[jt]s$/.test(spec.bin) ? [process.execPath, spec.bin] : [spec.bin];
   const rpc = spawnJsonRpc([...bin, 'app-server', '--listen', 'stdio://'], { cwd: ctx.codexHome, env: ctx.env, timeoutMs: 60_000 });

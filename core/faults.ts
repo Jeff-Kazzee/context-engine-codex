@@ -13,6 +13,7 @@ export type CrashPoint =
   | 'before-wc' // HEAD moved, Working Context not yet rewritten
   | 'wc-tmp' // Working Context temp file written, not renamed
   | 'lock-tmp' // lock temp file written, not renamed
+  | 'recovery-checkpoint-tmp' // optional recovery cache publication
   | 'frame-key-tmp'; // frame-key temp file written, not published
 
 export class InjectedCrash extends Error {}

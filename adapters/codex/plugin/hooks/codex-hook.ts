@@ -174,8 +174,19 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
 
 /** A call that reads or edits the Working Context (or files beside it), or reads it back with `context-engine read`. */
 function touchesWorkingContext(input: HookInput): boolean {
-  const call = JSON.stringify(input.tool_input ?? null);
-  return call.includes(lib.WORKING_CONTEXT_DIR) || /\bcontext-engine\s+read\b/.test(call);
+  const data = input.tool_input as Record<string, unknown> | undefined;
+  if (!data || typeof data !== 'object') return false;
+  const managedPath = (path: string) => path.replaceAll('\\', '/').split('/').includes(lib.WORKING_CONTEXT_DIR);
+  for (const key of ['file_path', 'path', 'filename']) {
+    if (typeof data[key] === 'string' && managedPath(data[key] as string)) return true;
+  }
+  // Recognize only simple, unambiguous reads or truncation of a managed path.
+  // Arbitrary shell text may mention a path as search data; retain its output.
+  const command = typeof data.command === 'string' ? data.command : '';
+  const read = /^\s*(?:cat|head|tail)\s+(['"]?)([^\s'";|&<>]+)\1\s*$/.exec(command);
+  const truncate = /^\s*:\s*>\s*(['"]?)([^\s'";|&<>]+)\1\s*$/.exec(command);
+  const coreRead = /^[ \t]*context-engine(?:-codex)?[ \t]+read(?:[ \t]+(?:[A-Za-z0-9_.:/=-]+|"[A-Za-z0-9_.:/=-]+"|'[A-Za-z0-9_.:/=-]+'|"\$CODEX_THREAD_ID"))*[ \t]*$/.test(command);
+  return (!!read && managedPath(read[2]!)) || (!!truncate && managedPath(truncate[2]!)) || coreRead;
 }
 
 function emit(output: Record<string, unknown>): void {

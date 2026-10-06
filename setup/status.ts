@@ -13,6 +13,8 @@ import { CODEX_TOKEN_LIMIT_RESET, KILL_SWITCH_ENV, killSwitchOn, participation }
 import { GUIDANCE_PROBE, RESET_MODE } from '../adapters/codex/guidance.ts';
 import { MODE as TURN_LOOP_MODE } from '../adapters/codex/turn-loop/turn-loop.ts';
 import { installedLedger } from './install.ts';
+import { safeRead } from './files.ts';
+import { currentCodexTrust } from './codex-trust.ts';
 import { codexProjectSettings, codexTrusts } from './project.ts';
 import { CODEX_HOOK_COUNT, CODEX_PLUGIN_ID, codexSpec, runBinary, type SetupContext } from './runners.ts';
 
@@ -35,7 +37,7 @@ function codexTrustEntries(ctx: SetupContext): number {
 function codexPluginEnabled(ctx: SetupContext): boolean {
   const p = join(ctx.codexHome, 'config.toml');
   if (!existsSync(p)) return false;
-  const text = readFileSync(p, 'utf8');
+  const text = safeRead(p)?.toString('utf8') ?? '';
   const at = text.indexOf(`[plugins.${JSON.stringify(CODEX_PLUGIN_ID)}]`);
   return at >= 0 && /^\s*enabled\s*=\s*true/m.test(text.slice(at).split(/\n\s*\[/)[0]!);
 }
@@ -63,13 +65,13 @@ export function probeCodexGuidance(ctx: SetupContext, root: string): { seen: boo
 /** Where `context-engine` resolves on PATH, or null. */
 function onPath(env: NodeJS.ProcessEnv): string | null {
   for (const dir of (env.PATH ?? '').split(delimiter)) {
-    const p = join(dir, 'context-engine');
+    const p = join(dir, 'context-engine-codex');
     if (dir && existsSync(p)) return p;
   }
   return null;
 }
 
-export function statusText(ctx: SetupContext, projectRoot: string): { lines: string[]; json: Record<string, unknown> } {
+export async function statusText(ctx: SetupContext, projectRoot: string): Promise<{ lines: string[]; json: Record<string, unknown> }> {
   const p = participation({ projectRoot, env: ctx.env });
   const experiments = (ctx.env.CONTEXT_ENGINE_EXPERIMENTS ?? '')
     .split(',')
@@ -91,7 +93,7 @@ export function statusText(ctx: SetupContext, projectRoot: string): { lines: str
   const settingsRoot = p.project ?? projectRoot;
   const hasSettings = codexProjectSettings(settingsRoot);
   const trusted = codexTrusts(ctx, settingsRoot);
-  const trust = codexTrustEntries(ctx);
+  const trust = codex ? await currentCodexTrust(ctx, codexSpec(ctx)) : 0;
   const pluginOn = codex ? codexPluginEnabled(ctx) : false;
   lines.push(`Codex: ${codex ? `installed ${codex.at} (${ctx.codexHome})` : 'not installed'}`);
   let codexInactive: string | undefined;
@@ -109,7 +111,7 @@ export function statusText(ctx: SetupContext, projectRoot: string): { lines: str
     lines.push(codexInactive ? `  Delivery Mode: inactive here (${codexInactive})` : `  Delivery Mode: ${CODEX_LABEL}, ${CODEX_FLAG_NOTE}`);
     lines.push(codexInactive ? `  Per-user-turn path: \`context-engine-codex-turns\` (${TURN_LOOP_MODE}); a separate headless command, not started for you` : `  active here (${probe!.detail})`);
     if (!codexInactive) lines.push(`  ${CODEX_TOKEN_LIMIT_LINE}`);
-    lines.push(`  Hooks: ${trust}/${CODEX_HOOK_COUNT} trust entries in config.toml`);
+    lines.push(`  Hooks: ${trust}/${CODEX_HOOK_COUNT} trust entries verified against current hooks/list hashes`);
   }
   lines.push(`Headless Codex turn loop (context-engine-codex-turns): Delivery Mode: ${TURN_LOOP_MODE}`);
   return {

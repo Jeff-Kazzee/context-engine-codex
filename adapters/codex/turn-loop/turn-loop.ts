@@ -157,6 +157,10 @@ class TurnLoop {
   private turns = 0;
   private pendingReceipts: TurnLoopReceipt[] = [];
   private closed = false;
+  private unavailable = false;
+  private busy = false;
+  private active: Promise<TurnResult> | undefined;
+  private closing: Promise<void> | undefined;
   private readonly opts: TurnLoopOptions;
   private readonly hardLimit: number;
   private readonly session: Session;
@@ -193,6 +197,15 @@ class TurnLoop {
 
   async runTurn(prompt: string): Promise<TurnResult> {
     if (this.closed) throw new Error('turn loop is closed');
+    if (this.unavailable) throw new Error('turn loop is unavailable after an uncertain server failure; start a new loop');
+    if (this.busy) throw new Error('a turn is already running');
+    this.busy = true;
+    this.active = this.runOneTurn(prompt);
+    try { return await this.active; }
+    finally { this.busy = false; this.active = undefined; }
+  }
+
+  private async runOneTurn(prompt: string): Promise<TurnResult> {
     const turn = ++this.turns;
     const synced = this.session.sync();
     const receipts = [...this.pendingReceipts, ...(synced.receipt ? [synced.receipt] : [])];
@@ -293,7 +306,7 @@ class TurnLoop {
     };
     const unsubscribe = this.rpc.onNotification(onNote);
     try {
-      const started = await this.rpc.request<{ turn: { id: string } }>('turn/start', { threadId, input, ...(this.opts.effort ? { effort: this.opts.effort } : {}) });
+      const started = await this.rpc.request<{ turn: { id: string } }>('turn/start', { threadId, input, ...(this.opts.effort ? { effort: this.opts.effort } : {}) }, { timeoutMs: this.opts.turnTimeoutMs ?? 30 * 60_000 });
       turnId = started.turn.id;
       for (const n of early.splice(0)) onNote(n);
       const ms = this.opts.turnTimeoutMs ?? 30 * 60_000;
@@ -301,19 +314,46 @@ class TurnLoop {
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`turn ${turnId} did not complete within ${ms} ms`)), ms);
       });
-      const done = await Promise.race([completed, timeout]).finally(() => clearTimeout(timer));
+      const done = await Promise.race([completed, timeout, this.rpc.exited.then(error => { throw error; })]).finally(() => clearTimeout(timer));
       const t = done.params.turn;
       return { turnId, status: t.status as TurnResult['status'], items, usage, error: t.error ?? null };
+    } catch (e) {
+      // A start response may be lost after the server began work. Recover any known id and
+      // partial notifications, but never assume a request rejection means no turn exists.
+      if (turnId === null) {
+        turnId = early.map(n => n.params?.turnId ?? n.params?.turn?.id).find(id => typeof id === 'string') ?? null;
+        if (turnId !== null) for (const n of early.splice(0)) onNote(n);
+      }
+      if (turnId !== null) {
+        try {
+          await this.rpc.request('turn/interrupt', { threadId, turnId }, { timeoutMs: 1000 });
+          let timer: NodeJS.Timeout | undefined;
+          const done = await Promise.race([completed, new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('interrupted turn did not settle')), 1000);
+          })]).finally(() => clearTimeout(timer));
+          return { turnId, status: done.params.turn.status as TurnResult['status'], items, usage, error: errorText(e) };
+        } catch { /* Uncertain activity: stop the owned process before recording or reusing state. */ }
+      }
+      this.unavailable = true;
+      await this.rpc.close();
+      return { turnId, status: 'failed' as const, items, usage, error: errorText(e) };
     } finally {
       unsubscribe();
     }
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
     this.closed = true;
-    await this.rpc.close();
-    this.session.close();
+    const active = this.active;
+    this.closing = (async () => {
+      try {
+        await this.rpc.close();
+        // Recording belongs to the in-flight turn; keep its lock until it settles.
+        await active?.then(() => {}, () => {});
+      } finally { this.session.close(); }
+    })();
+    return this.closing;
   }
 }
 

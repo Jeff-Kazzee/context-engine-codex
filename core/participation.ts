@@ -39,7 +39,12 @@ export interface ParticipationRef {
   stateDir?: string;
 }
 
-const recordPath = (stateRoot: string, dir: string) => join(stateRoot, 'participation', `${projectKey(dir)}.json`);
+const recordPath = (stateRoot: string, dir: string) => {
+  const key = projectKey(dir);
+  // Existing .json names up to 255 bytes stay unchanged. Larger records never
+  // fit before; keep the full digest while shortening their readable prefix.
+  return join(stateRoot, 'participation', `${key.length <= 250 ? key : `${key.slice(0, 128)}-${key.slice(-64)}`}.json`);
+};
 
 /** The nearest participation record at or above `projectRoot`. */
 export function findRecord(ref: ParticipationRef): { project: string; state: 'on' | 'off'; at?: string } | null {
@@ -49,7 +54,7 @@ export function findRecord(ref: ParticipationRef): { project: string; state: 'on
     if (bytes) {
       try {
         const rec = JSON.parse(bytes.toString('utf8'));
-        if (rec.state === 'on' || rec.state === 'off') return { project: dir, state: rec.state, at: rec.at };
+        if (rec.projectRoot === dir && (rec.state === 'on' || rec.state === 'off')) return { project: dir, state: rec.state, at: rec.at };
       } catch {
         // A corrupt record counts as no record.
       }
@@ -75,7 +80,7 @@ export function participation(ref: ParticipationRef & { env?: NodeJS.ProcessEnv 
 export function setParticipation(ref: ParticipationRef & { state: 'on' | 'off' }): void {
   const path = recordPath(resolveStateRoot(ref.stateDir), realpathSync(ref.projectRoot));
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = `${path}.tmp`;
+  const tmp = join(dirname(path), `.participation-${process.pid}.tmp`);
   writeFileSync(tmp, `${JSON.stringify({ projectRoot: realpathSync(ref.projectRoot), state: ref.state, at: new Date().toISOString() })}\n`, { mode: 0o600 });
   renameSync(tmp, path);
 }

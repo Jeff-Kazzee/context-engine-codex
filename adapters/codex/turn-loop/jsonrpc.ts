@@ -26,6 +26,8 @@ export interface Notification {
 
 export interface JsonRpcConnection {
   readonly pid: number | undefined;
+  /** Resolves when the owned process fails or exits; never rejects unattended. */
+  readonly exited: Promise<Error>;
   request<T = unknown>(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<T>;
   notify(method: string, params?: unknown): void;
   /** Subscribes to notifications (and refused server requests, as `{method, params}`). Returns an unsubscribe function. */
@@ -53,6 +55,8 @@ export function spawnJsonRpc(command: string[], opts: SpawnOptions): JsonRpcConn
   const listeners = new Set<(n: Notification) => void>();
   let nextId = 0;
   let exitError: Error | undefined;
+  let resolveExit!: (error: Error) => void;
+  const exited = new Promise<Error>(resolve => { resolveExit = resolve; });
 
   const write = (msg: object) => {
     if (exitError || !child.stdin?.writable) return;
@@ -63,6 +67,7 @@ export function spawnJsonRpc(command: string[], opts: SpawnOptions): JsonRpcConn
   };
   const failAll = (e: Error) => {
     exitError ??= e;
+    resolveExit(exitError);
     for (const [id, p] of pending) {
       clearTimeout(p.timer);
       p.reject(exitError);
@@ -99,6 +104,7 @@ export function spawnJsonRpc(command: string[], opts: SpawnOptions): JsonRpcConn
 
   return {
     pid: child.pid,
+    exited,
     request<T>(method: string, params?: unknown, ro?: { timeoutMs?: number }): Promise<T> {
       if (exitError) return Promise.reject(exitError);
       const id = ++nextId;
@@ -122,7 +128,7 @@ export function spawnJsonRpc(command: string[], opts: SpawnOptions): JsonRpcConn
       return () => listeners.delete(listener);
     },
     async close() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
+      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise<void>((r) => child.once('exit', () => r()));
       child.stdin?.end();
       const timer = setTimeout(() => child.kill('SIGTERM'), 2000);

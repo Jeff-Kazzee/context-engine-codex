@@ -4,6 +4,8 @@ An experimental, opt-in plugin that lets your agent edit its **Working Context**
 
 **Full Replacement at agent-initiated resets (any model step); history grows between resets.** The agent must call `new_context`, then read every part of its Working Context. A token-limit reset or manual `/compact` is **Compaction-only (Codex token-limit reset; Working Context read back by the agent)**.
 
+**Installation/merge hold:** this candidate is in an open PR; main remains bootstrap-only. Local synthetic checks do not verify persistent interactive plugin loading, real TUI delivery or long-session performance. Do not recommend installation or merge until the required host acceptance and Jeff's exact-head approval are complete.
+
 ## Give this prompt to your agent to set it up
 
 Copy the following prompt, replacing the project placeholder before sending it:
@@ -34,6 +36,8 @@ evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
 
 ## 1. Check compatibility before installing
+
+Shared core 0.1.2 uses the full SHA-256 of the canonical project path for private state and participation keys. Legacy 0.1.0 directories and backups are preserved, but are not automatically migrated or merged. Uninstall an old installation using its original checkout/CLI first; retain its backups and session data. After coordinated runner updates, re-enable a fresh disposable project and start a fresh session. Do not mix 0.1.0 with 0.1.2 under a shared `CONTEXT_ENGINE_STATE_DIR`; use a separate, consistently configured state root for a trial. Existing legacy data remains available through the old checkout with its old state root. Valid full-digest keys from 0.1.1 remain unchanged in 0.1.2.
 
 - Linux with `/proc` mounted, Node **24 or newer**. Project reads are checked using open file descriptors under `/proc/self/fd`; unavailable support refuses the read. Windows, macOS and constrained T3 runtimes are not validated targets. Do not relax those checks or sandbox permissions to make installation work.
 - Inherited compatibility baseline: **codex-cli 0.160.0 (token_budget under development)**. These are observed baseline versions, not a guarantee that every machine or newer version works. Inspect `codex --version`, `codex --help` and its plugin help first.
@@ -67,7 +71,7 @@ No runner binary is installed by these commands. `install` defaults to **Codex o
 
 Both distributions vendor the same core. They retain `context-engine` for compatible session `read`/`recall`/`show` commands. Linking the second checkout replaces that generic PATH alias; **always use `context-engine-codex` for install, enable, status, disable and uninstall**. The runtime aliases remain distinct. Default state/participation storage is shared; if both plugins are installed, enabling a project may activate both. Use a consistent, separate `CONTEXT_ENGINE_STATE_DIR` in each runner's launch environment and matching setup shell when you require separate participation. Never mix core versions under a shared generic alias.
 
-Trust the test project through Codex's normal trust prompt. Review/approve the five plugin hooks with `/hooks`. Alternatively, only after approving that scope, run `context-engine-codex uninstall`, then `context-engine-codex install --trust-hooks`, then re-enable only the trial project; the flag writes trust for these five hooks through a dedicated stdio app-server. `status` checks project settings, project trust, plugin enablement, hook trust and offline `codex debug prompt-input`. If any fails it reports **inactive here** and its reason. Do not call an inactive path Full Replacement.
+Trust the test project through Codex's normal trust prompt. Review/approve the five plugin hooks with `/hooks`. Alternatively, only after approving that scope, run `context-engine-codex uninstall`, then `context-engine-codex install --trust-hooks`, then re-enable only the trial project; the flag writes trust for these five hooks through a dedicated stdio app-server. `status` checks project settings, project trust, plugin enablement, current hook trust hashes from a read-only `hooks/list` and offline `codex debug prompt-input`. If any fails it reports **inactive here** and its reason. Do not call an inactive path Full Replacement.
 
 ## 3. Prove delivery, then enable your intended project
 
@@ -107,7 +111,7 @@ context-engine-codex uninstall
 npm unlink --global context-engine-codex
 ```
 
-Claude enable/disable and kill-switch changes apply to new sessions; Codex checks participation at each hook. Backups precede config writes. Unchanged configuration is restored byte for byte; if other tools changed it, uninstall removes only Context Engine entries and reports the backup location. Review partial failures before retrying. Unlinking the CLI alone does not uninstall plugin configuration.
+Claude enable/disable and kill-switch changes apply to new sessions; Codex checks participation at each hook. Backups precede config writes. Conflicting project guidance or unsafe paths refuse activation and leave this project disabled; re-enable repairs missing managed blocks while preserving the original rollback bytes. Unchanged configuration is restored byte for byte; if other tools changed it, uninstall removes only Context Engine entries and reports the backup location. Project rollback runs before global removal, so a refused rollback retains installation metadata for retry. Review partial failures before retrying. Unlinking the CLI alone does not uninstall plugin configuration.
 
 Working Contexts live in `<project>/.context-engine/<session>/`. Revisions, the Event Log, participation and install backups live under `$XDG_STATE_HOME/context-engine` (default `~/.local/state/context-engine`; `CONTEXT_ENGINE_STATE_DIR` overrides). Runner homes honor `CLAUDE_CONFIG_DIR`/`CODEX_HOME`. Uninstall retains those session records. Deletion from Working Context only removes future model input; prior text remains in runner transcripts and the Event Log. Delete retained data only with your own exact-path approval.
 
@@ -122,7 +126,7 @@ Working Contexts live in `<project>/.context-engine/<session>/`. Revisions, the 
 | Missing/empty/invalid Working Context or refused reset | Read the visible restore receipt, then reread the latest file. Never force a reset past the gate. |
 | Install/uninstall fails | Preserve the output and byte backups; review runner/plugin help and partial changes. Do not overwrite unrelated config. |
 
-Interactive Codex TUI behavior and real interactive hook loading after persistent installation remain **unverified**. The original source had scratch-home install round trips and request-level regressions; a split package does not inherit a new installation success claim. No live model evals are required by normal setup. Tests here use synthetic data and scratch runner homes.
+Interactive Codex TUI behavior and real interactive hook loading after persistent installation remain **unverified**. The original source had scratch-home install round trips and request-level regressions; a split package does not inherit a new installation success claim. No live model evals are required by normal setup. Tests here use synthetic data and scratch runner homes. Warm, fully applied sessions reuse a validated recovery checkpoint; missing, stale or invalid checkpoints rebuild from the full Event Log. This is not a real long-session timeout or interactive performance acceptance claim.
 
 The plugin relies on the UnderDevelopment `features.token_budget` flag. `status` fails the compatibility claim when guidance is absent; there is no automatic fallback. The separate headless `context-engine-codex-turns` command starts its own app-server and uses a fresh thread each user turn (**Full Replacement per user turn**). It is never started by `install` or `status`; running it is opt-in and consumes model usage. Review its `--help` before use.
 

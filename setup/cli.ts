@@ -57,8 +57,8 @@ export async function runSetup(argv: string[]): Promise<number> {
             }
             out([`${spec.title}: installed. Delivery Mode: ${label}.`, ...lines.map((l) => `  ${l}`), '  Inert until `context-engine enable` in a project (the pilot is opt-in).']);
           } else {
-            const lines = uninstall(ctx, spec);
-            if (spec.id === 'codex') lines.push(...revertAllCodexProjects(ctx));
+            const lines = spec.id === 'codex' ? revertAllCodexProjects(ctx) : [];
+            lines.push(...uninstall(ctx, spec));
             out([`${spec.title}: uninstalled.`, ...lines.map((l) => `  ${l}`)]);
           }
         } catch (e) {
@@ -78,7 +78,7 @@ export async function runSetup(argv: string[]): Promise<number> {
       return 0;
     }
     if (command === 'status') {
-      const s = statusText(ctx, projectRoot);
+      const s = await statusText(ctx, projectRoot);
       process.stdout.write(values.json ? `${JSON.stringify(s.json)}\n` : `${s.lines.join('\n')}\n`);
       return 0;
     }

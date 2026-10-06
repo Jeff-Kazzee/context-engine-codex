@@ -125,8 +125,9 @@ function checkSource(projectRoot: string, rel: string, lines: [number, number] |
     // file is never followed or reported.
     if ('refused' in target) return null;
     content = target.bytes.toString('utf8');
-  } catch {
-    return { reason: 'missing' };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? { reason: 'missing' } : null;
   }
   if (lines === null) return hash8(content) === hash ? null : { reason: 'changed' };
   const [from, to] = lines;

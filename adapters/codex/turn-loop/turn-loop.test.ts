@@ -9,6 +9,55 @@ import { FAKE_APP_SERVER } from './testing/fake.ts';
 
 type Entry = Record<string, any>;
 
+test('closing a running turn preserves its prompt and received partial items before releasing core', async () => {
+  const t = setup({ turns: [{ hang: true, reply: 'CLOSE_PARTIAL' }] }, { turnTimeoutMs: 500 });
+  const loop = await startCodexTurnLoop(t.opts);
+  const running = loop.runTurn('CLOSE_PROMPT');
+  const settled = running.then(value => ({ value }), error => ({ error }));
+  const deadline = Date.now() + 2000;
+  while (!t.requests().length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(t.requests().length, 1);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  await Promise.all([loop.close(), loop.close()]);
+  const result = await settled;
+  assert.ok('value' in result, 'the in-flight turn must finish recording before core closes');
+  assert.ok(readFileSync(t.wcPath, 'utf8').includes('CLOSE_PROMPT'));
+  assert.ok(readFileSync(t.wcPath, 'utf8').includes('CLOSE_PARTIAL'));
+});
+
+test('timeout interrupts and records the prompt and partial items before the next turn', async () => {
+  const t = setup({ turns: [{ hang: true, reply: 'PARTIAL' }, { reply: 'NEXT' }] }, { turnTimeoutMs: 30 });
+  const loop = await startCodexTurnLoop(t.opts);
+  const r = await loop.runTurn('TIMEOUT_PROMPT');
+  assert.equal(r.status, 'interrupted');
+  assert.equal(r.finalMessage, 'PARTIAL');
+  assert.deepEqual(t.sent('turn/interrupt'), [{ threadId: r.threadId, turnId: r.turnId }]);
+  const next = await loop.runTurn('next');
+  assert.equal(next.status, 'completed');
+  assert.match(t.requests()[1]!.input[0]!.text, /TIMEOUT_PROMPT[\s\S]*PARTIAL/);
+  const events = readFileSync(join(t.f.stateDir, (await import('../../../core/store.ts')).projectKey(t.f.projectRoot), 'S1', 'events.jsonl'), 'utf8');
+  assert.match(events, /TIMEOUT_PROMPT/); assert.match(events, /PARTIAL/);
+});
+
+test('turn start failure records the prompt and prevents an uncertain orphan from racing another turn', async () => {
+  const t = setup({ errors: { 'turn/start': { code: -32600, message: 'start rejected' } } });
+  const loop = await startCodexTurnLoop(t.opts);
+  const r = await loop.runTurn('REJECTED_PROMPT');
+  assert.equal(r.status, 'failed');
+  assert.match(String(r.error), /start rejected/);
+  assert.match(readFileSync(t.wcPath, 'utf8'), /REJECTED_PROMPT/);
+  await assert.rejects(loop.runTurn('must not race'), /unavailable/);
+});
+
+test('an unacknowledged interruption shuts down the owned server and refuses reuse', async () => {
+  const t = setup({ turns: [{ hang: true, ignoreInterrupt: true, reply: 'PARTIAL' }] }, { turnTimeoutMs: 30 });
+  const loop = await startCodexTurnLoop(t.opts);
+  const r = await loop.runTurn('unsafe to continue');
+  assert.equal(r.status, 'failed');
+  assert.match(readFileSync(t.wcPath, 'utf8'), /unsafe to continue[\s\S]*PARTIAL/);
+  await assert.rejects(loop.runTurn('next'), /unavailable/);
+});
+
 // Every turn loop a test starts is closed afterwards, even when an assertion fails mid-test.
 const open: CodexTurnLoop[] = [];
 afterEach(async () => {
