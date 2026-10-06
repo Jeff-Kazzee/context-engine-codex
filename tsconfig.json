@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["es2024"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true
+  },
+  "include": ["core/**/*.ts", "setup/**/*.ts", "adapters/codex/**/*.ts", "adapters/claude/test/**/*.ts", "adapters/claude/context-engine/hooks/adapter.ts", "adapters/claude/context-engine/hooks/per-step.ts", "regression/**/*.ts", "eval/**/*.ts"]
+}

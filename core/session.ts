@@ -1,0 +1,566 @@
+// The shared core: one deep module behind openSession / sync / record / close.
+//
+// Write protocol (decided in issue #7, prototyped on prototype/core-state):
+// - HEAD is the commit point. A snapshot no HEAD points at is an orphan and is removed on recovery.
+// - Every write is temp + rename. Temp files left by a crash are removed on recovery.
+// - Runner events are appended to the Event Log *before* they are applied; HEAD.through records the
+//   last event a revision includes, and recovery replays anything later (write-ahead).
+// - The Working Context is a materialized view of HEAD. A runner append commits first and then
+//   rewrites the file; HEAD.materialized says whether that rewrite finished.
+// - record() always syncs first, so a runner append never overwrites an uncommitted model edit.
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { crashPoint } from './faults.ts';
+import { acquireLock, holderFor, isAlive, readLock, releaseLock, serialized, type LockHolder } from './lock.ts';
+import {
+  appendLog,
+  atomicWrite,
+  ensureDirs,
+  layout,
+  readBytes,
+  readLog,
+  readWorkingContextFile,
+  assertWorkingContextDir,
+  removeTemps,
+  resolveStateRoot,
+  sessionFrameKey,
+  sha,
+  truncateTornTail,
+  type Layout,
+} from './store.ts';
+import { countHeaders, parseTurns, renderTurns, type Turn } from './turns.ts';
+import { checkRefs, experimentOn, staleText, type StaleReport } from './refs.ts';
+import { budgetMemory, checkBudget, remember, type BudgetMemory, type BudgetReport } from './budget.ts';
+import { COMPACTION_ONLY_FALLBACK } from './delivery.ts';
+import { approxTokens } from './size.ts';
+
+export interface OpenOptions {
+  /** The project (workspace) root. The Working Context lives at `<projectRoot>/.context-engine/<sessionId>/context.md`. */
+  projectRoot: string;
+  /** Runner session id: letters, digits, '.', '_' or '-'. */
+  sessionId: string;
+  /** Runner label, e.g. 'claude-code' or 'codex'. Recorded in the lock and Event Log. */
+  runner: string;
+  /**
+   * The runner's hard limit, in characters (JS string length, UTF-16 code units). A Working
+   * Context longer than this could never be sent, so a model edit over it is restored from HEAD.
+   * Adapters that think in tokens convert (roughly 4 characters per token). No other size rule.
+   */
+  hardLimit: number;
+  /** Process that owns the session lock. Defaults to the current process. */
+  ownerPid?: number;
+  /** State root override. Defaults to $CONTEXT_ENGINE_STATE_DIR, then $XDG_STATE_HOME/context-engine. */
+  stateDir?: string;
+  /** Experiments to turn on, e.g. ['stale-refs']. Defaults to $CONTEXT_ENGINE_EXPERIMENTS (comma-separated). */
+  experiments?: string[];
+  /**
+   * The Working Context's budget in tokens, as the adapter reckons it (the room its runner leaves the
+   * Working Context). With it, every sync/record result carries a BudgetReport: a size readout and
+   * the reminders it fired (core/budget.ts). Without it, the core imposes and reports no budget.
+   */
+  budgetTokens?: number;
+}
+
+/** A runner event: rendered into the Working Context as one turn block, stored verbatim in the Event Log. */
+export interface RunnerEvent {
+  /** 'user', 'assistant', or any runner label ('tool', ...). Non-assistant roles parse back as user. */
+  role: string;
+  /** Text rendered into the Working Context. */
+  text: string;
+  /** Anything else the adapter wants kept verbatim in the Event Log (never rendered). */
+  [extra: string]: unknown;
+}
+
+export type RestoreReason = 'missing' | 'empty' | 'not-utf8' | 'over-hard-limit' | 'not-a-file';
+
+export { approxTokens };
+
+const sizeReadout = (chars: number): string => `Working Context size: ~${approxTokens(chars)} tokens (approx., chars/4).`;
+
+/**
+ * Adapter-authored notice for the model. Never contains model-authored text, except stale-reference
+ * markers (experiment), which only match a narrow pattern. `stale` is present only with the
+ * stale-refs experiment on; kind 'stale' is a sync that changed nothing but found stale references.
+ * `approxTokens` (every kind) is the Working Context size after this receipt, approximated as
+ * chars / 4 (see approxTokens).
+ */
+export type Receipt = (
+  | { kind: 'committed'; revision: number; previousChars: number; chars: number; text: string }
+  | { kind: 'restored'; revision: number; reason: RestoreReason; chars: number; text: string }
+  | { kind: 'stale'; revision: number; chars: number; text: string }
+) & { approxTokens: number; stale?: StaleReport };
+
+export interface SyncResult {
+  /** Committed revision (0 = nothing committed yet). */
+  revision: number;
+  /** Runner-neutral turns parsed from the committed revision. */
+  turns: Turn[];
+  /** Size of the committed revision, in characters. */
+  chars: number;
+  receipt?: Receipt;
+  /** Present when the session was opened with a budget: where the Working Context stands against it. */
+  budget?: BudgetReport;
+}
+
+export interface Session {
+  readonly workingContextPath: string;
+  readonly stateDir: string;
+  /**
+   * A random id made once per session and kept in its private state directory. An Adapter marks
+   * the frames it builds with it, so text that merely looks like a frame (a quoted example) is
+   * never taken for one.
+   */
+  readonly frameKey: string;
+  /** Commits a model edit as a new revision, or restores HEAD if the file is unusable. */
+  sync(): SyncResult;
+  /** Syncs, logs the events (write-ahead), renders them as turn blocks and commits. */
+  record(events: RunnerEvent[]): SyncResult;
+  /**
+   * The runner's own compaction replaced the conversation (the Compaction-only fallback, taken when
+   * the Working Context alone is over its budget): syncs, logs the runner's result verbatim
+   * (write-ahead), and commits it, rendered as turn blocks, as the whole next Revision (kind
+   * `native-compaction`). The Event Log records the delivery as COMPACTION_ONLY_FALLBACK.
+   */
+  nativeCompaction(events: RunnerEvent[]): SyncResult;
+  /** Releases the lock. The session can be reopened later from its latest revision. */
+  close(): void;
+}
+
+export type OpenResult = { status: 'open'; session: Session } | { status: 'refused'; holder: LockHolder };
+
+interface Head {
+  rev: number;
+  sha: string;
+  parent: string | null;
+  through: number;
+  materialized: boolean;
+  /** What made this revision (absent in HEADs written before it was recorded). */
+  kind?: CommitKind;
+}
+
+type CommitKind = 'init' | 'model-edit' | 'runner-append' | 'native-compaction';
+
+/** A logged batch that replaces the Working Context instead of appending to it. */
+interface Replacement {
+  kind: 'native-compaction';
+  reason: 'over-budget';
+  approxTokensBefore: number;
+  budgetTokens: number | null;
+}
+
+type Pending = { seq: number; event: RunnerEvent; replace?: Replacement };
+
+const decoder = new TextDecoder('utf-8', { fatal: true });
+
+function decode(bytes: Buffer): string | null {
+  try {
+    return decoder.decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+const RESTORE_WORDS: Record<RestoreReason, string> = {
+  missing: 'the file was missing',
+  empty: 'the file was empty',
+  'not-utf8': 'the file was not valid UTF-8',
+  'over-hard-limit': "the file was over the runner's hard limit",
+  'not-a-file': 'the file was a symbolic link or a hard link, which is never read',
+};
+
+export function openSession(opts: OpenOptions): OpenResult {
+  if (!Number.isFinite(opts.hardLimit) || opts.hardLimit <= 0) throw new Error('hardLimit must be a positive number of characters');
+  if (opts.budgetTokens !== undefined && (!Number.isFinite(opts.budgetTokens) || opts.budgetTokens <= 0)) throw new Error('budgetTokens must be a positive number of tokens');
+  const stateRoot = resolveStateRoot(opts.stateDir);
+  const l = layout(opts.projectRoot, opts.sessionId, stateRoot);
+  ensureDirs(l, stateRoot);
+  const me = holderFor(opts.ownerPid ?? process.pid, opts.runner, opts.hardLimit);
+  const got = acquireLock(l.lock, me);
+  if (got.status === 'refused') return { status: 'refused', holder: got.holder };
+  // Cut a torn Event Log tail before anything else is appended to it.
+  const tornBytes = truncateTornTail(l.events);
+  if (got.takeoverFrom) appendLog(l.events, { type: 'lock-takeover', from: got.takeoverFrom, to: me, reason: 'previous holder is dead' });
+  const core = new Core(l, opts.hardLimit, me, experimentOn('stale-refs', opts.experiments) ? opts.projectRoot : null, opts.budgetTokens ?? null);
+  core.recover(tornBytes);
+  return { status: 'open', session: core.facade() };
+}
+
+/**
+ * Runs `fn` as one serialized operation on the session: concurrent operations on the same session
+ * (separate processes presenting the same lock owner, e.g. a runner's parallel hooks) run one at a
+ * time. Creates the session's private state directory if needed. Throws SerializeTimeout when
+ * another live call holds the session too long.
+ */
+export function withSessionSerialized<T>(ref: { projectRoot: string; sessionId: string; stateDir?: string }, fn: () => T): T {
+  const stateRoot = resolveStateRoot(ref.stateDir);
+  const l = layout(ref.projectRoot, ref.sessionId, stateRoot);
+  ensureDirs(l, stateRoot);
+  return serialized(`${l.lock}.op`, fn);
+}
+
+export interface SessionStatus {
+  /** Committed revision (0 = nothing committed yet). */
+  revision: number;
+  /** Size of the committed revision, in characters. */
+  chars: number;
+  workingContext: string;
+  stateDir: string;
+  /** Current lock holder, with whether it is alive, or null if the session is not open. */
+  lock: (LockHolder & { live: boolean }) | null;
+  /** What made the committed revision: 'native-compaction' means the last compaction was Compaction-only. Null when unknown. */
+  revisionKind: CommitKind | null;
+}
+
+/** Read-only view of a session. Takes no lock, runs no recovery, creates nothing. */
+export function inspectSession(opts: { projectRoot: string; sessionId: string; stateDir?: string }): SessionStatus {
+  const l = layout(opts.projectRoot, opts.sessionId, resolveStateRoot(opts.stateDir));
+  const rawHead = readBytes(l.head);
+  const head = rawHead ? (JSON.parse(rawHead.toString('utf8')) as Head) : null;
+  const text = head ? (readBytes(join(l.revisions, `${head.rev}.md`))?.toString('utf8') ?? '') : '';
+  const holder = readLock(l.lock);
+  return {
+    revision: head?.rev ?? 0,
+    chars: text.length,
+    workingContext: l.workingContext,
+    stateDir: l.stateDir,
+    lock: holder && holder !== 'unreadable' ? { ...holder, live: isAlive(holder) } : null,
+    revisionKind: head?.kind ?? null,
+  };
+}
+
+class Core {
+  private lastSeq = 0;
+  /** Events in the Event Log that no committed revision includes yet. */
+  private unapplied: Pending[] = [];
+  private pendingReceipt: Receipt | undefined;
+  private closed = false;
+  private readonly l: Layout;
+  private readonly hardLimit: number;
+  private readonly me: LockHolder;
+  /** Project root to check stale-reference markers against, or null when the experiment is off. */
+  private readonly refsRoot: string | null;
+  /** The Working Context's budget in tokens, or null when the adapter gave none. */
+  private readonly budgetTokens: number | null;
+  /** What the budget checks remember; rebuilt from the Event Log at recovery, then kept current. */
+  private memory: BudgetMemory = { announced: 0, growth: [], lastTokens: 0, loggedBudget: null };
+
+  constructor(l: Layout, hardLimit: number, me: LockHolder, refsRoot: string | null, budgetTokens: number | null) {
+    this.l = l;
+    this.hardLimit = hardLimit;
+    this.me = me;
+    this.refsRoot = refsRoot;
+    this.budgetTokens = budgetTokens;
+  }
+
+  facade(): Session {
+    return {
+      workingContextPath: this.l.workingContext,
+      stateDir: this.l.stateDir,
+      frameKey: sessionFrameKey(this.l.stateDir),
+      sync: () => this.guard(() => this.checkBudget(this.checkRefs(this.deliver(this.sync())))),
+      record: (events) => this.guard(() => this.checkBudget(this.checkRefs(this.record(events)))),
+      nativeCompaction: (events) => this.guard(() => this.checkBudget(this.checkRefs(this.record(events, true)))),
+      close: () => this.guard(() => this.close()),
+    };
+  }
+
+  private guard<T>(fn: () => T): T {
+    if (this.closed) throw new Error('session is closed');
+    return fn();
+  }
+
+  // ---- reading ----
+
+  private head(): Head | null {
+    const raw = readBytes(this.l.head);
+    return raw ? (JSON.parse(raw.toString('utf8')) as Head) : null;
+  }
+
+  private snapshot(rev: number): string {
+    const raw = readBytes(join(this.l.revisions, `${rev}.md`));
+    if (!raw) throw new Error(`revision ${rev} snapshot is missing`);
+    return raw.toString('utf8');
+  }
+
+  private result(head: Head | null, receipt?: Receipt): SyncResult {
+    const text = head ? this.snapshot(head.rev) : '';
+    const r: SyncResult = { revision: head?.rev ?? 0, turns: parseTurns(text), chars: text.length };
+    if (receipt) r.receipt = receipt;
+    return r;
+  }
+
+  /** Attaches a receipt produced during recovery to the next result, so it is never lost. */
+  private deliver(r: SyncResult): SyncResult {
+    if (!r.receipt && this.pendingReceipt) r.receipt = this.pendingReceipt;
+    this.pendingReceipt = undefined;
+    return r;
+  }
+
+  /** Stale-refs experiment: adds stale cited references in the committed revision to the receipt. */
+  private checkRefs(r: SyncResult): SyncResult {
+    if (this.refsRoot === null || r.revision === 0) return r;
+    const stale = checkRefs(this.refsRoot, this.snapshot(r.revision));
+    if (!stale) return r;
+    const text = staleText(stale);
+    r.receipt = r.receipt
+      ? { ...r.receipt, text: `${r.receipt.text}\n${text}`, stale }
+      : { kind: 'stale', revision: r.revision, chars: r.chars, approxTokens: approxTokens(r.chars), text: `${text} ${sizeReadout(r.chars)}`, stale };
+    return r;
+  }
+
+  /** With a budget: adds the readout and any reminder it fires to the result, and logs a fired reminder. */
+  private checkBudget(r: SyncResult): SyncResult {
+    if (this.budgetTokens === null) return r;
+    if (this.memory.loggedBudget !== this.budgetTokens) {
+      // The budget in force, whenever it changes (Claude's moves with its auto-compact threshold).
+      appendLog(this.l.events, { type: 'budget', budgetTokens: this.budgetTokens });
+      this.memory.loggedBudget = this.budgetTokens;
+    }
+    const report = checkBudget(this.memory, r.chars, this.budgetTokens);
+    if (report.tier || report.urgent) {
+      appendLog(this.l.events, {
+        type: 'budget-reminder',
+        tier: report.tier,
+        urgent: report.urgent,
+        overBudget: report.overBudget,
+        approxTokens: report.approxTokens,
+        budgetTokens: report.budgetTokens,
+        rev: r.revision,
+      });
+      if (report.tier > this.memory.announced) this.memory.announced = report.tier;
+    }
+    r.budget = report;
+    return r;
+  }
+
+  // ---- writing ----
+
+  private commit(text: string, kind: CommitKind, through?: number): Head {
+    const prev = this.head();
+    const rev = (prev?.rev ?? 0) + 1;
+    atomicWrite(join(this.l.revisions, `${rev}.md`), text, 'snapshot-tmp');
+    crashPoint('before-head');
+    const materialize = kind === 'runner-append' || kind === 'native-compaction';
+    const head: Head = { rev, sha: sha(text), parent: prev?.sha ?? null, through: through ?? prev?.through ?? 0, materialized: !materialize, kind };
+    atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
+    appendLog(this.l.events, { type: 'revision', rev, kind, sha: head.sha, chars: text.length });
+    if (this.budgetTokens !== null) remember(this.memory, kind, text.length, this.budgetTokens);
+    if (materialize) this.materialize(head, text);
+    return head;
+  }
+
+  private materialize(head: Head, text: string): void {
+    crashPoint('before-wc');
+    this.writeWorkingContext(text);
+    head.materialized = true;
+    atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
+  }
+
+  private writeWorkingContext(text: string): void {
+    assertWorkingContextDir(this.l.workingContext);
+    mkdirSync(dirname(this.l.workingContext), { recursive: true });
+    atomicWrite(this.l.workingContext, text, 'wc-tmp', 0o644);
+  }
+
+  private invalid(bytes: Buffer | undefined | 'not-a-file'): { reason: RestoreReason; text: string | null } | { text: string } {
+    if (bytes === 'not-a-file') return { reason: 'not-a-file', text: null };
+    if (bytes === undefined) return { reason: 'missing', text: null };
+    const text = decode(bytes);
+    if (text === null) return { reason: 'not-utf8', text: null };
+    if (text.trim() === '') return { reason: 'empty', text };
+    if (text.length > this.hardLimit) return { reason: 'over-hard-limit', text };
+    return { text };
+  }
+
+  sync(): SyncResult {
+    const head = this.head();
+    const read = readWorkingContextFile(this.l.workingContext);
+    const bytes = read === 'not-a-file' ? undefined : read;
+    // The file is the committed revision itself: nothing was edited, so nothing can be rejected
+    // (a runner append may have taken HEAD past the hard limit; that is the budget's business).
+    if (head && bytes && head.materialized && sha(bytes.toString('utf8')) === head.sha && decode(bytes) !== null) return this.result(head);
+    const check = this.invalid(read);
+
+    if ('reason' in check) {
+      if (!head) return this.result(null, this.rejectWithoutHead(check, bytes));
+      const restored = this.snapshot(head.rev);
+      const rejected: Record<string, unknown> =
+        check.text !== null ? { rejected: check.text } : bytes ? { rejectedBase64: bytes.toString('base64') } : { rejected: null };
+      appendLog(this.l.events, { type: 'restored', rev: head.rev, reason: check.reason, ...rejected });
+      this.writeWorkingContext(restored);
+      const receipt: Receipt = {
+        kind: 'restored',
+        revision: head.rev,
+        reason: check.reason,
+        chars: restored.length,
+        approxTokens: approxTokens(restored.length),
+        text: `Context Engine: your Working Context edit was not applied (${RESTORE_WORDS[check.reason]}). Revision ${head.rev} (${restored.length} chars) was restored; the rejected text is kept in the Event Log. ${sizeReadout(restored.length)}`,
+      };
+      return this.result(head, receipt);
+    }
+
+    if (!head) return this.result(this.commit(check.text, 'init'));
+    if (sha(check.text) === head.sha) return this.result(head);
+    const previousChars = this.snapshot(head.rev).length;
+    const next = this.commit(check.text, 'model-edit');
+    const receipt: Receipt = {
+      kind: 'committed',
+      revision: next.rev,
+      previousChars,
+      chars: check.text.length,
+      approxTokens: approxTokens(check.text.length),
+      text: `Context Engine: Working Context edit committed as revision ${next.rev} (${previousChars} -> ${check.text.length} chars). ${sizeReadout(check.text.length)}`,
+    };
+    return this.result(next, receipt);
+  }
+
+  record(events: RunnerEvent[], replace = false): SyncResult {
+    if (!Array.isArray(events) || events.some((e) => !e || typeof e.role !== 'string' || typeof e.text !== 'string')) {
+      throw new Error(`${replace ? 'nativeCompaction' : 'record'}() takes an array of { role: string, text: string } events`);
+    }
+    if (replace && events.every((e) => e.text.trim() === '')) throw new Error('nativeCompaction() needs the runner result: at least one non-empty event');
+    const synced = this.deliver(this.sync());
+    if (events.length === 0) return synced;
+    this.lastSeq = Math.max(this.lastSeq, this.head()?.through ?? 0);
+    const numbered: Pending[] = events.map((event) => ({ seq: ++this.lastSeq, event }));
+    const replacement: Replacement | undefined = replace
+      ? { kind: 'native-compaction', reason: 'over-budget', approxTokensBefore: approxTokens(synced.chars), budgetTokens: this.budgetTokens }
+      : undefined;
+    appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(replacement ? { replace: replacement } : {}) });
+    if (replacement) numbered[0]!.replace = replacement;
+    this.unapplied.push(...numbered);
+    crashPoint('after-log');
+    const head = this.apply();
+    const r = this.result(head);
+    if (synced.receipt) r.receipt = synced.receipt;
+    return r;
+  }
+
+  /**
+   * Renders logged-but-unapplied events onto HEAD and commits them. Normal path and replay alike. A
+   * replacing batch (a native compaction) starts the text over from its own events.
+   */
+  private apply(): Head | null {
+    const head = this.head();
+    const fresh = this.unapplied.filter((p) => p.seq > (head?.through ?? 0));
+    if (fresh.length === 0) return head;
+    let text = head ? this.snapshot(head.rev).replace(/\s+$/, '') : '';
+    let replaced: Replacement | undefined;
+    for (let i = 0; i < fresh.length; ) {
+      if (fresh[i]!.replace) {
+        replaced = fresh[i]!.replace;
+        text = '';
+      }
+      let j = i + 1;
+      while (j < fresh.length && !fresh[j]!.replace) j++;
+      const blocks = renderTurns(
+        fresh.slice(i, j).map((p) => p.event),
+        countHeaders(text) + 1,
+      );
+      text = text ? `${text}\n\n${blocks}` : blocks;
+      i = j;
+    }
+    const next = this.commit(text, replaced ? 'native-compaction' : 'runner-append', fresh.at(-1)!.seq);
+    this.unapplied = [];
+    if (replaced) appendLog(this.l.events, { type: 'delivery', mode: COMPACTION_ONLY_FALLBACK.label, rev: next.rev, ...replaced });
+    return next;
+  }
+
+  /** With no revision to restore, an unusable file's content is logged and the file removed. */
+  private rejectWithoutHead(check: { reason: RestoreReason; text: string | null }, bytes: Buffer | undefined): Receipt | undefined {
+    if (check.reason === 'not-a-file') {
+      // A link: remove the link itself (never its target) and log nothing of what it pointed at.
+      appendLog(this.l.events, { type: 'restored', rev: 0, reason: check.reason, rejected: null });
+      unlinkSync(this.l.workingContext);
+      return {
+        kind: 'restored',
+        revision: 0,
+        reason: check.reason,
+        chars: 0,
+        approxTokens: 0,
+        text: `Context Engine: your Working Context edit was not applied (${RESTORE_WORDS[check.reason]}). No revision exists yet, so the link was removed.`,
+      };
+    }
+    if (bytes === undefined || check.reason === 'empty') return undefined;
+    appendLog(this.l.events, {
+      type: 'restored',
+      rev: 0,
+      reason: check.reason,
+      ...(check.text !== null ? { rejected: check.text } : { rejectedBase64: bytes.toString('base64') }),
+    });
+    unlinkSync(this.l.workingContext);
+    return {
+      kind: 'restored',
+      revision: 0,
+      reason: check.reason,
+      chars: 0,
+      approxTokens: 0,
+      text: `Context Engine: your Working Context edit was not applied (${RESTORE_WORDS[check.reason]}). No revision exists yet, so the file was cleared; the rejected text is kept in the Event Log.`,
+    };
+  }
+
+  close(): void {
+    appendLog(this.l.events, { type: 'closed', pid: this.me.pid });
+    releaseLock(this.l.lock, this.me);
+    this.closed = true;
+  }
+
+  // ---- recovery: the same code paths as normal operation ----
+
+  recover(tornBytes: number): void {
+    const removed = removeTemps([this.l.stateDir, this.l.revisions], [dirname(this.l.workingContext)]);
+
+    const head = this.head();
+    if (existsSync(this.l.revisions)) {
+      for (const f of readdirSync(this.l.revisions)) {
+        const m = /^(\d+)\.md$/.exec(f);
+        if (m && Number(m[1]) > (head?.rev ?? 0)) {
+          unlinkSync(join(this.l.revisions, f));
+          removed.push(join(this.l.revisions, f));
+        }
+      }
+    }
+
+    // A runner append committed HEAD but died before rewriting the Working Context.
+    let rematerialized = false;
+    if (head && !head.materialized) {
+      const read = readWorkingContextFile(this.l.workingContext);
+      const current = read && read !== 'not-a-file' ? decode(read) : null;
+      const currentSha = current === null ? null : sha(current);
+      if (currentSha !== head.sha && (currentSha === head.parent || current === null || current.trim() === '')) {
+        this.materialize(head, this.snapshot(head.rev));
+        rematerialized = true;
+      } else {
+        head.materialized = true;
+        atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
+      }
+    }
+
+    const log = readLog(this.l.events);
+    if (this.budgetTokens !== null) this.memory = budgetMemory(log, this.budgetTokens);
+    const logged: Pending[] = [];
+    for (const entry of log) {
+      if (entry.type !== 'runner-events') continue;
+      const batch = (entry.events as Pending[]).map((p) => ({ seq: p.seq, event: p.event }) as Pending);
+      if (entry.replace && batch[0]) batch[0].replace = entry.replace as Replacement;
+      logged.push(...batch);
+    }
+    this.lastSeq = logged.reduce((m, e) => Math.max(m, e.seq), 0);
+
+    const synced = this.sync();
+    this.pendingReceipt = synced.receipt;
+    const replay = logged.filter((e) => e.seq > (this.head()?.through ?? 0));
+    this.unapplied = replay;
+    if (replay.length) this.apply();
+
+    if (removed.length || tornBytes || rematerialized || replay.length) {
+      appendLog(this.l.events, {
+        type: 'recovered',
+        removed,
+        tornLogBytes: tornBytes,
+        rematerialized,
+        replayed: replay.map((e) => e.seq),
+      });
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "node \"$PLUGIN_ROOT/hooks/codex-hook.ts\"", "timeout": 30 }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "node \"$PLUGIN_ROOT/hooks/codex-hook.ts\"", "timeout": 30 }] }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "new_context",
+        "hooks": [
+          { "type": "command", "command": "node \"$PLUGIN_ROOT/hooks/codex-hook.ts\"", "timeout": 30, "statusMessage": "Checking Working Context" }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"$PLUGIN_ROOT/hooks/codex-hook.ts\"", "timeout": 30, "statusMessage": "Checking Working Context" }
+        ]
+      }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "node \"$PLUGIN_ROOT/hooks/codex-hook.ts\"", "timeout": 30 }] }
+    ]
+  }
+}

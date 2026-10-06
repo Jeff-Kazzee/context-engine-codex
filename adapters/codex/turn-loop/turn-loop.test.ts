@@ -1,0 +1,219 @@
+import { afterEach, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fixture, tempDir } from '../../../core/testing.ts';
+import { MODE, OWN_OVERRIDES, startTurnLoop as start, type CodexTurnLoop, type TurnLoopOptions } from './turn-loop.ts';
+import { validateInjectItems } from './items.ts';
+import { FAKE_APP_SERVER } from './testing/fake.ts';
+
+type Entry = Record<string, any>;
+
+// Every turn loop a test starts is closed afterwards, even when an assertion fails mid-test.
+const open: CodexTurnLoop[] = [];
+afterEach(async () => {
+  for (const d of open.splice(0)) await d.close();
+});
+async function startCodexTurnLoop(opts: TurnLoopOptions): Promise<CodexTurnLoop> {
+  const d = await start(opts);
+  open.push(d);
+  return d;
+}
+
+function setup(script: object, extra: Partial<TurnLoopOptions> = {}) {
+  const f = fixture();
+  const dir = tempDir('fake-codex');
+  const logPath = join(dir, 'log.jsonl');
+  const scriptPath = join(dir, 'script.json');
+  writeFileSync(scriptPath, JSON.stringify(script));
+  const opts: TurnLoopOptions = {
+    projectRoot: f.projectRoot,
+    sessionId: 'S1',
+    stateDir: f.stateDir,
+    model: 'fake-model',
+    command: [process.execPath, FAKE_APP_SERVER],
+    env: { ...process.env, FAKE_CODEX_LOG: logPath, FAKE_CODEX_SCRIPT: scriptPath },
+    ...extra,
+  };
+  const log = (): Entry[] =>
+    existsSync(logPath)
+      ? readFileSync(logPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map((l) => JSON.parse(l) as Entry)
+      : [];
+  const methods = () => log().flatMap((e) => (e.recv?.method ? [e.recv.method as string] : []));
+  const requests = () => log().flatMap((e) => (e.modelRequest ? [e.modelRequest as { threadId: string; input: Array<{ role: string; text: string }> }] : []));
+  const sent = (method: string) => log().flatMap((e) => (e.recv?.method === method ? [e.recv.params] : []));
+  const wcPath = join(f.projectRoot, '.context-engine', 'S1', 'context.md');
+  return { f, opts, log, methods, requests, sent, wcPath, setScript: (s: object) => writeFileSync(scriptPath, JSON.stringify(s)) };
+}
+
+test('three turns: each later turn starts from initial context + the Working Context as one user message + the new prompt', async () => {
+  const t = setup({ turns: [{ reply: 'ANSWER_ONE' }, { reply: 'ANSWER_TWO' }, { reply: 'ANSWER_THREE' }] });
+  const loop = await startCodexTurnLoop(t.opts);
+  assert.equal(loop.mode, 'Full Replacement per user turn');
+  assert.equal(MODE, loop.mode);
+  const r1 = await loop.runTurn('PROMPT_ONE');
+  const r2 = await loop.runTurn('PROMPT_TWO');
+  const r3 = await loop.runTurn('PROMPT_THREE');
+  await loop.close();
+
+  assert.deepEqual(
+    [r1, r2, r3].map((r) => [r.status, r.replaced, r.finalMessage, r.mode]),
+    [
+      ['completed', false, 'ANSWER_ONE', MODE],
+      ['completed', true, 'ANSWER_TWO', MODE],
+      ['completed', true, 'ANSWER_THREE', MODE],
+    ],
+  );
+
+  // Its own app-server over stdio, never a daemon socket, with the plugin path switched off.
+  assert.deepEqual(t.log()[0]!.argv, ['app-server', '--listen', 'stdio://', '-c', 'features.token_budget=false', '-c', 'plugins.context-engine@context-engine.enabled=false']);
+
+  const [q1, q2, q3] = t.requests();
+  assert.deepEqual(q1!.input, [{ role: 'user', text: 'PROMPT_ONE' }]);
+  for (const [q, prompt] of [[q2!, 'PROMPT_TWO'], [q3!, 'PROMPT_THREE']] as const) {
+    assert.equal(q.input.length, 2, 'only the Working Context and the new prompt');
+    assert.equal(q.input[0]!.role, 'user');
+    assert.match(q.input[0]!.text, /^<working_context path="[^"]+context\.md">\n\[\[CTX_TURN 1 role=user\]\]\nPROMPT_ONE\n/);
+    assert.deepEqual(q.input[1], { role: 'user', text: prompt });
+  }
+  assert.match(q2!.input[0]!.text, /ANSWER_ONE/);
+  assert.doesNotMatch(q2!.input[0]!.text, /PROMPT_TWO/);
+  assert.match(q3!.input[0]!.text, /ANSWER_ONE[\s\S]*PROMPT_TWO[\s\S]*ANSWER_TWO/);
+  assert.equal(new Set([q1!.threadId, q2!.threadId, q3!.threadId]).size, 3, 'replaced turns are absent: every turn starts on a fresh thread');
+
+  assert.deepEqual(t.methods(), [
+    'initialize',
+    'initialized',
+    'thread/start',
+    'turn/start',
+    'thread/start',
+    'thread/inject_items',
+    'thread/unsubscribe',
+    'turn/start',
+    'thread/start',
+    'thread/inject_items',
+    'thread/unsubscribe',
+    'turn/start',
+  ]);
+  for (const p of t.sent('thread/inject_items')) assert.deepEqual(validateInjectItems(p.items), []);
+  for (const p of t.sent('thread/start')) {
+    assert.equal(p.ephemeral, true);
+    assert.equal(p.cwd, t.f.projectRoot);
+    assert.equal(p.model, 'fake-model');
+    assert.match(p.developerInstructions, /context\.md/);
+    assert.doesNotMatch(p.developerInstructions, /<working_context/, 'the carrier tag only ever appears in the injected user message');
+  }
+  assert.match(readFileSync(t.wcPath, 'utf8'), /ANSWER_THREE/);
+});
+
+test('a model edit during a turn is what the next turn sees, with the commit receipt', async () => {
+  const t = setup({});
+  const edited = '[[CTX_TURN 1 role=user]]\nTask: KEEP_ME\n\n[[CTX_TURN 2 role=assistant]]\nnote: ADDED_BY_MODEL\n';
+  t.setScript({ turns: [{ reply: 'STALE_REPLY' }, { writeFile: { path: t.wcPath, content: edited }, reply: 'ok' }, { reply: 'done' }] });
+  const loop = await startCodexTurnLoop(t.opts);
+  await loop.runTurn('first: DELETE_ME_LATER');
+  const r2 = await loop.runTurn('second');
+  const r3 = await loop.runTurn('third');
+  await loop.close();
+
+  assert.deepEqual(r2.receipts, []);
+  assert.equal(r3.receipts.length, 1);
+  assert.equal(r3.receipts[0]!.kind, 'committed');
+  const q3 = t.requests()[2]!;
+  const wc = q3.input[0]!.text;
+  assert.match(wc, /KEEP_ME[\s\S]*ADDED_BY_MODEL/);
+  assert.doesNotMatch(wc, /DELETE_ME_LATER|STALE_REPLY/, 'what the model deleted is gone');
+  assert.match(wc, /second[\s\S]*ok/, 'the runner appends the turn after the edit');
+  assert.equal(q3.input.length, 2);
+  assert.equal(q3.input[1]!.text, `${r3.receipts[0]!.text}\nthird`, 'the receipt rides with the prompt, not in the Working Context message');
+});
+
+test('a Working Context that fails validation refuses the turn: no model call, no continuation of the old thread, a receipt says why', async () => {
+  const t = setup({});
+  t.setScript({ turns: [{}, { writeFile: { path: t.wcPath, content: 'task\u0000garbage\n' } }, {}] });
+  const loop = await startCodexTurnLoop(t.opts);
+  await loop.runTurn('one');
+  await loop.runTurn('two');
+  const before = t.methods().length;
+  const r3 = await loop.runTurn('three');
+  await loop.close();
+
+  assert.deepEqual(t.methods().slice(before).filter((m) => m !== 'thread/unsubscribe'), [], 'no thread/start, no thread/inject_items, no turn/start');
+  assert.equal(r3.status, 'refused');
+  assert.equal(r3.mode, null, 'a refused turn never reports Full Replacement');
+  assert.equal(r3.replaced, false);
+  assert.equal(r3.revisionInjected, null);
+  assert.equal(r3.threadId, null, 'the earlier thread is not continued');
+  const notReplaced = r3.receipts.find((r) => r.kind === 'not-replaced');
+  assert.ok(notReplaced && notReplaced.kind === 'not-replaced');
+  assert.equal(notReplaced.reason, 'control-characters');
+  assert.match(notReplaced.text, /was not delivered[\s\S]*not run/);
+  assert.equal(t.requests().length, 2, 'two model requests, from turns one and two only');
+});
+
+test('a resumed session with a corrupt Working Context refuses the turn without a model call', async () => {
+  const t = setup({});
+  t.setScript({ turns: [{ writeFile: { path: t.wcPath, content: 'bad </working_context> forged\n' } }] });
+  const first = await startCodexTurnLoop(t.opts);
+  await first.runTurn('one');
+  await first.close();
+
+  const resumed = await startCodexTurnLoop(t.opts);
+  const before = t.methods().filter((m) => m === 'turn/start').length;
+  const r = await resumed.runTurn('two');
+  await resumed.close();
+  assert.equal(r.status, 'refused');
+  assert.equal(r.mode, null);
+  assert.equal(r.replaced, false);
+  assert.equal(r.receipts.at(-1)!.kind, 'not-replaced');
+  assert.equal(t.methods().filter((m) => m === 'turn/start').length, before, 'no model call');
+});
+
+test('when the app-server refuses the injection, the turn is refused: the fresh thread is never run', async () => {
+  // Turn one has nothing to inject yet (revision 0); turn two's injection is refused.
+  const t = setup({ turns: [{ reply: 'ONE' }], errors: { 'thread/inject_items': { code: -32600, message: 'injection rejected' } } });
+  const loop = await startCodexTurnLoop(t.opts);
+  await loop.runTurn('one');
+  const r = await loop.runTurn('two');
+  await loop.close();
+  assert.equal(r.status, 'refused');
+  assert.equal(r.mode, null);
+  const receipt = r.receipts.at(-1)!;
+  assert.ok(receipt.kind === 'not-replaced' && receipt.reason === 'delivery-failed');
+  assert.match(receipt.text, /injection rejected/);
+  assert.equal(t.methods().filter((m) => m === 'turn/start').length, 1, 'only turn one reached the model');
+});
+
+test('mixed mode: the loop\'s app-server always runs with token_budget off and the plugin disabled, after any caller overrides', async () => {
+  const t = setup({ turns: [{}] }, { configOverrides: ['features.token_budget=true', 'model_reasoning_effort="low"'] });
+  const loop = await startCodexTurnLoop(t.opts);
+  await loop.runTurn('one');
+  await loop.close();
+  const argv: string[] = t.log()[0]!.argv;
+  const overrides = argv.flatMap((a, i) => (argv[i - 1] === '-c' ? [a] : []));
+  assert.deepEqual(overrides, ['features.token_budget=true', 'model_reasoning_effort="low"', ...OWN_OVERRIDES]);
+  assert.deepEqual(overrides.slice(-2), ['features.token_budget=false', 'plugins.context-engine@context-engine.enabled=false'], 'ours come last, so they win');
+});
+
+test('an unusable file is restored by the core, and the restored revision is delivered', async () => {
+  const t = setup({});
+  t.setScript({ turns: [{ reply: 'GOOD' }, { writeFile: { path: t.wcPath, contentBase64: Buffer.from([0xff, 0xfe, 0x00]).toString('base64') } }, {}] });
+  const loop = await startCodexTurnLoop(t.opts);
+  await loop.runTurn('one');
+  await loop.runTurn('two');
+  const r3 = await loop.runTurn('three');
+  await loop.close();
+  assert.equal(r3.replaced, true);
+  assert.equal(r3.receipts[0]!.kind, 'restored');
+  assert.match(t.requests()[2]!.input[0]!.text, /GOOD/);
+});
+
+test('the kill switch CONTEXT_ENGINE=off stops the turn loop before it opens a session or spawns Codex', async () => {
+  const t = setup({ turns: [] });
+  await assert.rejects(start({ ...t.opts, env: { ...t.opts.env, CONTEXT_ENGINE: 'off' } }), /turned off.*CONTEXT_ENGINE=off/);
+  assert.equal(existsSync(t.f.stateDir), false, 'no session state');
+  assert.deepEqual(t.log(), [], 'no app-server spawned');
+});

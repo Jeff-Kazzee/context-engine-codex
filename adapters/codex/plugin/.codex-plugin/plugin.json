@@ -1,0 +1,11 @@
+{
+  "name": "context-engine",
+  "version": "0.1.0",
+  "description": "Model-controlled Working Context for Codex (hooks only). In projects enabled with `context-engine enable`: Full Replacement at agent-initiated resets (any model step); history grows between resets, through features.token_budget's new_context reset. Inert everywhere else.",
+  "keywords": ["context", "working-context", "token-budget"],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Context Engine",
+    "shortDescription": "Curate your own working context; new_context resets onto it."
+  }
+}

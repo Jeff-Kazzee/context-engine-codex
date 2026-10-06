@@ -1,0 +1,402 @@
+// File primitives and layout for the core. Every write is temp + fsync + rename, so a reader
+// sees the old file or the new one, never a torn one.
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  truncateSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { confineStep, crashPoint, fdLinkPath, type CrashPoint } from './faults.ts';
+
+export const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
+
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function assertSessionId(id: string): void {
+  if (!SESSION_ID.test(id)) throw new Error(`invalid session id ${JSON.stringify(id)}: use letters, digits, '.', '_' or '-' (max 128)`);
+}
+
+/** State root: explicit option, then $CONTEXT_ENGINE_STATE_DIR, then $XDG_STATE_HOME/context-engine. */
+export function resolveStateRoot(explicit?: string): string {
+  if (explicit) return explicit;
+  const env = process.env.CONTEXT_ENGINE_STATE_DIR;
+  if (env) return env;
+  const xdg = process.env.XDG_STATE_HOME;
+  return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.local', 'state'), 'context-engine');
+}
+
+/** `<basename>-<8 hex of sha256(realpath)>`: readable, and distinct for same-named projects. */
+export function projectKey(projectRoot: string): string {
+  const real = realpathSync(projectRoot);
+  const name = basename(real).replace(/[^\w.-]/g, '_') || 'root';
+  return `${name}-${sha(real).slice(0, 8)}`;
+}
+
+/** The workspace directory that holds every session's Working Context (self-gitignored). */
+export const WORKING_CONTEXT_DIR = '.context-engine';
+
+/**
+ * The Working Context's path relative to the project root: `.context-engine/<session>/context.md`.
+ * The id is not validated here, so adapters can fill in a placeholder such as `$CODEX_THREAD_ID`
+ * for text the model's shell expands; `layout` validates real ids.
+ */
+export function workingContextRelPath(sessionId: string): string {
+  return `${WORKING_CONTEXT_DIR}/${sessionId}/context.md`;
+}
+
+/** The Working Context's absolute path for a real session id (validated). */
+export function workingContextPath(projectRoot: string, sessionId: string): string {
+  assertSessionId(sessionId);
+  return join(realpathSync(projectRoot), workingContextRelPath(sessionId));
+}
+
+export interface Layout {
+  workingContext: string;
+  stateDir: string;
+  head: string;
+  revisions: string;
+  events: string;
+  lock: string;
+}
+
+export function layout(projectRoot: string, sessionId: string, stateRoot: string): Layout {
+  assertSessionId(sessionId);
+  const real = realpathSync(projectRoot);
+  const stateDir = join(stateRoot, projectKey(real), sessionId);
+  return {
+    workingContext: join(real, workingContextRelPath(sessionId)),
+    stateDir,
+    head: join(stateDir, 'HEAD'),
+    revisions: join(stateDir, 'revisions'),
+    events: join(stateDir, 'events.jsonl'),
+    lock: join(stateDir, 'lock'),
+  };
+}
+
+/** Creates the private state directories (mode 0700) and the Working Context directory. */
+export function ensureDirs(l: Layout, stateRoot: string): void {
+  for (const d of [stateRoot, dirname(l.stateDir), l.stateDir, l.revisions]) {
+    mkdirSync(d, { recursive: true, mode: 0o700 });
+    chmodSync(d, 0o700);
+  }
+  assertWorkingContextDir(l.workingContext);
+  mkdirSync(dirname(l.workingContext), { recursive: true });
+  assertWorkingContextDir(l.workingContext);
+  // Self-ignoring directory: keeps Working Contexts out of git without editing the project's .gitignore.
+  const ignore = join(dirname(dirname(l.workingContext)), '.gitignore');
+  if (!existsSync(ignore)) writeFileSync(ignore, '# Context Engine Working Contexts are never committed.\n*\n');
+}
+
+const FRAME_KEY = /^[0-9a-f]{32}$/;
+
+/** The frame key stored at `path`, or null when there is none or it is not a whole key. */
+function storedFrameKey(path: string): string | null {
+  const text = readBytes(path)?.toString('utf8').trim();
+  return text && FRAME_KEY.test(text) ? text : null;
+}
+
+/**
+ * The session's frame key (see Session.frameKey): made on first use, then read back. A new key is
+ * written whole and fsynced under the core's own temp name, then published with link(2), which
+ * fails if anything is already there: a crash leaves at most a temp file (removed by recovery),
+ * never a torn key. If something is there, a whole key stands (another writer won); anything else
+ * (empty or partial, from an interrupted create by an older core) is replaced atomically by rename.
+ * Called while the session is held (openSession), so no other opener races the replacement.
+ */
+export function sessionFrameKey(stateDir: string): string {
+  const path = join(stateDir, 'frame-key');
+  const existing = storedFrameKey(path);
+  if (existing) return existing;
+  const key = randomBytes(16).toString('hex');
+  const tmp = writeTemp(path, `${key}\n`, 'frame-key-tmp', 0o600);
+  try {
+    try {
+      linkSync(tmp, path);
+      return key;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    }
+    const theirs = storedFrameKey(path);
+    if (theirs) return theirs;
+    renameSync(tmp, path);
+    return key;
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {}
+  }
+}
+
+// ---- confinement: symlinks, hard links, credential files ----
+
+const isWithin = (root: string, p: string) => p === root || p.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+
+function realOrResolved(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
+
+/**
+ * Credential files and directories the core never reads, whatever path leads to them: the runners'
+ * subscription credentials and the usual key stores. Files are matched by real path and by inode
+ * (a hard link has another path); directories by real path.
+ */
+function credentialTargets(): { files: string[]; dirs: string[] } {
+  const home = homedir();
+  const files = [
+    join(home, '.codex', 'auth.json'),
+    join(home, '.claude', '.credentials.json'),
+    join(home, '.netrc'),
+    join(home, '.git-credentials'),
+    join(home, '.config', 'gh', 'hosts.yml'),
+    join(home, '.docker', 'config.json'),
+  ];
+  if (process.env.CODEX_HOME) files.push(join(process.env.CODEX_HOME, 'auth.json'));
+  if (process.env.CLAUDE_CONFIG_DIR) files.push(join(process.env.CLAUDE_CONFIG_DIR, '.credentials.json'));
+  return { files, dirs: ['.ssh', '.gnupg', '.aws'].map((d) => join(home, d)) };
+}
+
+/**
+ * True when the opened file (its kernel-reported path `real` and its fstat identity `st`) is a
+ * credential file, a hard link to one (same dev+ino), or lies in a key-store directory. The
+ * identity comes from the open descriptor, so nothing can be swapped between this check and the read.
+ */
+function isCredential(real: string, st: { dev: number; ino: number }): boolean {
+  const { files, dirs } = credentialTargets();
+  for (const f of files) {
+    if (realOrResolved(f) === real) return true;
+    try {
+      const c = statSync(f);
+      if (c.dev === st.dev && c.ino === st.ino) return true;
+    } catch {}
+  }
+  return dirs.some((d) => isWithin(realOrResolved(d), real));
+}
+
+/**
+ * The real path of what `fd` actually is, from the kernel (`/proc/self/fd/<fd>`), not from the
+ * name that was opened. PLATFORM ASSUMPTION: Linux with /proc mounted (the core already relies on
+ * /proc for lock liveness). Where /proc is unavailable this throws, so every confined read fails
+ * closed: nothing is read rather than read unverified.
+ */
+function openedPath(fd: number): string {
+  try {
+    return readlinkSync(fdLinkPath(fd));
+  } catch (e) {
+    throw new Error(`cannot verify which file was opened (${fdLinkPath(fd)} is unavailable: ${(e as NodeJS.ErrnoException).code ?? e}); refusing to read it. Confined reads need Linux with /proc mounted.`);
+  }
+}
+
+/** Why a confined read refused: out of the project, a credential, or not one regular file with one name. */
+export type Refusal = 'outside' | 'credential' | 'not-a-file';
+
+/**
+ * Reads `rel` inside `root`. Symlinks inside the project are resolved first, then the result is
+ * opened with O_NOFOLLOW|O_NONBLOCK and every decision is made on the open descriptor: its real
+ * path (from /proc, see openedPath) must stay inside the root's real path and must not be a
+ * credential (by path or by dev+ino), and fstat must show a regular file with one link. The bytes
+ * come from that same descriptor, so swapping the file or any directory above it after the checks
+ * cannot change what is read. Throws ENOENT when the target does not exist, and fails closed
+ * (throws) when the opened file cannot be identified.
+ */
+export function readConfined(root: string, rel: string): { bytes: Buffer } | { refused: Refusal } {
+  const realRoot = realpathSync(root);
+  const candidate = realpathSync(resolve(realRoot, rel));
+  if (!isWithin(realRoot, candidate)) return { refused: 'outside' };
+  confineStep('before-open', candidate);
+  let fd: number;
+  try {
+    fd = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (e) {
+    // The checked name became a symbolic link: whatever it leads to is never followed.
+    if ((e as NodeJS.ErrnoException).code === 'ELOOP') return { refused: 'not-a-file' };
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    const real = openedPath(fd);
+    if (isCredential(real, st)) return { refused: 'credential' };
+    if (!isWithin(realRoot, real)) return { refused: 'outside' };
+    if (!st.isFile() || st.nlink !== 1) return { refused: 'not-a-file' };
+    return { bytes: readFileSync(fd) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Throws unless the Working Context's directory is exactly where the layout puts it: no symbolic
+ * link anywhere from the project's real root down to the session directory, so nothing the core
+ * reads or writes there can land outside the project. A directory that does not exist yet is fine.
+ */
+export function assertWorkingContextDir(wc: string): void {
+  // The nearest directory on the way that exists must be its own real path (`wc` is built from the
+  // project's real path, so only links below the project root can make them differ).
+  for (let dir = dirname(wc); ; dir = dirname(dir)) {
+    let real: string;
+    try {
+      real = realpathSync(dir);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT' && dirname(dir) !== dir) continue;
+      throw e;
+    }
+    if (real !== dir) throw new Error(`the Working Context directory ${dirname(wc)} passes through a symbolic link (${dir} -> ${real}); refusing to use it`);
+    return;
+  }
+}
+
+/**
+ * Reads the Working Context file. Undefined when it does not exist; 'not-a-file' when it is a
+ * symbolic link, a hard link (more than one name) or anything but a regular file: such a file is
+ * never read, so a link cannot pull another file's contents (a credential, say) into the session.
+ * Opened with O_NOFOLLOW and checked on the open descriptor, so the check and the read see the
+ * same file: the kernel's path for the descriptor (see openedPath) must be exactly `wc`, so a
+ * directory above it swapped for a link after assertWorkingContextDir is caught (thrown), and the
+ * descriptor must not be a credential. Throws (fails closed) when /proc is unavailable.
+ */
+export function readWorkingContextFile(wc: string): Buffer | undefined | 'not-a-file' {
+  assertWorkingContextDir(wc);
+  let fd: number;
+  confineStep('before-open', wc);
+  try {
+    fd = openSync(wc, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return undefined;
+    if (code === 'ELOOP') return 'not-a-file';
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    const real = openedPath(fd);
+    if (real !== wc) throw new Error(`the Working Context's directory changed while it was being opened (${wc} led to ${real}); refusing to read it`);
+    if (isCredential(real, st) || !st.isFile() || st.nlink !== 1) return 'not-a-file';
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * The core's own temp-file names: `<file>.ce-<pid>-<8 hex>.tmp`, unique per write. Recovery removes
+ * only these beside the Working Context, where the agent keeps files of its own.
+ */
+const CORE_TEMP = /\.ce-\d+-[0-9a-f]{8}\.tmp$/;
+
+/** Writes `data` whole to a fresh temp file beside `path` (core naming) and fsyncs it. Returns its path. */
+function writeTemp(path: string, data: string, point: CrashPoint, mode: number): string {
+  const tmp = `${path}.ce-${process.pid}-${randomBytes(4).toString('hex')}.tmp`;
+  // 'wx' (O_EXCL): a fresh file, never something already at that name (a symlink included).
+  const fd = openSync(tmp, 'wx', mode);
+  try {
+    writeSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  crashPoint(point);
+  return tmp;
+}
+
+export function atomicWrite(path: string, data: string, point: CrashPoint, mode = 0o600): void {
+  renameSync(writeTemp(path, data, point, mode), path);
+}
+
+export function readBytes(path: string): Buffer | undefined {
+  try {
+    return readFileSync(path);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw e;
+  }
+}
+
+/** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. */
+export function appendLog(path: string, entry: Record<string, unknown>): void {
+  const line = Buffer.from(`${JSON.stringify({ ...entry, at: new Date().toISOString() })}\n`);
+  const fd = openSync(path, 'a', 0o600);
+  try {
+    try {
+      crashPoint('log-torn');
+    } catch (e) {
+      writeSync(fd, line.subarray(0, line.length >> 1));
+      throw e;
+    }
+    writeSync(fd, line);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Reads every complete Event Log entry. A torn final line or a corrupt line is skipped, never fatal. */
+export function readLog(path: string): Array<Record<string, unknown>> {
+  const raw = readBytes(path);
+  if (!raw) return [];
+  const text = raw.toString('utf8');
+  const entries: Array<Record<string, unknown>> = [];
+  for (const line of text.slice(0, text.lastIndexOf('\n') + 1).split('\n')) {
+    if (!line) continue;
+    try {
+      entries.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // Unreadable line: skip it rather than lock the session.
+    }
+  }
+  return entries;
+}
+
+/** Cuts a torn (unterminated) final line off the Event Log. Returns the bytes removed. */
+export function truncateTornTail(path: string): number {
+  const raw = readBytes(path);
+  if (!raw || raw.length === 0 || raw[raw.length - 1] === 0x0a) return 0;
+  const keep = raw.lastIndexOf(0x0a) + 1;
+  truncateSync(path, keep);
+  return raw.length - keep;
+}
+
+/**
+ * Removes temp-file debris. In the session's private state directories (`privateDirs`) only the
+ * core writes, so every `*.tmp` is its own (older versions named them `<file>.tmp`). Beside the
+ * Working Context (`sharedDirs`) the agent keeps files of its own, so only names of the core's write
+ * protocol (CORE_TEMP) are removed. Returns the removed paths.
+ */
+export function removeTemps(privateDirs: string[], sharedDirs: string[]): string[] {
+  const removed: string[] = [];
+  const dirs = [...privateDirs.map((d) => ({ d, own: (f: string) => f.endsWith('.tmp') })), ...sharedDirs.map((d) => ({ d, own: (f: string) => CORE_TEMP.test(f) }))];
+  for (const { d, own } of dirs) {
+    if (!existsSync(d)) continue;
+    for (const f of readdirSync(d)) {
+      if (!own(f)) continue;
+      const p = join(d, f);
+      if (lstatSync(p).isFile()) {
+        unlinkSync(p);
+        removed.push(p);
+      }
+    }
+  }
+  return removed;
+}
+
