@@ -57,3 +57,26 @@ test('renewed: concurrent empty JSON without owned entries stays present',()=>{
  fs.writeFileSync(path,'{}\n');rollbackSnapshot(snap,{[path]:jsonRule([['owned']])});
  assert.equal(fs.readFileSync(path,'utf8'),'{}\n');
 });
+
+test('renewed: escaped dotted assignment keys refuse without overwriting existing settings',()=>{
+ const w=world();assert.equal(w.ce(['install']).status,0);fs.mkdirSync(join(w.project,'.codex'));
+ const path=join(w.project,'.codex/config.toml'),text='features."token\\u005fbudget".enabled = false\n';fs.writeFileSync(path,text);
+ const r=w.ce(['enable']);assert.equal(r.status,1);assert.match(r.stderr,/escaped.*keys.*unsupported/);assert.equal(fs.readFileSync(path,'utf8'),text);
+});
+test('renewed: escaped string values and comments remain unmanaged data',()=>{
+ const w=world();assert.equal(w.ce(['install']).status,0);fs.mkdirSync(join(w.project,'.codex'));
+ const path=join(w.project,'.codex/config.toml'),text='note = "literal\\u005fvalue"\n[features] # "comment\\u005fonly"\n';fs.writeFileSync(path,text);
+ const r=w.ce(['enable']);assert.equal(r.status,0,r.stderr);assert.ok(fs.readFileSync(path,'utf8').includes(text));assert.equal(w.ce(['disable']).status,0);assert.equal(fs.readFileSync(path,'utf8'),text);
+});
+
+import { syncBuiltinESMExports } from 'node:module';
+test('renewed6: linked backup root refuses before creating external artifacts',()=>{
+ const w=world(),root=join(w.stateDir,'backups'),outside=join(w.home,'outside-backups');fs.mkdirSync(w.stateDir,{mode:0o700});fs.mkdirSync(outside,{mode:0o700});fs.symlinkSync(outside,root);
+ assert.throws(()=>takeSnapshot({backupRoot:root,kind:'synthetic',files:[],watch:[],namespaced:[]}),/linked|verified|ELOOP/);assert.deepEqual(fs.readdirSync(outside),[]);
+});
+test('renewed6: planted backup copy cannot truncate unrelated target',()=>{
+ const w=world(),file=join(w.claudeHome,'synthetic.json'),target=join(w.home,'unrelated');fs.writeFileSync(file,'SOURCE');fs.writeFileSync(target,'KEEP');const native=fs.mkdirSync;let planted=false;
+ fs.mkdirSync=((path:any,opts:any)=>{const r=native(path,opts);if(!planted&&String(path).endsWith('/before')){planted=true;fs.symlinkSync(target,join(String(path),'0-synthetic.json'));}return r;}) as typeof fs.mkdirSync;syncBuiltinESMExports();
+ try{assert.throws(()=>takeSnapshot({backupRoot:join(w.stateDir,'backups'),kind:'synthetic',files:[file],watch:[],namespaced:[]}));}finally{fs.mkdirSync=native;syncBuiltinESMExports();}
+ assert.equal(planted,true);assert.equal(fs.readFileSync(target,'utf8'),'KEEP');
+});

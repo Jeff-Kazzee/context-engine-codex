@@ -75,22 +75,21 @@ function eventLog(ref: SessionRef): string {
   return events;
 }
 
-function items(log: string): Item[] {
-  const out: Item[] = [];
+function* items(log: string): Generator<Item> {
   let rejected = 0;
   for (const entry of readLog(log)) {
     if (entry.type === 'runner-events') {
       for (const { seq, event } of entry.events as Array<{ seq: number; event: RunnerEvent }>) {
         // Structured runner evidence lives in the log, outside the materialized Working Context.
         const evidence = event.item === undefined ? '' : `\n${JSON.stringify(event.item)}`;
-        out.push({ id: `e${seq}`, role: event.role, text: event.text + evidence });
+        yield { id: `e${seq}`, role: event.role, text: event.text + evidence };
       }
     } else if (entry.type === 'restored' && typeof entry.rejected === 'string') {
-      out.push({ id: `r${++rejected}`, role: 'rejected-edit', text: entry.rejected });
+      yield { id: `r${++rejected}`, role: 'rejected-edit', text: entry.rejected };
     }
   }
-  return out;
 }
+
 
 /**
  * One line of agent guidance for adapters to include in their instructions. `<session-id>` is a
@@ -134,20 +133,15 @@ export function recall(opts: SessionRef & { query: string }): RecallResult {
   if (opts.query.length > MAX_QUERY_CHARS) throw new Error(`recall query is over ${MAX_QUERY_CHARS} characters`);
   const log = eventLog(opts);
   const terms = opts.query.toLowerCase().split(/\s+/).filter(Boolean);
-  const matches: RecallHit[] = [];
-  for (const it of items(log).reverse()) {
-    const lower = it.text.toLowerCase();
-    if (terms.every((t) => lower.includes(t))) matches.push({ id: it.id, role: it.role, snippet: snippet(it.text, lower.indexOf(terms[0]!)) });
+  const result: RecallResult = { query: opts.query, hits: [], total: 0, truncated: true };
+  for (const it of items(log)) {
+    const lower=it.text.toLowerCase();
+    if(!terms.every(t=>lower.includes(t)))continue;
+    result.total++;
+    result.hits.unshift({id:it.id,role:it.role,snippet:snippet(it.text,lower.indexOf(terms[0]!))});
+    while(result.hits.length && jsonBytes(result)>RECALL_MAX_BYTES-ENVELOPE_BYTES)result.hits.pop();
   }
-  const result: RecallResult = { query: opts.query, hits: [], total: matches.length, truncated: true };
-  let size = jsonBytes(result);
-  for (const hit of matches) {
-    const add = jsonBytes(hit) + (result.hits.length ? 1 : 0);
-    if (size + add > RECALL_MAX_BYTES - ENVELOPE_BYTES) break;
-    result.hits.push(hit);
-    size += add;
-  }
-  result.truncated = result.hits.length < matches.length;
+  result.truncated=result.hits.length<result.total;
   return { ...result, ...account(log, { type: 'recall', query: opts.query, total: result.total, returned: result.hits.length, truncated: result.truncated }) };
 }
 
@@ -190,7 +184,8 @@ function account(log: string, entry: Record<string, unknown>): { accounting?: 's
  */
 export function show(opts: SessionRef & { id: string }): ShowResult {
   const log = eventLog(opts);
-  const it = items(log).find((i) => i.id === opts.id);
+  let it: Item | undefined;
+  for(const item of items(log))if(item.id===opts.id){it=item;break;}
   if (!it) throw new Error(`no event ${JSON.stringify(opts.id)} in session ${opts.sessionId}`);
   const whole: ShowResult = { id: it.id, role: it.role, text: it.text, chars: it.text.length, truncated: false };
   const budget = SHOW_MAX_BYTES - ENVELOPE_BYTES;

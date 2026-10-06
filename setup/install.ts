@@ -58,7 +58,9 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
 
 function sameBytes(a: string | null, b: string | null): boolean {
   if (a === null || b === null) return a === b;
-  return readFileSync(a).equals(readFileSync(b));
+  const before=safeRead(a),after=safeRead(b);
+  if(before===null||after===null)throw new Error('snapshot backup is missing; refusing comparison');
+  return before.equals(after);
 }
 
 export function uninstall(ctx: SetupContext, spec: RunnerSpec): string[] {

@@ -215,9 +215,9 @@ test('an enable made before AGENTS.md was dropped (AGENTS.md section in its ledg
   const [ptr] = readdirSync(join(w.stateDir, 'setup', 'projects'));
   const { dir } = JSON.parse(readFileSync(join(w.stateDir, 'setup', 'projects', ptr!), 'utf8'));
   const ledger = JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8'));
-  mkdirSync(join(dir, 'before-md'));
+  mkdirSync(join(dir, 'before-md'),{mode:0o700});
   writeFileSync(join(dir, 'before-md', 'AGENTS.md'), AGENTS);
-  mkdirSync(join(dir, 'after-md'));
+  mkdirSync(join(dir, 'after-md'),{mode:0o700});
   writeFileSync(join(dir, 'after-md', 'AGENTS.md'), old);
   ledger.files.push({ path: md, before: join(dir, 'before-md', 'AGENTS.md'), after: join(dir, 'after-md', 'AGENTS.md') });
   writeFileSync(join(dir, 'ledger.json'), JSON.stringify(ledger));

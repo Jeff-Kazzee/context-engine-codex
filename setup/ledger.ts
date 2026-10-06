@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
-import { closeSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, openSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
 import { checkComponents, safeRead, safeWrite } from './files.ts';
 
@@ -88,15 +88,24 @@ export function timestamp(d = new Date()): string {
 export function takeSnapshot(opts: { backupRoot: string; kind: string; files: string[]; watch: string[]; namespaced: string[]; extra?: Record<string, unknown> }): Snapshot {
   for (const path of opts.namespaced) checkComponents(path);
   const at = new Date();
-  let dir = join(opts.backupRoot, `${opts.kind}-${timestamp(at)}`);
-  for (let n = 2; existsSync(dir); n++) dir = join(opts.backupRoot, `${opts.kind}-${timestamp(at)}-${n}`);
-  mkdirSync(join(dir, 'before'), { recursive: true, mode: 0o700 });
-  mkdirSync(join(dir, 'after'), { mode: 0o700 });
+  checkComponents(opts.backupRoot);
+  const parent = openPrivateDirectory(opts.backupRoot,{create:true})!;
+  let dir: string;
+  try {
+    for (let n=1;;n++) {
+      const name = `${opts.kind}-${timestamp(at)}${n===1?'':'-'+n}`;
+      if (name.includes('/') || name.includes('\\') || name === '..') throw new Error('invalid snapshot kind');
+      dir = join(opts.backupRoot,name);
+      try { mkdirSync(join(`/proc/self/fd/${parent}`,name),{mode:0o700}); fsyncSync(parent); break; }
+      catch(e) { if((e as NodeJS.ErrnoException).code!=='EEXIST') throw e; }
+    }
+  } finally {closeSync(parent);}
+  for(const category of ['before','after']) closeSync(openPrivateDirectory(join(dir,category),{create:true})!);
   const files = opts.files.map((path, i) => {
     const copy = join(dir, 'before', `${i}-${path.split('/').at(-1)}`);
     const bytes = safeRead(path);
     if (bytes === null) return { path, before: null, after: null };
-    writeFileSync(copy, bytes, { mode: 0o600 });
+    writeBackup(copy,bytes);
     return { path, before: copy, after: null };
   });
   return {
@@ -112,13 +121,23 @@ export function takeSnapshot(opts: { backupRoot: string; kind: string; files: st
   };
 }
 
+/** Exclusive backup writes through the verified private parent; planted copies are never followed. */
+function writeBackup(path: string, bytes: Buffer): void {
+  const parent = openPrivateDirectory(dirname(path))!;
+  let fd: number | undefined;
+  try {
+    fd = openSync(join(`/proc/self/fd/${parent}`,path.split('/').at(-1)!),constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
+    writeFileSync(fd,bytes); fsyncSync(fd); fsyncSync(parent);
+  } finally {if(fd!==undefined)closeSync(fd);closeSync(parent);}
+}
+
 /** Records the edit's result next to the backups and returns the ledger. */
 export function completeLedger(s: Snapshot): Ledger {
   const files = s.files.map((f, i) => {
     const bytes = safeRead(f.path);
     if (bytes === null) return { ...f, after: null };
     const copy = join(s.dir, 'after', `${i}-${f.path.split('/').at(-1)}`);
-    writeFileSync(copy, bytes, { mode: 0o600 });
+    writeBackup(copy,bytes);
     return { ...f, after: copy };
   });
   const before = new Set(s.listing);
@@ -138,11 +157,11 @@ export function completeLedger(s: Snapshot): Ledger {
     namespaced: s.namespaced,
     extra: s.extra,
   };
-  writeFileSync(join(s.dir, 'ledger.json'), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+  safeWrite(join(s.dir, 'ledger.json'), `${JSON.stringify(ledger, null, 2)}\n`);
   return ledger;
 }
 
-export interface LedgerPolicy { backupRoot: string; files: string[]; namespaced: string[] }
+export interface LedgerPolicy { backupRoot: string; files: string[]; namespaced: string[]; alternativeFiles?: string[][] }
 export function readLedger(dir: string, policy: LedgerPolicy): Ledger {
   const within = (root: string, path: unknown): path is string => typeof path === 'string' && isAbsolute(path) && path === resolve(path) && !!relative(root,path) && relative(root,path) !== '..' && !relative(root,path).startsWith('..'+sep) && !isAbsolute(relative(root,path));
   const root = resolve(policy.backupRoot);
@@ -151,9 +170,9 @@ export function readLedger(dir: string, policy: LedgerPolicy): Ledger {
   const bytes = safeRead(join(dir,'ledger.json'));
   if (!bytes) throw new Error('missing confined ledger');
   const l = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as Ledger;
-  const backup = (path: unknown) => path === null || (within(root,path) && ['before','after'].includes(dirname(path).split(sep).at(-1)!) && dirname(dirname(path)) !== root && dirname(dirname(dirname(path))) === root);
+  const backup = (path: unknown) => path === null || (within(root,path) && ['before','after','before-md','after-md'].includes(dirname(path).split(sep).at(-1)!) && dirname(dirname(path)) !== root && dirname(dirname(dirname(path))) === root);
   const owned = (path: unknown): path is string => typeof path === 'string' && policy.namespaced.some(n => path === n || within(n,path));
-  if (l.version !== 1 || l.dir !== dir || !Array.isArray(l.files) || l.files.length !== policy.files.length || !l.files.every((f,i) => f.path === policy.files[i] && backup(f.before) && backup(f.after)) || !Array.isArray(l.namespaced) || l.namespaced.length !== policy.namespaced.length || !l.namespaced.every((n,i) => n.path === policy.namespaced[i] && typeof n.existed === 'boolean') || !Array.isArray(l.createdFiles) || !l.createdFiles.every(f => owned(f.path) && /^[a-f0-9]{64}$/.test(f.sha)) || !Array.isArray(l.createdDirs) || !l.createdDirs.every(owned)) throw new Error('ledger paths or schema violate confinement policy');
+  if (l.version !== 1 || l.dir !== dir || !Array.isArray(l.files) || ![policy.files,...(policy.alternativeFiles??[])].some(paths=>l.files.length===paths.length && l.files.every((f,i)=>f.path===paths[i] && backup(f.before) && backup(f.after))) || !Array.isArray(l.namespaced) || l.namespaced.length !== policy.namespaced.length || !l.namespaced.every((n,i) => n.path === policy.namespaced[i] && typeof n.existed === 'boolean') || !Array.isArray(l.createdFiles) || !l.createdFiles.every(f => owned(f.path) && /^[a-f0-9]{64}$/.test(f.sha)) || !Array.isArray(l.createdDirs) || !l.createdDirs.every(owned)) throw new Error('ledger paths or schema violate confinement policy');
   // Validate all referenced paths before any restore or namespace removal can occur.
   for (const f of l.files) for (const p of [f.before,f.after]) if (p !== null) { checkComponents(p); closeSync(openPrivateDirectory(dirname(p))!); }
   for (const p of [...l.files.map(f=>f.path),...l.namespaced.map(n=>n.path),...l.createdDirs,...l.createdFiles.map(f=>f.path)]) checkComponents(p);

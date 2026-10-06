@@ -67,11 +67,17 @@ function topLevelDeveloperInstructions(text: string): boolean {
   let quote = '', multiline = false, depth = 0, inTable = false;
   for (const line of text.split('\n')) {
     if (!quote && depth === 0) {
+      const escapedKey = (key: string) => [...key.matchAll(/"(?:[^"\\]|\\.)*"/g)].some(([part]) => part.includes('\\'));
       if (/^\s*\[/.test(line)) {
-        if (/"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"/.test(line)) throw new SetupError('Codex: escaped quoted project TOML table keys are unsupported; configuration was left unchanged');
+        const header = /^\s*\[\[?((?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\]"'])+)\]\]?\s*(?:#.*)?$/.exec(line);
+        if (!header) throw new SetupError('Codex: unsupported project TOML table syntax; configuration was left unchanged');
+        if (escapedKey(header[1]!)) throw new SetupError('Codex: escaped quoted project TOML table keys are unsupported; configuration was left unchanged');
         inTable = true;
       }
-      if (/^\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*=/.test(line)) {
+      // Inspect only key tokens before '=', including dotted segments. Values,
+      // comments and multiline contents are not configuration keys.
+      const assignment = /^\s*((?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)(?:\s*\.\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+))*)\s*=/.exec(line);
+      if (assignment && escapedKey(assignment[1]!)) {
         throw new SetupError('Codex: escaped quoted project TOML keys are unsupported; configuration was left unchanged');
       }
       if (!inTable && /^\s*(?:developer_instructions|"developer_instructions"|'developer_instructions')\s*=/.test(line)) return true;
@@ -105,16 +111,16 @@ function topLevelDeveloperInstructions(text: string): boolean {
 }
 
 /** Whether Context Engine's Codex settings are in the project's .codex/config.toml. */
-export function codexProjectSettings(root: string): boolean {
+export function codexProjectSettings(root: string, experiments?: string[]): boolean {
   const p = codexConfig(root);
   try {
     const text = safeRead(p)?.toString('utf8') ?? '';
-    const expected = projectCodexToml({experiments:experimentOn('stale-refs') ? ['stale-refs'] : []});
+    const candidates = experiments === undefined ? [projectCodexToml({experiments:[]}),projectCodexToml({experiments:['stale-refs']})] : [projectCodexToml({experiments})];
     const matches = (m: Markers, body: string) => {
       const start = text.indexOf(m.begin+'\n'), stop = text.indexOf(m.end+'\n',start);
       return start >= 0 && stop > start && text.slice(start+m.begin.length+1,stop).trim() === body.trim();
     };
-    return matches(TOML_TOP_MARKERS,expected.top) && matches(TOML_MARKERS,expected.table);
+    return candidates.some(expected=>matches(TOML_TOP_MARKERS,expected.top) && matches(TOML_MARKERS,expected.table));
   } catch { return false; }
 }
 
@@ -134,12 +140,12 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
   const config = codexConfig(root);
   const existing = safeRead(config)?.toString('utf8') ?? null;
   const pointerBytes = safeRead(pointer(ctx,root));
-  const old = pointerBytes ? readLedger(JSON.parse(pointerBytes.toString('utf8')).dir,{backupRoot:join(ctx.setupDir,'backups'),files:[config],namespaced:[]}) : null;
+  const old = pointerBytes ? readLedger(JSON.parse(pointerBytes.toString('utf8')).dir,{backupRoot:join(ctx.setupDir,'backups'),files:[config],namespaced:[],alternativeFiles:[[config,agentsMd(root)]]}) : null;
   if (!old && existing !== null && [TOML_MARKERS.begin, TOML_MARKERS.end, TOML_TOP_MARKERS.begin, TOML_TOP_MARKERS.end].some(marker => existing.includes(marker))) {
     throw new SetupError(`Codex: ${config} contains unowned Context Engine markers; configuration was left unchanged`);
   }
-  if (old && codexProjectSettings(root)) return ['Codex: project settings already in place'];
-  const unmanaged = existing === null ? null : codexConfigRule().strip(existing, old?.files[0]?.before ? readFileSync(old.files[0].before, 'utf8') : null);
+  if (old && codexProjectSettings(root,experimentOn('stale-refs')?['stale-refs']:[])) return ['Codex: project settings already in place'];
+  const unmanaged = existing === null ? null : codexConfigRule().strip(existing, old?.files[0]?.before ? safeRead(old.files[0].before)!.toString('utf8') : null);
   // Check actual table/key declarations, not comments or values containing the name.
   if (unmanaged !== null && /^\s*(?:\[\s*(?:features|"features"|'features')\s*\.\s*(?:token_budget|"token_budget"|'token_budget')\s*\]|(?:(?:features|"features"|'features')\s*\.\s*)?(?:token_budget|"token_budget"|'token_budget')\s*=)/m.test(unmanaged)) {
     throw new SetupError(`Codex: ${config} already configures token_budget; Context Engine guidance was not activated`);
@@ -167,7 +173,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
       ledger.files = ledger.files.map((f, i) => {
         if (unmanaged === null) return { ...f, before: null };
         const previous = old.files.find(o => o.path === f.path)?.before ?? null;
-        const previousText = previous ? readFileSync(previous, 'utf8') : '';
+        const previousText = previous ? safeRead(previous)!.toString('utf8') : '';
         if (unmanaged === previousText) return { ...f, before: previous };
         const repairBefore = join(ledger.dir, 'before', `repair-unmanaged-${i}`);
         safeWrite(repairBefore, unmanaged ?? '');
@@ -192,7 +198,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
 function revertCodexProjectFiles(ctx: SetupContext, pointerFile: string): string[] {
   const { dir, projectRoot } = JSON.parse(safeRead(pointerFile)!.toString('utf8')) as { dir: string; projectRoot: string };
   if (typeof projectRoot !== 'string' || pointer(ctx, projectRoot) !== pointerFile) throw new SetupError('project ledger pointer violates confinement policy');
-  const ledger = readLedger(dir,{backupRoot:join(ctx.setupDir,'backups'),files:[codexConfig(projectRoot)],namespaced:[]});
+  const ledger = readLedger(dir,{backupRoot:join(ctx.setupDir,'backups'),files:[codexConfig(projectRoot)],namespaced:[],alternativeFiles:[[codexConfig(projectRoot),agentsMd(projectRoot)]]});
   const rules = projectRules(projectRoot);
   const lines = describe(revert(ledger, rules, assess(ledger, rules)));
   unlinkSync(pointerFile);

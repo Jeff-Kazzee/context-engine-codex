@@ -49,3 +49,27 @@ test('renewed: revision directory is synced before HEAD publication',()=>{
  assert.ok(revision>=0&&head>revision,JSON.stringify(calls));
  assert.ok(calls.slice(head+1).includes('sync:'+opened.session.stateDir));
 });
+
+import { recall,show,inspectSession } from './index.ts';
+for(const kind of ['symbolic','hard','modified']) test('renewed6: revision snapshots reject '+kind+' substitution',()=>{
+ const f=fixture(),opened=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(opened.status,'open');
+ const s=opened.session,result=s.record([{role:'user',text:'GOOD_REVISION'}]),path=join(s.stateDir,'revisions',result.revision+'.md'),target=join(tempDir('unrelated'),'data');fs.writeFileSync(target,'SYNTHETIC_UNRELATED_BYTES');
+ fs.unlinkSync(path);if(kind==='symbolic')fs.symlinkSync(target,path);else if(kind==='hard')fs.linkSync(target,path);else fs.writeFileSync(path,'SYNTHETIC_WRONG_REVISION');
+ assert.throws(()=>s.sync(),/linked|verified|checksum|ELOOP/);assert.throws(()=>inspectSession({...f,sessionId:'S1'}),/linked|verified|checksum|ELOOP/);
+ assert.equal(fs.readFileSync(target,'utf8'),'SYNTHETIC_UNRELATED_BYTES');s.close();
+});
+test('renewed6: recovery recall and show scan log without whole-file allocation',()=>{
+ const f=fixture(),opened=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(opened.status,'open');const s=opened.session;
+ s.record([{role:'user',text:'STREAM_EVIDENCE'}]);const log=join(s.stateDir,'events.jsonl');s.close();
+ const row=JSON.stringify({type:'diagnostic',text:'x'.repeat(4096)})+'\n';for(let i=0;i<1024;i++)fs.appendFileSync(log,row);
+ const native=fs.readFileSync;fs.readFileSync=((path:any,...args:any[])=>{if(path===log||typeof path==='number'&&fs.realpathSync('/proc/self/fd/'+path)===log)throw new Error('whole-log allocation refused by test');return (native as any)(path,...args);}) as typeof fs.readFileSync;syncBuiltinESMExports();
+ try{assert.equal(recall({...f,sessionId:'S1',query:'STREAM_EVIDENCE'}).total,1);assert.match(show({...f,sessionId:'S1',id:'e1'}).text,/STREAM_EVIDENCE/);const reopened=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(reopened.status,'open');assert.match(reopened.session.sync().workingContextText,/STREAM_EVIDENCE/);reopened.session.close();}
+ finally{fs.readFileSync=native;syncBuiltinESMExports();}
+});
+
+import { readLog } from './store.ts';
+test('renewed6: streaming log keeps UTF8 across chunks and ignores corrupt or torn records',()=>{
+ const path=join(tempDir('stream'),'events.jsonl'),text='漢'.repeat(30000);
+ fs.writeFileSync(path,JSON.stringify({type:'synthetic',text})+'\nNOT_JSON\n'+JSON.stringify({type:'next',text:'OK'})+'\n'+JSON.stringify({type:'torn'}));
+ assert.deepEqual([...readLog(path)],[{type:'synthetic',text},{type:'next',text:'OK'}]);
+});

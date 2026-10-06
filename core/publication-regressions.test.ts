@@ -83,29 +83,30 @@ test('warm reopen avoids historical payload reads; changed budget and invalid ca
   const first = openSession(opts); assert.equal(first.status, 'open');
   first.session.record([{ role: 'tool', text: 'x'.repeat(20000) }]); first.session.close();
   const state = first.session.stateDir, log = join(state, 'events.jsonl'), cache = join(state, 'recovery.json');
-  const nativeRead = fs.readFileSync;
-  let fullReads = 0;
+  const nativeRead = fs.readFileSync,nativeChunk=fs.readSync;
+  let fullReads = 0,historyReads=0;
   try {
     fs.readFileSync = ((path: any, ...args: any[]) => {
       if (path === log) fullReads++;
       return (nativeRead as any)(path, ...args);
     }) as typeof fs.readFileSync;
+    fs.readSync=((fd:number,...args:any[])=>{if(fs.realpathSync('/proc/self/fd/'+fd)===log && args[0]?.length===65536)historyReads++;return (nativeChunk as any)(fd,...args);}) as typeof fs.readSync;
     syncBuiltinESMExports();
     for (let i = 0; i < 8; i++) {
       const r = openSession(opts); assert.equal(r.status, 'open');
       r.session.record([{ role: 'user', text: `small ${i}` }]); r.session.close();
     }
-    assert.equal(fullReads, 0, 'growing normal hooks reuse their fully applied checkpoint');
+    assert.equal(fullReads, 0, 'no whole-log read');assert.equal(historyReads,0,'growing normal hooks reuse their fully applied checkpoint');
     const changed = openSession({ ...opts, budgetTokens: 9999 }); assert.equal(changed.status, 'open'); changed.session.sync(); changed.session.close();
-    assert.equal(fullReads, 1, 'budget change recomputes the complete reminder history');
+    assert.ok(historyReads>0,'budget change scans reminder history');const afterBudget=historyReads;
     const c = JSON.parse(fs.readFileSync(cache, 'utf8')); c.memory.lastTokens++;
     fs.writeFileSync(cache, JSON.stringify(c));
     const corrupt = openSession({ ...opts, budgetTokens: 9999 }); assert.equal(corrupt.status, 'open'); corrupt.session.sync(); corrupt.session.close();
-    assert.equal(fullReads, 2, 'checksum mismatch rebuilds rather than trusting corrupted memory');
+    assert.ok(historyReads>afterBudget,'checksum mismatch rebuilds rather than trusting corrupted memory');const afterCorrupt=historyReads;
     fs.unlinkSync(cache);
     const missing = openSession(opts); assert.equal(missing.status, 'open'); missing.session.sync(); missing.session.close();
-    assert.equal(fullReads, 3, 'legacy/missing cache uses full recovery');
-  } finally { fs.readFileSync = nativeRead; syncBuiltinESMExports(); }
+    assert.ok(historyReads>afterCorrupt,'legacy/missing cache uses full recovery');assert.equal(fullReads,0,'rebuilds stream without whole-log allocation');
+  } finally { fs.readFileSync = nativeRead; fs.readSync=nativeChunk; syncBuiltinESMExports(); }
 });
 
 test('log changes invalidate recovery cache and replay unapplied events without sequence reuse', () => {

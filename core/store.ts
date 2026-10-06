@@ -469,12 +469,14 @@ export function atomicWrite(path: string, data: string, point: CrashPoint, mode 
 }
 
 export function readBytes(path: string): Buffer | undefined {
+  let fd: number;
+  try { fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK); }
+  catch(e) {if((e as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw e;}
   try {
-    return readFileSync(path);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw e;
-  }
+    const st=fstatSync(fd),real=openedPath(fd);
+    if (!st.isFile() || st.nlink!==1 || real!==resolve(path) || isCredential(real,st) || (process.getuid&&st.uid!==process.getuid())) throw new Error('private state file is not verified, unlinked and user-owned');
+    return readFileSync(fd);
+  } finally {closeSync(fd);}
 }
 
 /** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. */
@@ -505,21 +507,31 @@ function appendLogLocked(path: string, entry: Record<string, unknown>): void {
   }
 }
 
-/** Reads every complete Event Log entry. A torn final line or a corrupt line is skipped, never fatal. */
-export function readLog(path: string): Array<Record<string, unknown>> {
-  const raw = readBytes(path);
-  if (!raw) return [];
-  const text = raw.toString('utf8');
-  const entries: Array<Record<string, unknown>> = [];
-  for (const line of text.slice(0, text.lastIndexOf('\n') + 1).split('\n')) {
-    if (!line) continue;
-    try {
-      entries.push(JSON.parse(line) as Record<string, unknown>);
-    } catch {
-      // Unreadable line: skip it rather than lock the session.
+/** Reads every complete Event Log entry. A torn final line or a corrupt line is skipped. Memory follows the largest entry, not the complete history. */
+export function* readLog(path: string): Generator<Record<string,unknown>> {
+  let fd: number;
+  try {fd=verifiedLogDescriptor(path,false,true);}
+  catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
+  try {
+    const chunk=Buffer.alloc(65536);
+    let parts: Buffer[]=[],bytes=0;
+    for(;;){
+      const n=readSync(fd,chunk,0,chunk.length,null);if(!n)break;
+      const batch=chunk.subarray(0,n);
+      let start=0;
+      while(start<n){
+        const end=batch.indexOf(0x0a,start),stop=end<0?n:end,piece=batch.subarray(start,stop);
+        bytes+=piece.length;
+        parts.push(Buffer.from(piece));
+        if(end<0)break;
+        const line=Buffer.concat(parts,bytes).toString('utf8');parts=[];bytes=0;start=end+1;
+        let entry: Record<string,unknown>;
+        try {entry=JSON.parse(line) as Record<string,unknown>;}catch{continue;}
+        if(entry&&typeof entry==='object')yield entry;
+      }
     }
-  }
-  return entries;
+    // Preserve the existing protocol: incomplete final lines are not records.
+  } finally {closeSync(fd);}
 }
 
 /** Cuts a torn (unterminated) final line off the Event Log. Returns the bytes removed. */
@@ -528,8 +540,8 @@ export function truncateTornTail(path: string): number {
   return serialized(`${path}.append.lock`, () => truncateTornTailLocked(path));
 }
 
-function verifiedLogDescriptor(path: string, append: boolean): number {
-  const fd = openSync(path, (append ? constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT : constants.O_RDWR) | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+function verifiedLogDescriptor(path: string, append: boolean, readOnly=false): number {
+  const fd = openSync(path, (append ? constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT : readOnly ? constants.O_RDONLY : constants.O_RDWR) | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || openedPath(fd) !== resolve(path) || (process.getuid && st.uid !== process.getuid())) throw new Error('Event Log is not a verified unlinked owned regular file');

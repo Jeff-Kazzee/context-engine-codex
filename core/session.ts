@@ -223,8 +223,8 @@ export interface SessionStatus {
 export function inspectSession(opts: { projectRoot: string; sessionId: string; stateDir?: string }): SessionStatus {
   const l = layout(opts.projectRoot, opts.sessionId, resolveStateRoot(opts.stateDir));
   const rawHead = readBytes(l.head);
-  const head = rawHead ? (JSON.parse(rawHead.toString('utf8')) as Head) : null;
-  const text = head ? (readBytes(join(l.revisions, `${head.rev}.md`))?.toString('utf8') ?? '') : '';
+  const head = decodeHead(rawHead);
+  const text = head ? readSnapshot(l,head) : '';
   const holder = readLock(l.lock);
   return {
     revision: head?.rev ?? 0,
@@ -234,6 +234,20 @@ export function inspectSession(opts: { projectRoot: string; sessionId: string; s
     lock: holder && holder !== 'unreadable' ? { ...holder, live: isAlive(holder) } : null,
     revisionKind: head?.kind ?? null,
   };
+}
+
+function decodeHead(raw: Buffer | undefined): Head | null {
+  if(!raw)return null;
+  const head=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)) as Head;
+  if(!head || !Number.isSafeInteger(head.rev) || head.rev<1 || !/^[a-f0-9]{64}$/.test(head.sha) || !Number.isSafeInteger(head.through) || head.through<0)throw new Error('invalid private-state HEAD');
+  return head;
+}
+function readSnapshot(l: Layout,head: Head): string {
+  const bytes=readBytes(join(l.revisions,`${head.rev}.md`));
+  if(!bytes)throw new Error(`revision ${head.rev} snapshot is missing`);
+  const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);
+  if(sha(text)!==head.sha)throw new Error(`revision ${head.rev} snapshot checksum mismatch`);
+  return text;
 }
 
 class Core {
@@ -322,13 +336,13 @@ class Core {
 
   private head(): Head | null {
     const raw = readBytes(this.l.head);
-    return raw ? (JSON.parse(raw.toString('utf8')) as Head) : null;
+    return decodeHead(raw);
   }
 
   private snapshot(rev: number): string {
-    const raw = readBytes(join(this.l.revisions, `${rev}.md`));
-    if (!raw) throw new Error(`revision ${rev} snapshot is missing`);
-    return raw.toString('utf8');
+    const head=this.head();
+    if(!head || head.rev!==rev)throw new Error('snapshot revision does not match HEAD');
+    return readSnapshot(this.l,head);
   }
 
   private result(head: Head | null, receipt?: Receipt): SyncResult {
@@ -605,15 +619,15 @@ class Core {
 
     const cached = this.loadRecoveryCheckpoint();
     const log = cached ? [] : readLog(this.l.events);
-    if (!cached && this.budgetTokens !== null) this.memory = budgetMemory(log, this.budgetTokens);
+    if (!cached && this.budgetTokens !== null) this.memory = budgetMemory(readLog(this.l.events), this.budgetTokens);
     const logged: Pending[] = [];
     for (const entry of log) {
       if (entry.type !== 'runner-events') continue;
       const batch = (entry.events as Pending[]).map((p) => ({ seq: p.seq, event: p.event }) as Pending);
       if (entry.replace && batch[0]) batch[0].replace = entry.replace as Replacement;
-      logged.push(...batch);
+      for(const p of batch){this.lastSeq=Math.max(this.lastSeq,p.seq);if(p.seq>(head?.through??0))logged.push(p);}
     }
-    if (!cached) this.lastSeq = logged.reduce((m, e) => Math.max(m, e.seq), 0);
+    // Historical committed payloads are not retained; only replay candidates remain.
 
     const synced = this.sync();
     this.pendingReceipt = interruptedReceipt ?? synced.receipt;
