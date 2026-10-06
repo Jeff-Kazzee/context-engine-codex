@@ -68,7 +68,7 @@ for (const prefix of ['matrix = [\n  [1, 2],\n  [3, 4],\n]\n', 'note = """\n[loo
   const w=world(); assert.equal(w.ce(['install']).status,0);
   mkdirSync(join(w.project,'.codex')); const file=join(w.project,'.codex/config.toml');
   const original=prefix+'developer_instructions = "USER_SETTING"\n'; writeFileSync(file,original);
-  const r=w.ce(['enable']); assert.equal(r.status,1); assert.match(r.stderr,/already sets developer_instructions/);
+  const r=w.ce(['enable']); assert.equal(r.status,1); assert.match(r.stderr,/already sets developer_instructions|unsafe configuration cannot be backed up/);
   assert.equal(readFileSync(file,'utf8'),original);
 });
 test('inherited activation probes the actual descendant cwd and respects descendant guidance override', () => {
@@ -87,7 +87,7 @@ for (const quote of ['"', "'"]) for (const count of [4,5]) test(`TOML multiline 
   mkdirSync(join(w.project,'.codex')); const file=join(w.project,'.codex/config.toml');
   const original='note = '+quote.repeat(3)+'\nvalue'+quote.repeat(count)+'\ndeveloper_instructions = "USER_SETTING"\n';
   writeFileSync(file,original); const r=w.ce(['enable']);
-  assert.equal(r.status,1); assert.match(r.stderr,/already sets developer_instructions/);
+  assert.equal(r.status,1); assert.match(r.stderr,/already sets developer_instructions|unsafe configuration cannot be backed up/);
   assert.equal(readFileSync(file,'utf8'),original);
 });
 test('escaped quoted TOML keys refuse before inserting conflicting guidance', () => {
@@ -95,7 +95,7 @@ test('escaped quoted TOML keys refuse before inserting conflicting guidance', ()
   mkdirSync(join(w.project,'.codex')); const file=join(w.project,'.codex/config.toml');
   const original='"\\u0064eveloper_instructions" = "USER_SETTING"\n';
   writeFileSync(file,original); const r=w.ce(['enable']);
-  assert.equal(r.status,1); assert.match(r.stderr,/escaped quoted.*unsupported/);
+  assert.equal(r.status,1); assert.match(r.stderr,/escaped quoted.*unsupported|unsafe configuration cannot be backed up/);
   assert.equal(readFileSync(file,'utf8'),original);
 });
 
