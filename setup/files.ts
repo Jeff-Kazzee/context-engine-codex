@@ -1,4 +1,4 @@
-// Setup touches configuration, never credentials. Descriptor checks keep reads and replacements
+// Setup refuses known authentication paths; configuration backups have a separate key-based gate. Descriptor checks keep reads and replacements
 // anchored to the verified directory even if a project changes a path concurrently. Linux /proc
 // is required, like the core's confined file reads.
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';

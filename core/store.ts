@@ -188,8 +188,10 @@ const FRAME_KEY = /^[0-9a-f]{32}$/;
 
 /** The frame key stored at `path`, or null when there is none or it is not a whole key. */
 function storedFrameKey(path: string): string | null {
-  const text = readBytes(path)?.toString('utf8').trim();
-  return text && FRAME_KEY.test(text) ? text : null;
+  try {
+    const text = readBytes(path,33)?.toString('utf8').trim();
+    return text && FRAME_KEY.test(text) ? text : null;
+  } catch(e) { if((e as NodeJS.ErrnoException).code==='CE_SIZE_LIMIT')return null;throw e; }
 }
 
 /**
@@ -201,27 +203,31 @@ function storedFrameKey(path: string): string | null {
  * Called while the session is held (openSession), so no other opener races the replacement.
  */
 export function sessionFrameKey(stateDir: string): string {
-  const path = join(stateDir, 'frame-key');
+  const parent = openPrivateDirectory(stateDir)!;
+  const path = join(stateDir, 'frame-key'), target = join(fdLinkPath(parent),'frame-key');
+  let tmp: string | undefined;
+  try {
   const existing = storedFrameKey(path);
   if (existing) return existing;
   const key = randomBytes(16).toString('hex');
-  const tmp = writeTemp(path, `${key}\n`, 'frame-key-tmp', 0o600);
+  tmp = writeTemp(target, `${key}\n`, 'frame-key-tmp', 0o600);
   try {
     try {
-      linkSync(tmp, path);
+      linkSync(tmp, target); fsyncSync(parent);
       return key;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     }
     const theirs = storedFrameKey(path);
     if (theirs) return theirs;
-    renameSync(tmp, path);
+    renameSync(tmp, target); fsyncSync(parent);
     return key;
   } finally {
     try {
       unlinkSync(tmp);
     } catch {}
   }
+  } finally { closeSync(parent); }
 }
 
 // ---- confinement: symlinks, hard links, credential files ----
@@ -442,12 +448,14 @@ function writeTemp(path: string, data: string, point: CrashPoint, mode: number):
 export function atomicWrite(path: string, data: string, point: CrashPoint, mode = 0o600): void {
   if (point !== 'wc-tmp') {
     const parent = dirname(resolve(path));
-    const fd = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const fd = openPrivateDirectory(parent)!;
+    let tmp: string | undefined;
     try {
-      if (openedPath(fd) !== parent) throw new Error('atomic publication parent is not verified');
-      renameSync(writeTemp(path, data, point, mode), path);
+      const target=join(fdLinkPath(fd),basename(path));
+      tmp=writeTemp(target,data,point,mode);
+      renameSync(tmp,target);
       fsyncSync(fd);
-    } finally { closeSync(fd); }
+    } finally { if(tmp)try{unlinkSync(tmp);}catch{} closeSync(fd); }
     return;
   }
   // The editable workspace is not private state. Anchor both names to one
@@ -468,13 +476,15 @@ export function atomicWrite(path: string, data: string, point: CrashPoint, mode 
   }
 }
 
-export function readBytes(path: string): Buffer | undefined {
+export function readBytes(path: string, maxBytes?: number): Buffer | undefined {
   let fd: number;
   try { fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK); }
   catch(e) {if((e as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw e;}
   try {
     const st=fstatSync(fd),real=openedPath(fd);
-    if (!st.isFile() || st.nlink!==1 || real!==resolve(path) || isCredential(real,st) || (process.getuid&&st.uid!==process.getuid())) throw new Error('private state file is not verified, unlinked and user-owned');
+    if(st.nlink!==1)throw Object.assign(new Error('private state file has multiple links; refusing payload'),{code:'CE_STATE_LINK_COUNT'});
+    if (!st.isFile() || real!==resolve(path) || isCredential(real,st) || (process.getuid&&st.uid!==process.getuid())) throw new Error('private state file is not verified, unlinked and user-owned');
+    if(maxBytes!==undefined){const bytes=boundedRead(fd,st.size,maxBytes);if(bytes==='too-large')throw Object.assign(new Error('private state payload exceeds size limit'),{code:'CE_SIZE_LIMIT'});return bytes;}
     return readFileSync(fd);
   } finally {closeSync(fd);}
 }
@@ -527,11 +537,28 @@ export function* readLog(path: string): Generator<Record<string,unknown>> {
         const line=Buffer.concat(parts,bytes).toString('utf8');parts=[];bytes=0;start=end+1;
         let entry: Record<string,unknown>;
         try {entry=JSON.parse(line) as Record<string,unknown>;}catch{continue;}
-        if(entry&&typeof entry==='object')yield entry;
+        if(validLogEntry(entry))yield entry;
       }
     }
     // Preserve the existing protocol: incomplete final lines are not records.
   } finally {closeSync(fd);}
+}
+
+/** Recognized structured payloads must be safe for recovery and evidence consumers. */
+function validLogEntry(entry: unknown): entry is Record<string,unknown> {
+  if(!entry || typeof entry!=='object' || Array.isArray(entry))return false;
+  const row=entry as Record<string,unknown>;
+  if(row.type!=='runner-events')return true;
+  if(!Array.isArray(row.events))return false;
+  let previous=0;
+  for(const pending of row.events){
+    if(!pending || typeof pending!=='object' || !Number.isSafeInteger(pending.seq) || pending.seq<=previous)return false;
+    const event=pending.event;
+    if(!event || typeof event!=='object' || Array.isArray(event) || typeof event.role!=='string' || typeof event.text!=='string')return false;
+    previous=pending.seq;
+  }
+  if(row.replace!==undefined){const r=row.replace as Record<string,unknown>;if(!r || typeof r!=='object' || r.kind!=='native-compaction' || r.reason!=='over-budget' || typeof r.approxTokensBefore!=='number' || !Number.isFinite(r.approxTokensBefore) || r.approxTokensBefore<0 || (r.budgetTokens!==null && (typeof r.budgetTokens!=='number' || !Number.isFinite(r.budgetTokens) || r.budgetTokens<=0)))return false;}
+  return true;
 }
 
 /** Cuts a torn (unterminated) final line off the Event Log. Returns the bytes removed. */

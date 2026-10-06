@@ -19,6 +19,7 @@ import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { closeSync, constants, fsyncSync, openSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
 import { checkComponents, safeRead, safeWrite } from './files.ts';
+import { assertBackupSafe } from './config-safety.ts';
 
 /** How to recognise and remove our entries in one file. */
 export interface Rule {
@@ -87,6 +88,7 @@ export function timestamp(d = new Date()): string {
 /** Backs up `files` byte for byte into a new timestamped dir under `backupRoot`, and lists `watch`. */
 export function takeSnapshot(opts: { backupRoot: string; kind: string; files: string[]; watch: string[]; namespaced: string[]; extra?: Record<string, unknown> }): Snapshot {
   for (const path of opts.namespaced) checkComponents(path);
+  const before=opts.files.map(path=>{const bytes=safeRead(path);assertBackupSafe(path,bytes);return bytes;});
   const at = new Date();
   checkComponents(opts.backupRoot);
   const parent = openPrivateDirectory(opts.backupRoot,{create:true})!;
@@ -103,7 +105,7 @@ export function takeSnapshot(opts: { backupRoot: string; kind: string; files: st
   for(const category of ['before','after']) closeSync(openPrivateDirectory(join(dir,category),{create:true})!);
   const files = opts.files.map((path, i) => {
     const copy = join(dir, 'before', `${i}-${path.split('/').at(-1)}`);
-    const bytes = safeRead(path);
+    const bytes = before[i]!;
     if (bytes === null) return { path, before: null, after: null };
     writeBackup(copy,bytes);
     return { path, before: copy, after: null };
@@ -133,8 +135,9 @@ function writeBackup(path: string, bytes: Buffer): void {
 
 /** Records the edit's result next to the backups and returns the ledger. */
 export function completeLedger(s: Snapshot): Ledger {
+  const after=s.files.map(f=>{const bytes=safeRead(f.path);assertBackupSafe(f.path,bytes);return bytes;});
   const files = s.files.map((f, i) => {
-    const bytes = safeRead(f.path);
+    const bytes = after[i]!;
     if (bytes === null) return { ...f, after: null };
     const copy = join(s.dir, 'after', `${i}-${f.path.split('/').at(-1)}`);
     writeBackup(copy,bytes);

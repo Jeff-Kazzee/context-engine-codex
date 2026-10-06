@@ -23,6 +23,7 @@ import { projectCodexToml } from '../adapters/codex/guidance.ts';
 import { describe, installedLedger, SetupError } from './install.ts';
 import { assess, completeLedger, readLedger, revert, rollbackSnapshot, takeSnapshot, type Ledger, type Rule } from './ledger.ts';
 import { safeRead, safeWrite } from './files.ts';
+import { assertBackupSafe } from './config-safety.ts';
 import { appendBlock, blockRule, prependBlock, type Markers } from './rules.ts';
 import type { SetupContext } from './runners.ts';
 
@@ -138,7 +139,8 @@ export function codexTrusts(ctx: SetupContext, root: string): boolean {
 
 function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
   const config = codexConfig(root);
-  const existing = safeRead(config)?.toString('utf8') ?? null;
+  const existingBytes=safeRead(config);assertBackupSafe(config,existingBytes);
+  const existing = existingBytes?.toString('utf8') ?? null;
   const pointerBytes = safeRead(pointer(ctx,root));
   const old = pointerBytes ? readLedger(JSON.parse(pointerBytes.toString('utf8')).dir,{backupRoot:join(ctx.setupDir,'backups'),files:[config],namespaced:[],alternativeFiles:[[config,agentsMd(root)]]}) : null;
   if (!old && existing !== null && [TOML_MARKERS.begin, TOML_MARKERS.end, TOML_TOP_MARKERS.begin, TOML_TOP_MARKERS.end].some(marker => existing.includes(marker))) {
@@ -176,6 +178,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
         const previousText = previous ? safeRead(previous)!.toString('utf8') : '';
         if (unmanaged === previousText) return { ...f, before: previous };
         const repairBefore = join(ledger.dir, 'before', `repair-unmanaged-${i}`);
+        assertBackupSafe(config,Buffer.from(unmanaged));
         safeWrite(repairBefore, unmanaged ?? '');
         return { ...f, before: repairBefore };
       });

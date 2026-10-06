@@ -4,7 +4,8 @@ import { randomBytes } from 'node:crypto';
 import { closeSync, linkSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { lockStep } from './faults.ts';
-import { atomicWrite } from './store.ts';
+import { atomicWrite, readBytes, openPrivateDirectory } from './store.ts';
+import { dirname, basename, join } from 'node:path';
 
 export interface LockHolder {
   pid: number;
@@ -46,16 +47,19 @@ export function isAlive(h: LockHolder): boolean {
 }
 
 export function readLock(path: string): LockHolder | null | 'unreadable' {
-  let raw: string;
+  let bytes: Buffer | undefined;
+  const deadline=Date.now()+100;
+  for(;;){try{bytes=readBytes(path,16384);break;}catch(e){
+    // A legitimate link publication briefly has two names. Wait without reading;
+    // persistent unsafe links throw and are never eligible for dead-lock takeover.
+    if((e as NodeJS.ErrnoException).code!=='CE_STATE_LINK_COUNT' || Date.now()>=deadline)throw e;
+    sleepSync(1);
+  }}
+  if(bytes===undefined)return null;
   try {
-    raw = readFileSync(path, 'utf8');
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw e;
-  }
-  try {
-    const h = JSON.parse(raw) as LockHolder;
-    return typeof h.pid === 'number' ? h : 'unreadable';
+    const h = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as LockHolder;
+    if(!h || !Number.isSafeInteger(h.pid) || h.pid<=0 || typeof h.hostname!=='string' || !(h.startMarker===null || typeof h.startMarker==='string') || typeof h.runner!=='string' || typeof h.hardLimit!=='number' || !Number.isFinite(h.hardLimit) || h.hardLimit<0 || typeof h.acquiredAt!=='string')return 'unreadable';
+    return {pid:h.pid,hostname:h.hostname,startMarker:h.startMarker,runner:h.runner,hardLimit:h.hardLimit,acquiredAt:h.acquiredAt};
   } catch {
     return 'unreadable';
   }
@@ -139,7 +143,10 @@ export function serialized<T>(path: string, fn: () => T, opts: { timeoutMs?: num
 }
 
 function tryLink(path: string, me: LockHolder): boolean {
-  const candidate = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.new`;
+  const parent=openPrivateDirectory(dirname(path))!;
+  const target=join(`/proc/self/fd/${parent}`,basename(path));
+  const candidate = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.new`;
+  try {
   const fd = openSync(candidate, 'wx', 0o600);
   try {
     const bytes = Buffer.from(JSON.stringify(me));
@@ -150,7 +157,7 @@ function tryLink(path: string, me: LockHolder): boolean {
         offset += written;
       }
     } finally { closeSync(fd); }
-    linkSync(candidate, path);
+    linkSync(candidate, target);
     return true;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
@@ -158,6 +165,7 @@ function tryLink(path: string, me: LockHolder): boolean {
   } finally {
     unlinkSync(candidate);
   }
+  } finally {closeSync(parent);}
 }
 
 /**

@@ -239,7 +239,7 @@ export function inspectSession(opts: { projectRoot: string; sessionId: string; s
 function decodeHead(raw: Buffer | undefined): Head | null {
   if(!raw)return null;
   const head=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)) as Head;
-  if(!head || !Number.isSafeInteger(head.rev) || head.rev<1 || !/^[a-f0-9]{64}$/.test(head.sha) || !Number.isSafeInteger(head.through) || head.through<0)throw new Error('invalid private-state HEAD');
+  if(!head || Array.isArray(head) || !Number.isSafeInteger(head.rev) || head.rev<1 || typeof head.sha!=='string' || !/^[a-f0-9]{64}$/.test(head.sha) || !Number.isSafeInteger(head.through) || head.through<0 || typeof head.materialized!=='boolean' || !(head.parent===null || typeof head.parent==='string'&&/^[a-f0-9]{64}$/.test(head.parent)) || !(head.kind===undefined || ['init','model-edit','runner-append','native-compaction'].includes(head.kind)))throw new Error('invalid private-state HEAD');
   return head;
 }
 function readSnapshot(l: Layout,head: Head): string {
