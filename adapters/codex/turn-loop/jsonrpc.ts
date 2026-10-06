@@ -85,7 +85,10 @@ export function spawnJsonRpc(command: string[], opts: SpawnOptions): JsonRpcConn
   child.stdin?.on('error', (e) => failAll(new Error(`app-server input failed: ${e.message}`)));
   child.stdin?.on('close', () => failAll(new Error('app-server input is closed')));
 
-  createInterface({ input: child.stdout! }).on('line', (line) => {
+  child.stdout?.on('error', (e) => failAll(new Error(`app-server output failed: ${e.message}`)));
+  child.stdout?.on('end', () => failAll(new Error('app-server output is closed')));
+  child.stdout?.on('close', () => failAll(new Error('app-server output is closed')));
+  createInterface({ input: child.stdout! }).on('close', () => failAll(new Error('app-server output is closed'))).on('line', (line) => {
     if (!line.trim()) return;
     let m: any;
     try {

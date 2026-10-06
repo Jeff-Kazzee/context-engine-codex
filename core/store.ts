@@ -150,6 +150,7 @@ function createConfinedDirectory(path: string, ownedFrom?: string): void {
       try { mkdirSync(anchored, { mode: 0o700 }); }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
       const next = openSync(anchored, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(fd); } catch (e) { closeSync(next); throw e; }
       closeSync(fd); fd = next;
       existing = join(existing, name);
       if (openedPath(fd) !== existing) throw new Error('private-directory child changed; refusing creation');

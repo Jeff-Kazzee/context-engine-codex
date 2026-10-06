@@ -178,7 +178,7 @@ export function readLedger(dir: string, policy: LedgerPolicy): Ledger {
   const bytes = safeRead(join(dir,'ledger.json'));
   if (!bytes) throw new Error('missing confined ledger');
   const l = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as Ledger;
-  const backup = (path: unknown) => path === null || (within(root,path) && ['before','after','before-md','after-md'].includes(dirname(path).split(sep).at(-1)!) && dirname(dirname(path)) !== root && dirname(dirname(dirname(path))) === root);
+  const backup = (path: unknown) => path === null || (within(dir,path) && ['before','after','before-md','after-md'].includes(dirname(path).split(sep).at(-1)!) && dirname(dirname(path)) === dir);
   const owned = (path: unknown): path is string => typeof path === 'string' && policy.namespaced.some(n => path === n || within(n,path));
   if (l.version !== 1 || l.dir !== dir || !Array.isArray(l.files) || ![policy.files,...(policy.alternativeFiles??[])].some(paths=>l.files.length===paths.length && l.files.every((f,i)=>f.path===paths[i] && backup(f.before) && backup(f.after))) || !Array.isArray(l.namespaced) || l.namespaced.length !== policy.namespaced.length || !l.namespaced.every((n,i) => n.path === policy.namespaced[i] && typeof n.existed === 'boolean') || !Array.isArray(l.createdFiles) || !l.createdFiles.every(f => owned(f.path) && /^[a-f0-9]{64}$/.test(f.sha)) || !Array.isArray(l.createdDirs) || !l.createdDirs.every(owned)) throw new Error('ledger paths or schema violate confinement policy');
   // Validate all referenced paths before any restore or namespace removal can occur.

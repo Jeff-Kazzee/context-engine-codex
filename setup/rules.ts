@@ -78,6 +78,36 @@ export function jsonRule(paths: string[][]): Rule {
 
 const header = (line: string) => /^\s*\[/.test(line);
 
+/** Header positions outside basic/literal strings and comments, including multiline strings. */
+function tomlHeaders(lines: string[]): Set<number> {
+  const headers = new Set<number>();
+  let quote = '', multiline = false;
+  for (let row = 0; row < lines.length; row++) {
+    const line = lines[row]!;
+    if (!quote && header(line)) headers.add(row);
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i]!;
+      if (quote) {
+        if (quote === '"' && c === '\\') { i++; continue; }
+        if (multiline && line.slice(i, i + 3) === quote.repeat(3)) {
+          let count = 3; while (count < 5 && line[i + count] === quote) count++;
+          i += count - 1; quote = ''; multiline = false;
+        } else if (!multiline && c === quote) quote = '';
+      } else {
+        if (c === '#') break;
+        if (c === '"' || c === "'") {
+          quote = c; multiline = line.slice(i, i + 3) === c.repeat(3);
+          if (multiline) i += 2;
+        }
+      }
+    }
+    // Ordinary strings cannot cross a TOML line. Refuse ambiguous invalid input.
+    if (quote && !multiline) throw new Error('unterminated TOML string; refusing table stripping');
+  }
+  if (quote) throw new Error('unterminated TOML multiline string; refusing table stripping');
+  return headers;
+}
+
 /**
  * A TOML file where our entries are whole tables whose header line matches `ours`. A table is
  * its header through the line before the next header; the blank line separating it from the
@@ -87,15 +117,16 @@ const header = (line: string) => /^\s*\[/.test(line);
 export function tomlTablesRule(ours: RegExp, emptyParents: RegExp): Rule {
   const strip = (text: string, before: string | null) => {
     const lines = text.split('\n');
-    const priorHeaders = new Set((before ?? '').split('\n').filter(header).map((l) => l.trim()));
+    const positions = tomlHeaders(lines), priorLines = (before ?? '').split('\n');
+    const priorHeaders = new Set([...tomlHeaders(priorLines)].map(i => priorLines[i]!.trim()));
     const out: string[] = [];
     for (let i = 0; i < lines.length; ) {
       const line = lines[i]!;
-      const ourTable = header(line) && ours.test(line.trim());
+      const ourTable = positions.has(i) && ours.test(line.trim());
       let end = i + 1;
-      while (end < lines.length && !header(lines[end]!)) end++;
+      while (end < lines.length && !positions.has(end)) end++;
       const body = lines.slice(i + 1, end);
-      const emptyParent = header(line) && emptyParents.test(line.trim()) && !priorHeaders.has(line.trim()) && body.every((l) => l.trim() === '');
+      const emptyParent = positions.has(i) && emptyParents.test(line.trim()) && !priorHeaders.has(line.trim()) && body.every((l) => l.trim() === '');
       if (!ourTable && !emptyParent) {
         out.push(line);
         i++;
@@ -111,7 +142,6 @@ export function tomlTablesRule(ours: RegExp, emptyParents: RegExp): Rule {
   };
   return {
     strip,
-    empty: (text) => text.trim() === '',
     canon: (text) =>
       text
         .split('\n')

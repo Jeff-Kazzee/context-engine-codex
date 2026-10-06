@@ -224,7 +224,7 @@ export interface SessionStatus {
 /** Read-only view of a session. Takes no lock, runs no recovery, creates nothing. */
 export function inspectSession(opts: { projectRoot: string; sessionId: string; stateDir?: string }): SessionStatus {
   const l = layout(opts.projectRoot, opts.sessionId, resolveStateRoot(opts.stateDir));
-  const rawHead = readBytes(l.head);
+  const rawHead = readHead(l.head);
   const head = decodeHead(rawHead);
   const text = head ? readSnapshot(l,head) : '';
   const holder = readLock(l.lock);
@@ -237,6 +237,9 @@ export function inspectSession(opts: { projectRoot: string; sessionId: string; s
     revisionKind: head?.kind ?? null,
   };
 }
+
+// HEAD contains fixed-size hashes and counters; reject corrupt metadata before allocation.
+function readHead(path: string): Buffer | undefined { return readBytes(path, 4096); }
 
 function decodeHead(raw: Buffer | undefined): Head | null {
   if(!raw)return null;
@@ -317,7 +320,7 @@ class Core {
       const log = this.checkpointLog();
       const m = c.memory;
       const nonnegative = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-      if (c.version !== 1 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readBytes(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
+      if (c.version !== 1 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readHead(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
       this.lastSeq = c.lastSeq;
       this.memory = { announced: m.announced, growth: [...m.growth], lastTokens: m.lastTokens, loggedBudget: m.loggedBudget };
       return true;
@@ -329,7 +332,7 @@ class Core {
       const head = this.head();
       const log = this.checkpointLog();
       if (!log || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
-      const payload = { version: 1, log, head: sha(readBytes(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
+      const payload = { version: 1, log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
       atomicWrite(join(this.l.stateDir, 'recovery.json'), JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) }), 'recovery-checkpoint-tmp');
     } catch { /* A cache failure never changes the session result; next open rebuilds. */ }
   }
@@ -337,7 +340,7 @@ class Core {
   // ---- reading ----
 
   private head(): Head | null {
-    const raw = readBytes(this.l.head);
+    const raw = readHead(this.l.head);
     return decodeHead(raw);
   }
 

@@ -191,7 +191,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string, disabled = fals
         if (unmanaged === null) return { ...f, before: null };
         const previous = old.files.find(o => o.path === f.path)?.before ?? null;
         const previousText = previous ? safeRead(previous)!.toString('utf8') : '';
-        if (unmanaged === previousText) return { ...f, before: previous };
+        if (unmanaged === previousText && previous === null) return { ...f, before: null };
         const repairBefore = join(ledger.dir, 'before', `repair-unmanaged-${i}`);
         assertBackupSafe(config,Buffer.from(unmanaged));
         safeWrite(repairBefore, unmanaged ?? '');
@@ -272,10 +272,8 @@ export function enableProject(ctx: SetupContext, projectRoot: string): string[] 
 }
 
 export function disableProject(ctx: SetupContext, projectRoot: string): string[] {
-  setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'off' });
-  const p = participation({ projectRoot, stateDir: dirname(ctx.setupDir), env: {} });
-  const lines = [`Context Engine disabled for ${p.project} and its subdirectories (new sessions; a running Codex session stops at its next hook).`];
-  const ptr = pointer(ctx, p.project!);
+  const lines: string[] = [];
+  const ptr = pointer(ctx, projectRoot);
   if (existsSync(ptr)) lines.push(...revertCodexProjectFiles(ctx,ptr));
   for (let ancestor = dirname(projectRoot); ancestor !== projectRoot; ancestor = dirname(ancestor)) {
     if (codexProjectSettings(ancestor)) {
@@ -284,5 +282,9 @@ export function disableProject(ctx: SetupContext, projectRoot: string): string[]
     }
     if (dirname(ancestor) === ancestor) break;
   }
+  // Hooks must remain engaged if removing or shadowing active guidance fails.
+  setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'off' });
+  const rec = findRecord({ projectRoot, stateDir: dirname(ctx.setupDir) })!;
+  lines.unshift(`Context Engine disabled for ${rec.project} and its subdirectories (new sessions; a running Codex session stops at its next hook).`);
   return lines;
 }

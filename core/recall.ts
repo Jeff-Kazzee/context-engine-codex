@@ -196,6 +196,7 @@ export function show(opts: SessionRef & { id: string }): ShowResult {
   if (jsonBytes(whole) > budget) {
     // Longest prefix that fits. JSON escaping makes bytes per character vary, so search for it.
     const cut = (n: number): ShowResult => ({ ...whole, text: it.text.slice(0, safeIndex(it.text, n)), truncated: true });
+    if (jsonBytes(cut(0)) > budget) throw new Error('show metadata exceeds the result byte limit; refusing an oversized envelope');
     let lo = 0;
     let hi = it.text.length;
     while (lo < hi) {

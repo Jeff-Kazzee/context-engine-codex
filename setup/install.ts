@@ -1,9 +1,10 @@
 // Install and uninstall one runner's adapter through the runner's own plugin commands, with every
 // config file they touch backed up byte for byte first (ledger.ts).
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assess, completeLedger, type FileReport, type Ledger, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
 import { safeRead, safeWrite, withSetupLock } from './files.ts';
+import { openPrivateDirectory } from '../core/store.ts';
 import { codexSpec, runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
 
 const pointerPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}.json`);
@@ -27,7 +28,7 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   const prior = installedLedger(ctx, spec.id, spec);
   if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine-${spec.id} uninstall\` first`);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
-  let published = false;
+  let publication: string | undefined;
   try {
     spec.prepare?.();
     for (const cmd of spec.install) {
@@ -39,8 +40,8 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
     }
     const ledger = completeLedger(snap);
     mkdirSync(ctx.setupDir, { recursive: true, mode: 0o700 });
-    safeWrite(pointerPath(ctx, spec.id), `${JSON.stringify({ dir: ledger.dir })}\n`);
-    published = true;
+    publication = `${JSON.stringify({ dir: ledger.dir })}\n`;
+    safeWrite(pointerPath(ctx, spec.id), publication);
     const changed = ledger.files.filter((f) => !sameBytes(f.before, f.after)).map((f) => f.path);
     return [
       `Changed by \`${spec.bin} plugin\`: ${changed.join(', ') || '(no config file)'}`,
@@ -51,7 +52,12 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
     let retained: string[];
     try { retained = rollbackSnapshot(snap, spec.rules); }
     catch (rollbackError) { throw new AggregateError([e, rollbackError], `${spec.title}: install failed and rollback was incomplete; before backups are preserved at ${join(snap.dir, 'before')}`); }
-    if (published) try { unlinkSync(pointerPath(ctx, spec.id)); } catch (cleanupError) { if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanupError; }
+    // A rename may publish before its directory flush throws. Remove only our pointer.
+    if (publication && safeRead(pointerPath(ctx, spec.id))?.equals(Buffer.from(publication))) {
+      const parent = openPrivateDirectory(ctx.setupDir)!;
+      try { unlinkSync(join(`/proc/self/fd/${parent}`, `${spec.id}.json`)); fsyncSync(parent); }
+      finally { closeSync(parent); }
+    }
     throw new SetupError(`${e instanceof Error ? e.message : String(e)}; tracked configuration rollback completed with unmanaged edits preserved; ${retained.length} unowned new paths retained; before backups: ${join(snap.dir, 'before')}`, { cause: e });
   }
 }
