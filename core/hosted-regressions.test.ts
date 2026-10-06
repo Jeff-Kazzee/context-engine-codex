@@ -185,3 +185,52 @@ test('rendering cannot sanitize a non-assistant role into assistant authorship',
   }
   assert.deepEqual(parseTurns(renderTurns([{ role: 'Assistant', text: 'ANSWER' }])), [{role: 'assistant', text: 'ANSWER'}]);
 });
+
+import { armCrash, InjectedCrash } from './faults.ts';
+import { checkRefs } from './refs.ts';
+test('multipart read refuses a sparse oversized file before any unbounded payload read', () => {
+  const f=fixture(), r=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000}); assert.equal(r.status,'open');
+  const s=r.session; s.record([{role:'user',text:'SMALL'}]); fs.truncateSync(s.workingContextPath,1024*1024*1024);
+  const native=fs.readFileSync;
+  fs.readFileSync=((path:any,...args:any[])=>{if(typeof path==='number' && fs.fstatSync(path).size>16*1024*1024) throw new Error('UNBOUNDED_PAYLOAD_READ');return (native as any)(path,...args);}) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+  try {assert.throws(()=>readWorkingContext({...f,sessionId:'S1'}),/read limit|too large/i);}
+  finally {fs.readFileSync=native;syncBuiltinESMExports();s.close();}
+});
+test('citations refuse invalid UTF-8 and valid citations become stale on invalid-byte replacement', () => {
+  const f=fixture(), file=join(f.projectRoot,'source.txt');fs.writeFileSync(file,Buffer.from([0xff,0x0a]));
+  assert.throws(()=>cite(f.projectRoot,'source.txt'),/UTF-8|encoded data/i);
+  fs.writeFileSync(file,'VALID_SOURCE');const marker=cite(f.projectRoot,'source.txt');
+  fs.writeFileSync(file,Buffer.from([0xfe,0x0a]));assert.equal(checkRefs(f.projectRoot,marker)?.refs[0]?.reason,'changed');
+});
+test('linked participation directory is never read or used for publication', () => {
+  const f=fixture(), external=tempDir('participation-outside');fs.mkdirSync(f.stateDir,{mode:0o700});fs.symlinkSync(external,join(f.stateDir,'participation'));
+  assert.throws(()=>setParticipation({...f,state:'on'}),/linked|symbolic|verified/i);
+  assert.deepEqual(fs.readdirSync(external),[]);
+  assert.throws(()=>participation({...f,env:{}}),/linked|symbolic|verified/i);
+});
+test('a linked state ancestor cannot create an absent external child', () => {
+  const f=fixture(), external=tempDir('state-external'), parent=tempDir('state-parent');
+  fs.symlinkSync(external,join(parent,'linked'));
+  assert.throws(()=>setParticipation({...f,stateDir:join(parent,'linked','absent'),state:'on'}),/linked|verified/i);
+  assert.deepEqual(fs.readdirSync(external),[]);
+});
+test('Working Context directories and files are private under umask 022', () => {
+  const mask=process.umask(0o022), f=fixture();
+  try {const r=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(r.status,'open');
+    const s=r.session;s.record([{role:'user',text:'SYNTHETIC_PRIVATE_TASK'}]);
+    assert.equal(fs.statSync(s.workingContextPath).mode&0o777,0o600);
+    assert.equal(fs.statSync(dirname(s.workingContextPath)).mode&0o777,0o700);
+    assert.equal(fs.statSync(dirname(dirname(s.workingContextPath))).mode&0o777,0o700);s.close();
+  }finally{process.umask(mask);}
+});
+test('crash recovery preserves a committed runner append over an edit of its stale parent', () => {
+  const f=fixture(), first=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(first.status,'open');
+  const s=first.session;s.record([{role:'user',text:'INITIAL_TASK'}]);
+  armCrash('before-wc');try{assert.throws(()=>s.record([{role:'tool',text:'COMMITTED_RUNNER_EVENT'}]),InjectedCrash);}finally{armCrash(null);}
+  fs.writeFileSync(s.workingContextPath,'[[CTX_TURN 1 role=user]]\nEDIT_OF_STALE_PARENT');
+  const next=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(next.status,'open');
+  const result=next.session.sync();assert.match(result.workingContextText,/COMMITTED_RUNNER_EVENT/);
+  assert.equal(recall({...f,sessionId:'S1',query:'EDIT_OF_STALE_PARENT'}).total,1);
+  assert.equal(result.receipt?.kind,'restored');next.session.close();
+});

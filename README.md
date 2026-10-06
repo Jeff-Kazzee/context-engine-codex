@@ -14,7 +14,9 @@ Copy the following prompt, replacing the project placeholder before sending it:
 Set up Context Engine for Codex from
 https://github.com/Jeff-Kazzee/context-engine-codex
 for this project: <absolute project path>.
-Read the CURRENT README.md, AGENTS.md, PROVENANCE.md, SOURCE.json and
+This is the open PR candidate on release/runtime-plugin-agent-guides; main is
+bootstrap-only. Verify the candidate commit and source review/owner approval
+before any installation trial. Read the CURRENT README.md, AGENTS.md, PROVENANCE.md, SOURCE.json and
 adapters/codex/README.md before executing anything. Verify the actual OS,
 Node version, codex version and available plugin/mod commands against those
 docs and their CLI help. The inherited compatibility baseline is codex-cli 0.160.0 (token_budget under development);
@@ -57,8 +59,10 @@ codex plugin --help
 These commands change configuration. Run them only after the preflight above, in a supported environment where you approve plugin installation. Keep the checkout at its installed path: hook commands refer to it. If the sibling adapter is already installed, first choose shared or isolated participation as described below; do not run `enable` until that scope is approved.
 
 ```sh
-git clone https://github.com/Jeff-Kazzee/context-engine-codex.git
+git clone --branch release/runtime-plugin-agent-guides --single-branch https://github.com/Jeff-Kazzee/context-engine-codex.git
 cd context-engine-codex
+git rev-parse HEAD
+# Verify this candidate head against the reviewed PR before proceeding.
 npm ci
 npm link
 context-engine-codex install
@@ -99,7 +103,7 @@ context-engine recall --session <session-id> decision
 context-engine show --session <session-id> <event-id>
 ```
 
-`read` names every next part when a file needs paging. `recall` and `show` are limited to the caller's project, with bounded output. Recall may report `accounting: skipped` if the Event Log cannot be written in a sandbox; that path is unit-tested, not established by a real sandbox session.
+`read` names every next part when a file needs paging. It refuses files above 16 MiB before loading their payload; reset backstops also refuse files above this delivery limit; offload large content with source pointers instead of relying on unbounded paging. Invalid UTF-8 is refused by reads and citations. `recall` and `show` are limited to the caller's project, with bounded output. Recall may report `accounting: skipped` if the Event Log cannot be written in a sandbox; that path is unit-tested, not established by a real sandbox session.
 
 ## 4. Roll back or uninstall
 
@@ -115,7 +119,7 @@ npm unlink --global context-engine-codex
 
 Claude enable/disable and kill-switch changes apply to new sessions; Codex checks participation at each hook. Backups precede config writes. Conflicting project guidance or unsafe paths refuse activation and leave this project disabled; re-enable repairs missing managed blocks while preserving the original rollback bytes. Unchanged configuration is restored byte for byte; if other tools changed it, uninstall removes only Context Engine entries and reports the backup location. Project rollback runs before global removal, so a refused rollback retains installation metadata for retry. Review partial failures before retrying. Unlinking the CLI alone does not uninstall plugin configuration.
 
-Working Contexts live in `<project>/.context-engine/<session>/`. Revisions, the Event Log, participation and install backups live under `$XDG_STATE_HOME/context-engine` (default `~/.local/state/context-engine`; `CONTEXT_ENGINE_STATE_DIR` overrides). Runner homes honor `CLAUDE_CONFIG_DIR`/`CODEX_HOME`. Uninstall retains those session records. Deletion from Working Context only removes future model input; prior text remains in runner transcripts and the Event Log. Delete retained data only with your own exact-path approval.
+Working Contexts live in `<project>/.context-engine/<session>/`, with managed directories private (`0700`) and the file private (`0600`). Existing user-owned managed directories/files are tightened on open; unsafe links, credentials and shared state roots are refused. Setup also refuses nonprivate state roots before changing runner configuration. If an interrupted runner append committed a revision before writing the file, recovery delivers that revision and preserves an intervening stale-file edit in the Event Log with a restore notice. Revisions, the Event Log, participation and install backups live under `$XDG_STATE_HOME/context-engine` (default `~/.local/state/context-engine`; `CONTEXT_ENGINE_STATE_DIR` overrides). Runner homes honor `CLAUDE_CONFIG_DIR`/`CODEX_HOME`. Uninstall retains those session records. Deletion from Working Context only removes future model input; prior text remains in runner transcripts and the Event Log. Delete retained data only with your own exact-path approval.
 
 ## Troubleshooting and limits
 
@@ -147,3 +151,5 @@ Install pointers refuse linked paths. Disable/uninstall remove managed files or 
 Setup operations for this runner are serialized by a private setup lock. If setup is interrupted and reports an existing lock, verify no setup process remains before removing the exact reported lock. Do not run concurrent install or uninstall commands.
 
 Staged hooks use the absolute Node executable that ran setup. Keep that executable and the checkout path available; reinstall if either moves. If `install --trust-hooks` fails after installation, the install is retained and reported: approve the hooks through `/hooks`, then check `context-engine-codex status`; do not repeat install over its existing record.
+
+The staged Codex hook verifies the nearest private local participation record before importing its checkout. Never-enabled, explicitly disabled and kill-switch sessions remain native even when the checkout is missing. Only a verified enabled record activates the reset gate: a broken checkout then denies `new_context`. Unverifiable or corrupt activation state logs an error where applicable and stands aside; repair state permissions or reinstall before treating Context Engine as active.

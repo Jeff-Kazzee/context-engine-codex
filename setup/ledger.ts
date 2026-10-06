@@ -142,11 +142,12 @@ export function readLedger(dir: string): Ledger {
   return JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8')) as Ledger;
 }
 
-/** Restore directly from the before snapshot: completion may itself be the failing operation. */
+/** Reverse known managed fields; preserve concurrent changes without post-edit ownership proof. */
 export function rollbackSnapshot(s: Snapshot, rules: Record<string, Rule>): string[] {
   const before = new Set(s.listing);
-  const l: Ledger = { ...s, createdFiles: [], createdDirs: [] };
-  revert(l, rules, Object.fromEntries(s.files.map(f => [f.path, true])));
+  const l: Ledger = { ...s, files: s.files.map(f => ({ ...f, after: f.before })), createdFiles: [], createdDirs: [] };
+  const unchanged = assess(l, rules);
+  revert(l, rules, unchanged);
   const owned = (path: string) => s.namespaced.some(n => path === n.path || path.startsWith(`${n.path}/`));
   for (const path of list(s.watch).filter(p => !before.has(p) && p.endsWith('/') && owned(p)).sort((a, b) => b.length - a.length)) {
     try { rmdirSync(path.slice(0, -1)); } catch { /* Retain nonempty/unavailable paths. */ }

@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { locallyEnabled } from './activation.ts';
 import type * as Core from '../../../../core/index.ts';
 import type * as Guidance from '../../guidance.ts';
 
@@ -47,6 +48,7 @@ async function loadFromCheckout<T>(fromCheckout: string, fromHere: string): Prom
 let lib: typeof Core;
 /** The Working Context's budget in tokens (adapters/codex/guidance.ts codexWorkingContextBudget). */
 let budgetTokens: number;
+let confirmedParticipation = false;
 
 /** The agent's own reset (new_context): the one event that fails closed. */
 const isResetGate = (input: HookInput): boolean => input.hook_event_name === 'PreToolUse' && input.tool_name === 'new_context';
@@ -60,16 +62,17 @@ function denyReset(refusal: string): void {
 /**
  * The event is read before any checkout module is loaded, so a failure to load them (the checkout
  * moved or deleted, a module that throws) is seen with the event in hand: the reset gate then
- * refuses (see the handler at the bottom), and every other hook stands aside.
+ * refuses only after cache-local opt-in was verified (see the handler at the bottom), and every other hook stands aside.
  */
 async function main(input: HookInput): Promise<void> {
   // Subagents (multi-agent mode) get no Working Context; only the root agent's session is managed.
   if (input.agent_id) return;
+  confirmedParticipation = locallyEnabled(input.cwd);
+  if (!confirmedParticipation) return;
   lib = await loadFromCheckout<typeof Core>('core/index.ts', '../../../../core/index.ts');
   const guidance = await loadFromCheckout<typeof Guidance>('adapters/codex/guidance.ts', '../../guidance.ts');
   budgetTokens = guidance.codexWorkingContextBudget(process.env.CONTEXT_ENGINE_BUDGET_TOKENS);
-  // Kill switch: a disabled install costs one node start and a module load. A project nobody
-  // enabled is found out by the core (--if-enabled), which then writes nothing.
+  // Cache-local opt-in was checked before imports; the core repeats the participation gate.
   if (lib.killSwitchOn()) return;
   if (input.hook_event_name === 'UserPromptSubmit') {
     const result = core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }]);
@@ -118,7 +121,7 @@ async function main(input: HookInput): Promise<void> {
     // stops only a reset onto an unusable file (restored, or nothing to restore) and does no size
     // check: this reset is Codex's own, made because the window is already full, so refusing it for
     // size would abort the user's turn and free nothing; and `context-engine read` pages a file of
-    // any size, so the agent can still read it back (the budget reminders say when it is over).
+    // up to 16 MiB; larger payloads must be offloaded (budget reminders warn earlier).
     const refusal = resetRefusal(input, { budget: false });
     if (refusal) emit({ continue: false, stopReason: refusal });
     // Mark the reset in the file, as a new_context call is marked, unless that marker is already the
@@ -151,7 +154,8 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
     // user's turn. Without the core it is stopped only when the file is plainly missing or empty.
     let text = '';
     try {
-      const bytes = lib.readWorkingContextFile(join(input.cwd, path));
+      const bytes = lib.readWorkingContextFile(join(input.cwd, path), lib.READ_MAX_FILE_BYTES);
+      if (bytes === 'too-large') return `${notReset} Your Working Context exceeds the 16 MiB read limit. Offload large content with source pointers before resetting.`;
       if (Buffer.isBuffer(bytes)) text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     } catch {}
     return text.trim() ? null : `${notReset} Your Working Context ${path} is missing or empty. Write the current task, decisions and next step into it.`;
@@ -168,9 +172,14 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
   if (!result.revision) {
     return `${notReset} Your Working Context ${path} is missing or empty and there is no earlier revision to restore. Write the current task, decisions and next step into it.`;
   }
+  try {
+    const bytes = lib.readWorkingContextFile(join(input.cwd, path), lib.READ_MAX_FILE_BYTES);
+    if (bytes === 'too-large') return `${notReset} Your Working Context exceeds the 16 MiB read limit. Offload large content with source pointers before resetting.`;
+    if (!Buffer.isBuffer(bytes) || !bytes.length) return `${notReset} Your Working Context cannot be read safely. Repair it before resetting.`;
+  } catch { return `${notReset} Your Working Context cannot be checked safely. Repair it before resetting.`; }
   // The budget check (new_context only): refuse while the file is over its budget, so that after the
-  // reset its read-back fits in the new window with room left to work. Reading is never the limit:
-  // `context-engine read` pages a file of any size.
+  // reset its read-back fits in the new window with room left to work. The separate byte limit applies above:
+  // `context-engine read` pages supported files up to 16 MiB.
   const b = result.budget;
   if (check.budget && b?.overBudget) {
     const n = (x: number) => x.toLocaleString('en-US');
@@ -295,10 +304,10 @@ try {
 } catch (e) {
   if (!(e instanceof Inactive)) {
     log(e);
-    // Fail closed for the agent's own reset: whatever failed (most often loading the core from the
+    // Fail closed for a verified active project's reset (most often loading the core from the
     // checkout), nothing can show the Working Context is usable, and refusing costs only a retry.
     // The path is spelled out here because the core that knows it may be what failed to load.
-    if (event && isResetGate(event) && !event.agent_id) {
+    if (event && isResetGate(event) && !event.agent_id && confirmedParticipation) {
       denyReset(`${NOT_RESET} The Context Engine core could not be loaded or reached, so your Working Context .context-engine/${event.session_id}/context.md could not be checked, and resetting onto a file that cannot be delivered would lose the conversation. Carry on in this window for now (if this keeps happening, reinstall or uninstall Context Engine).`);
     }
   }

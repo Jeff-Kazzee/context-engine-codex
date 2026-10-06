@@ -20,13 +20,15 @@ test('overlapping install and uninstall cannot share a setup transaction', () =>
 });
 import { install, installedLedger, uninstall } from './install.ts';
 import { world } from './testing/world.ts';
+// Synthetic specs identify their exact managed edit; unknown changed bytes stay untouched.
+const managedFixtureRule = { canon: (text: string) => text, strip: (text: string, before: string | null) => text === 'CHANGED' ? before ?? '' : text };
 
 test('pointer publication failure rolls back and can be retried', () => {
   const w = world();
   const config = join(w.claudeHome, 'settings.json');
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
-  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {}, install: [], prepare() { writeFileSync(config, 'CHANGED'); } };
+  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); } };
   const nativeRename = fs.renameSync;
   fs.renameSync = ((from: any, to: any) => {
     if (basename(String(to)) === 'fake.json' && fs.realpathSync(dirname(String(to))) === ctx.setupDir) throw Object.assign(new Error('synthetic pointer denied'), { code: 'EACCES' });
@@ -67,7 +69,7 @@ test('prepare failure rolls back without needing to finalize a ledger', () => {
   const config = join(w.claudeHome, 'settings.json');
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
-  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {}, install: [], prepare() { writeFileSync(config, 'CHANGED'); throw new Error('prepare failed'); } };
+  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); throw new Error('prepare failed'); } };
   assert.throws(() => install(ctx, spec), /prepare failed/);
   assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
   assert.equal(installedLedger(ctx, 'fake'), null);
@@ -82,7 +84,7 @@ test('ledger finalization failure restores config and preserves unrelated files'
   const owned = join(w.claudeHome, 'context-engine-owned-fixture');
   const bad = join(owned, 'unreadable-created');
   const concurrent = join(w.claudeHome, 'unrelated-new-file');
-  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [owned], rules: {}, install: [], prepare() { writeFileSync(config, 'CHANGED'); writeFileSync(concurrent, 'NEW KEEP'); mkdirSync(owned); symlinkSync('/nonexistent-created-target', bad); } };
+  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [owned], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); writeFileSync(concurrent, 'NEW KEEP'); mkdirSync(owned); symlinkSync('/nonexistent-created-target', bad); } };
   assert.throws(() => install(ctx, spec));
   assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
   assert.equal(readFileSync(unrelated, 'utf8'), 'KEEP');

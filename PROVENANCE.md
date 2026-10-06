@@ -63,3 +63,5 @@ The core has no runtime dependencies; Node 24 runs the TypeScript sources direct
 Upstream CLM code is CC BY-NC 4.0. No upstream CLM code or prompt quotations are shipped in these snapshots; original research history remains private and was not imported. The implementation claims above concern the core mechanism, not a legal certification of all runner interfaces.
 
 The coordinated 0.1.5 source candidates share all 30 core files and hashes; SOURCE.json pins the common reviewed patch commit and original private snapshot. Source review and owner approval are separate from supported-host installation/release acceptance. Original private histories and benchmark environments remain unchanged.
+
+The resumed source review covers the same 30 shared core files at patch `783b50984a37c01ad527d31a099d41737b15c526`. Additional setup and Codex adapter fixes use synthetic fixtures only; no private captures, credentials or original history were imported. Supported-host delivery acceptance remains separate.

@@ -64,7 +64,7 @@ test('existing long project keys retain opt-outs and session history', () => {
   const stateDir = join(tempDir('state'), 'context-engine');
   setParticipation({ projectRoot: root, stateDir, state: 'on' });
   const legacyKey = `${'p'.repeat(185)}-${createHash('sha256').update(fs.realpathSync(projectRoot)).digest('hex')}`;
-  fs.writeFileSync(join(stateDir, 'participation', `${legacyKey}.json`), JSON.stringify({ projectRoot: fs.realpathSync(projectRoot), state: 'off' }));
+  fs.writeFileSync(join(stateDir, 'participation', `${legacyKey}.json`), JSON.stringify({ projectRoot: fs.realpathSync(projectRoot), state: 'off' }), {mode: 0o600});
   assert.equal(projectKey(projectRoot), legacyKey);
   assert.equal(participation({ projectRoot, stateDir, env: {} }).active, false);
   const opts = { projectRoot, stateDir, sessionId: 'S1', runner: 'test', hardLimit: 100000 };

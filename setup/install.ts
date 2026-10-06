@@ -51,7 +51,7 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
     try { retained = rollbackSnapshot(snap, spec.rules); }
     catch (rollbackError) { throw new AggregateError([e, rollbackError], `${spec.title}: install failed and rollback was incomplete; before backups are preserved at ${join(snap.dir, 'before')}`); }
     if (published) try { unlinkSync(pointerPath(ctx, spec.id)); } catch (cleanupError) { if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanupError; }
-    throw new SetupError(`${e instanceof Error ? e.message : String(e)}; tracked configuration restored; ${retained.length} unowned new paths retained; before backups: ${join(snap.dir, 'before')}`, { cause: e });
+    throw new SetupError(`${e instanceof Error ? e.message : String(e)}; tracked configuration rollback completed with unmanaged edits preserved; ${retained.length} unowned new paths retained; before backups: ${join(snap.dir, 'before')}`, { cause: e });
   }
 }
 

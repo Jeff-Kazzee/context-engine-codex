@@ -544,3 +544,16 @@ test('supported Unicode Working Context above one MiB remains recordable and res
   const gate = hook(f, { hook_event_name: 'PreToolUse', tool_name: 'new_context' });
   assert.equal(gate.status, 0, gate.stderr); assert.equal(gate.stdout, '');
 });
+
+for (const activation of ['never','disabled','kill-switch']) test('missing checkout leaves inactive reset native: '+activation, () => {
+  const f=fixture();if(activation==='disabled')setParticipation({...f,state:'off'});
+  if(activation==='kill-switch')setParticipation({...f,state:'on'});
+  const r=hook(f,newContext,{CONTEXT_ENGINE_CLI:join(tempDir('missing-checkout'),'core/cli.ts'),...(activation==='kill-switch'?{CONTEXT_ENGINE:'off'}:{})});
+  assert.equal(r.status,0);assert.equal(r.stdout,'','inactive reset must remain native');
+});
+test('unavailable core backstop refuses a sparse file above the multipart read limit', async () => {
+  const f=enabledFixture(); hook(f,prompt('SYNTHETIC_TASK'));
+  const {truncateSync}=await import('node:fs'); truncateSync(wcPath(f),16*1024*1024+1);
+  const r=hook(f,{hook_event_name:'PreCompact'},{CONTEXT_ENGINE_CLI:'nonexistent-context-engine-test-only'});
+  assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).continue,false);
+});

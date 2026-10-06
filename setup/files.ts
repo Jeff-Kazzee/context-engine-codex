@@ -2,6 +2,7 @@
 // anchored to the verified directory even if a project changes a path concurrently. Linux /proc
 // is required, like the core's confined file reads.
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { openPrivateDirectory } from '../core/store.ts';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, join, parse, resolve, sep } from 'node:path';
 
@@ -56,6 +57,7 @@ export function safeWrite(path: string, data: string | Buffer): void {
 export function acquireSetupLock(path: string): () => void {
   checkComponents(path);
   const parent = dirname(resolve(path));
+  closeSync(openPrivateDirectory(dirname(parent), { create: true })!);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   checkComponents(path);
   const dir = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);

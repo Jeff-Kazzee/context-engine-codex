@@ -8,10 +8,10 @@
 // 3. The rollout default, used when no record applies. During the pilot it is off (opt-in).
 //
 // Records live in the state root (never in the project): participation/<project key>.json.
-import { dirname, join } from 'node:path';
-import { mkdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { projectKey, readBytes, resolveStateRoot } from './store.ts';
+import { openPrivateDirectory, projectKey, resolveStateRoot } from './store.ts';
 
 export const KILL_SWITCH_ENV = 'CONTEXT_ENGINE';
 const OFF_VALUES = new Set(['off', '0', 'false', 'no', 'disable', 'disabled']);
@@ -50,8 +50,31 @@ const recordPath = (stateRoot: string, dir: string) => {
 /** The nearest participation record at or above `projectRoot`. */
 export function findRecord(ref: ParticipationRef): { project: string; state: 'on' | 'off'; at?: string } | null {
   const stateRoot = resolveStateRoot(ref.stateDir);
+  const rootFd = openPrivateDirectory(stateRoot);
+  if (rootFd === undefined) return null;
+  let dirFd: number | undefined;
+  try {
+  dirFd = openPrivateDirectory(join(stateRoot, 'participation'));
+  if (dirFd === undefined) return null;
   for (let dir = realpathSync(ref.projectRoot); ; dir = dirname(dir)) {
-    const bytes = readBytes(recordPath(stateRoot, dir));
+    const expected = recordPath(stateRoot, dir);
+    let recordFd: number;
+    try { recordFd = openSync(join(`/proc/self/fd/${dirFd}`, basename(expected)), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') { if (dirname(dir) === dir) return null; continue; } throw e; }
+    let bytes: Buffer;
+    try {
+      const st = fstatSync(recordFd);
+      if (!st.isFile() || st.nlink !== 1 || st.size > 16384 || (process.getuid && st.uid !== process.getuid()) || (st.mode & 0o077) !== 0 || realpathSync(`/proc/self/fd/${recordFd}`) !== expected) throw new Error('participation record is not a verified bounded private regular file');
+      const buffer = Buffer.alloc(16385);
+      let used = 0;
+      while (used < buffer.length) {
+        const n = readSync(recordFd, buffer, used, buffer.length - used, used);
+        if (!n) break;
+        used += n;
+      }
+      if (used > 16384) throw new Error('participation record exceeds read limit');
+      bytes = buffer.subarray(0, used);
+    } finally { closeSync(recordFd); }
     if (bytes) {
       try {
         const rec = JSON.parse(bytes.toString('utf8'));
@@ -62,10 +85,12 @@ export function findRecord(ref: ParticipationRef): { project: string; state: 'on
     }
     if (dirname(dir) === dir) return null;
   }
+  } finally { if (dirFd !== undefined) closeSync(dirFd); closeSync(rootFd); }
 }
 
 export function participation(ref: ParticipationRef & { env?: NodeJS.ProcessEnv }): Participation {
   const killSwitch = killSwitchOn(ref.env ?? process.env);
+  if (killSwitch) return { active: false, state: 'default', project: null, killSwitch: true, reason: `turned off by the kill switch ${KILL_SWITCH_ENV}=${(ref.env ?? process.env)[KILL_SWITCH_ENV]}` };
   const rec = findRecord(ref);
   const state = rec?.state ?? 'default';
   const on = (rec?.state ?? ROLLOUT_DEFAULT) === 'on';
@@ -79,13 +104,23 @@ export function participation(ref: ParticipationRef & { env?: NodeJS.ProcessEnv 
 
 /** Writes this directory's record (atomic). */
 export function setParticipation(ref: ParticipationRef & { state: 'on' | 'off' }): void {
-  const path = recordPath(resolveStateRoot(ref.stateDir), realpathSync(ref.projectRoot));
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = join(dirname(path), `.participation-${process.pid}-${randomBytes(16).toString('hex')}.tmp`);
+  const stateRoot = resolveStateRoot(ref.stateDir), projectRoot = realpathSync(ref.projectRoot);
+  const path = recordPath(stateRoot, projectRoot);
+  const rootFd = openPrivateDirectory(stateRoot, { create: true })!;
+  let dirFd: number | undefined;
+  let tmp: string | undefined;
   let created = false;
   try {
-    writeFileSync(tmp, `${JSON.stringify({ projectRoot: realpathSync(ref.projectRoot), state: ref.state, at: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
+    dirFd = openPrivateDirectory(dirname(path), { create: true })!;
+    const anchored = `/proc/self/fd/${dirFd}`;
+    tmp = join(anchored, `.participation-${process.pid}-${randomBytes(16).toString('hex')}.tmp`);
+    writeFileSync(tmp, `${JSON.stringify({ projectRoot, state: ref.state, at: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
     created = true;
-    renameSync(tmp, path);
-  } finally { if (created) try { unlinkSync(tmp); } catch {} }
+    if (realpathSync(anchored) !== dirname(path)) throw new Error('participation directory changed before publication');
+    renameSync(tmp, join(anchored, basename(path)));
+  } finally {
+    if (created && tmp) try { unlinkSync(tmp); } catch {}
+    if (dirFd !== undefined) closeSync(dirFd);
+    closeSync(rootFd);
+  }
 }

@@ -81,7 +81,7 @@ export function cite(projectRoot: string, ref: string): string {
   // Lexically inside is not enough: a symlink in the project can lead anywhere.
   const target = readConfined(projectRoot, rel);
   if ('refused' in target) throw new Error(`cannot cite ${rel}: ${REFUSED[target.refused]}`);
-  const text = target.bytes.toString('utf8');
+  const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(target.bytes);
   if (m[2] === undefined) return `⟦src:${rel}@${hash8(text)}⟧`;
   const a = Number(m[2]);
   const b = m[3] === undefined ? a : Number(m[3]);
@@ -124,7 +124,8 @@ function checkSource(projectRoot: string, rel: string, lines: [number, number] |
     // A marker that leads out of the project, to a credential file, or to anything but one regular
     // file is never followed or reported.
     if ('refused' in target) return null;
-    content = target.bytes.toString('utf8');
+    try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(target.bytes); }
+    catch { return { reason: 'changed' }; }
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     return code === 'ENOENT' || code === 'ENOTDIR' ? { reason: 'missing' } : null;

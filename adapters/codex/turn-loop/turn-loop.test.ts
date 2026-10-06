@@ -1,7 +1,7 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fixture, tempDir } from '../../../core/testing.ts';
 import { inspectSession } from '../../../core/index.ts';
 import { guidance, MODE, OWN_OVERRIDES, startTurnLoop as start, type CodexTurnLoop, type TurnLoopOptions } from './turn-loop.ts';
@@ -300,11 +300,18 @@ test('actual turn loop uses the validated revision when its workspace path is re
     } });
     return { ...opened, session };
   };
-  const load = new Function('coreModule', 'fsModule', 'itemsModule', 'rpcModule', 'openSession', `const {${Object.keys(coreModule).filter(k => k !== 'openSession').join(',')}} = coreModule; const {closeSync,openSync} = fsModule; const {workingContextItems} = itemsModule; const {spawnJsonRpc} = rpcModule; ${erased}; return startTurnLoop;`);
+  const load = new Function('coreModule', 'fsModule', 'itemsModule', 'rpcModule', 'openSession', `const {${Object.keys(coreModule).filter(k => k !== 'openSession').join(',')}} = coreModule; const {closeSync,openSync,realpathSync} = fsModule; const {workingContextItems} = itemsModule; const {spawnJsonRpc} = rpcModule; ${erased}; return startTurnLoop;`);
   const actualStart = load(coreModule, fsModule, itemsModule, rpcModule, openSession);
   const loop = await actualStart(t.opts); open.push(loop);
   await loop.runTurn('VALIDATED_SENTINEL'); replace = true;
   const result = await loop.runTurn('next request'); assert.equal(result.status, 'completed');
   const injected = t.sent('thread/inject_items');
   assert.match(JSON.stringify(injected), /VALIDATED_SENTINEL/); assert.doesNotMatch(JSON.stringify(injected), /MUST_NOT_INJECT_SYNTHETIC/);
+});
+
+test('relative project root is canonical for both app-server cwd and thread cwd', async () => {
+  const t=setup({turns:[{reply:'SYNTHETIC_REPLY'}]});
+  const loop=await startCodexTurnLoop({...t.opts,projectRoot:relative(process.cwd(),t.f.projectRoot)});
+  await loop.runTurn('SYNTHETIC_PROMPT');
+  assert.equal(t.sent('thread/start')[0].cwd,t.f.projectRoot);
 });

@@ -31,7 +31,7 @@
 // developerInstructions: each fresh thread gets `guidance(path)`, static text written here (the
 // mode, the file's path, how it is delivered). It never carries model-authored text; the Working
 // Context itself only ever travels as the one injected user message.
-import { closeSync, openSync } from 'node:fs';
+import { closeSync, openSync, realpathSync } from 'node:fs';
 import { KILL_SWITCH_ENV, killSwitchOn, openSession, renderTurns, type Receipt, type RunnerEvent, type Session } from '../../../core/index.ts';
 import { workingContextItems, type WorkingContextRejectReason } from './items.ts';
 import { spawnJsonRpc, type JsonRpcConnection, type Notification } from './jsonrpc.ts';
@@ -124,6 +124,7 @@ export async function startTurnLoop(opts: TurnLoopOptions): Promise<CodexTurnLoo
   // The kill switch stops the turn loop too. It needs no `context-engine enable`: running it is the opt-in.
   const env = opts.env ?? process.env;
   if (killSwitchOn(env)) throw new Error(`Context Engine is turned off (${KILL_SWITCH_ENV}=${env[KILL_SWITCH_ENV]}); the turn loop did not start`);
+  opts = { ...opts, projectRoot: realpathSync(opts.projectRoot) };
   const hardLimit = opts.hardLimit ?? DEFAULT_HARD_LIMIT;
   const opened = openSession({ projectRoot: opts.projectRoot, sessionId: opts.sessionId, runner: 'codex', hardLimit, stateDir: opts.stateDir });
   if (opened.status === 'refused') {

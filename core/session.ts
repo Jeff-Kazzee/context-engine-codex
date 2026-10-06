@@ -71,7 +71,7 @@ export interface RunnerEvent {
   [extra: string]: unknown;
 }
 
-export type RestoreReason = 'missing' | 'empty' | 'not-utf8' | 'over-hard-limit' | 'not-a-file';
+export type RestoreReason = 'missing' | 'empty' | 'not-utf8' | 'over-hard-limit' | 'not-a-file' | 'unmaterialized-append';
 
 export { approxTokens };
 
@@ -168,6 +168,7 @@ const RESTORE_WORDS: Record<RestoreReason, string> = {
   'not-utf8': 'the file was not valid UTF-8',
   'over-hard-limit': "the file was over the runner's hard limit",
   'not-a-file': 'the file was a symbolic link or a hard link, which is never read',
+  'unmaterialized-append': 'committed runner events had not yet been written to the file',
 };
 
 export function openSession(opts: OpenOptions): OpenResult {
@@ -406,8 +407,8 @@ class Core {
 
   private writeWorkingContext(text: string): void {
     assertWorkingContextDir(this.l.workingContext);
-    mkdirSync(dirname(this.l.workingContext), { recursive: true });
-    atomicWrite(this.l.workingContext, text, 'wc-tmp', 0o644);
+    mkdirSync(dirname(this.l.workingContext), { recursive: true, mode: 0o700 });
+    atomicWrite(this.l.workingContext, text, 'wc-tmp', 0o600);
   }
 
   private invalid(bytes: Buffer | undefined | 'not-a-file' | 'too-large'): { reason: RestoreReason; text: string | null } | { text: string } {
@@ -583,12 +584,18 @@ class Core {
 
     // A runner append committed HEAD but died before rewriting the Working Context.
     let rematerialized = false;
+    let interruptedReceipt: Receipt | undefined;
     if (head && !head.materialized) {
       const read = readWorkingContextFile(this.l.workingContext, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size));
       const current = read && typeof read !== 'string' ? decode(read) : null;
       const currentSha = current === null ? null : sha(current);
-      if (currentSha !== head.sha && (currentSha === head.parent || current === null || current.trim() === '')) {
-        this.materialize(head, this.snapshot(head.rev));
+      if (currentSha !== head.sha) {
+        const committed = this.snapshot(head.rev);
+        if (current !== null && current.trim() && currentSha !== head.parent) {
+          appendLog(this.l.events, { type: 'restored', rev: head.rev, reason: 'unmaterialized-append', rejected: current });
+          interruptedReceipt = { kind: 'restored', revision: head.rev, reason: 'unmaterialized-append', chars: committed.length, approxTokens: approxTokens(committed.length), text: `Context Engine: revision ${head.rev} was restored because committed runner events had not yet reached the Working Context. The intervening edit is kept in the Event Log; read the restored file before editing it again. ${sizeReadout(committed.length)}` };
+        }
+        this.materialize(head, committed);
         rematerialized = true;
       } else {
         head.materialized = true;
@@ -609,7 +616,7 @@ class Core {
     if (!cached) this.lastSeq = logged.reduce((m, e) => Math.max(m, e.seq), 0);
 
     const synced = this.sync();
-    this.pendingReceipt = synced.receipt;
+    this.pendingReceipt = interruptedReceipt ?? synced.receipt;
     const replay = logged.filter((e) => e.seq > (this.head()?.through ?? 0));
     this.unapplied = replay;
     if (replay.length) this.apply();

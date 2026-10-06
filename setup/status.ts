@@ -7,11 +7,12 @@
 // prompt input (`codex debug prompt-input`, offline, no model call) carries Context Engine's
 // token_budget guidance. Otherwise the Codex line says "inactive here" and why. The per-user-turn
 // path (the turn loop) is never switched to automatically: it is a separate command.
-import { existsSync, readFileSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { closeSync, existsSync, readFileSync } from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
 import { CODEX_TOKEN_LIMIT_RESET, KILL_SWITCH_ENV, killSwitchOn, participation } from '../core/index.ts';
 import { GUIDANCE_PROBE, RESET_MODE } from '../adapters/codex/guidance.ts';
 import { MODE as TURN_LOOP_MODE } from '../adapters/codex/turn-loop/turn-loop.ts';
+import { openPrivateDirectory } from '../core/store.ts';
 import { installedLedger } from './install.ts';
 import { safeRead } from './files.ts';
 import { currentCodexTrust } from './codex-trust.ts';
@@ -72,6 +73,8 @@ function onPath(env: NodeJS.ProcessEnv): string | null {
 }
 
 export async function statusText(ctx: SetupContext, projectRoot: string): Promise<{ lines: string[]; json: Record<string, unknown> }> {
+  const rootFd = openPrivateDirectory(dirname(ctx.setupDir));
+  if (rootFd !== undefined) closeSync(rootFd);
   const p = participation({ projectRoot, env: ctx.env });
   const experiments = (ctx.env.CONTEXT_ENGINE_EXPERIMENTS ?? '')
     .split(',')

@@ -7,8 +7,15 @@ import { join } from 'node:path';
 import { world, tree } from './testing/world.ts';
 import { takeSnapshot, rollbackSnapshot, completeLedger } from './ledger.ts';
 const runtime: string = 'codex';
+test('rollback without a managed-field rule retains concurrent opaque bytes', () => {
+  const w=world(), path=join(w.claudeHome,'opaque.txt');
+  writeFileSync(path,'BEFORE');
+  const snapshot=takeSnapshot({backupRoot:join(w.stateDir,'backups'),kind:'opaque',files:[path],watch:[],namespaced:[]});
+  writeFileSync(path,'CONCURRENT'); rollbackSnapshot(snapshot,{});
+  assert.equal(readFileSync(path,'utf8'),'CONCURRENT');
+});
 test('linked install pointer refuses before runner commands or target creation', () => {
-  const w = world(); mkdirSync(join(w.stateDir, 'setup'), { recursive: true });
+  const w = world(); mkdirSync(join(w.stateDir, 'setup'), { recursive: true, mode: 0o700 });
   const target = join(runtime === 'claude' ? w.codexHome : w.claudeHome, 'unowned-config.json');
   const pointer = join(w.stateDir, 'setup', `${runtime}.json`);
   symlinkSync(target, pointer);
@@ -90,4 +97,21 @@ test('escaped quoted TOML keys refuse before inserting conflicting guidance', ()
   writeFileSync(file,original); const r=w.ce(['enable']);
   assert.equal(r.status,1); assert.match(r.stderr,/escaped quoted.*unsupported/);
   assert.equal(readFileSync(file,'utf8'),original);
+});
+
+import { chmodSync, statSync } from 'node:fs';
+test('setup refuses an existing nonprivate state root before changing runner homes or publishing participation', () => {
+  const w=world();mkdirSync(w.stateDir,{mode:0o755});chmodSync(w.stateDir,0o755);
+  const beforeClaude=tree(w.claudeHome),beforeCodex=tree(w.codexHome);
+  const r=w.ce(['install']);assert.equal(r.status,1);assert.match(r.stderr,/private|0700/i);
+  assert.equal(statSync(w.stateDir).mode&0o777,0o755);
+  assert.deepEqual(tree(w.claudeHome),beforeClaude);assert.deepEqual(tree(w.codexHome),beforeCodex);
+  const enable=w.ce(['enable']);assert.equal(enable.status,1);assert.deepEqual(tree(w.stateDir),{});
+});
+test('failed install rollback preserves concurrent unmanaged JSON settings', () => {
+  const w=world(),config=join(w.claudeHome,'synthetic-config.json');writeFileSync(config,JSON.stringify({theme:'before',owned:false}));
+  const ctx={...setupContext(w.env),setupDir:join(w.stateDir,'setup')};
+  const spec:any={id:runtime,title:'Synthetic',bin:process.execPath,files:[config],watch:[],namespaced:[],rules:{[config]:jsonRule([['owned']])},install:[],prepare(){writeFileSync(config,JSON.stringify({theme:'concurrent',owned:true}));throw new Error('synthetic installation failure');}};
+  assert.throws(()=>install(ctx,spec),/synthetic installation failure/);
+  assert.deepEqual(JSON.parse(readFileSync(config,'utf8')),{theme:'concurrent',owned:false});
 });

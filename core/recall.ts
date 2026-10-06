@@ -266,11 +266,14 @@ function splitParts(text: string, max: number): string[] {
  * are the file byte for byte. Read-only; logged as a `read` entry for eval accounting (skipped
  * where the Event Log is not writable). Throws on a missing file or a part out of range.
  */
+export const READ_MAX_FILE_BYTES = 16 * 1024 * 1024;
+
 export function readWorkingContext(opts: SessionRef & { part?: number; sha?: string }): ReadResult {
   const log = eventLog(opts);
   const rel = workingContextRelPath(opts.sessionId);
   const path = join(realpathSync(opts.projectRoot), rel);
-  const bytes = readWorkingContextFile(path);
+  const bytes = readWorkingContextFile(path, READ_MAX_FILE_BYTES);
+  if (bytes === 'too-large') throw new Error(`Working Context exceeds the ${READ_MAX_FILE_BYTES}-byte read limit; refusing before loading its payload`);
   if (bytes === undefined) throw new Error(`no Working Context file at ${rel}`);
   if (bytes === 'not-a-file') throw new Error(`the Working Context ${rel} is a symbolic link or a hard link, which is never read; replace it with a regular file`);
   // Preserve a UTF-8 BOM too: every returned part must reconstruct the original bytes.

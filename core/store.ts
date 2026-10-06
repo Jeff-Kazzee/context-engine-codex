@@ -6,6 +6,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  fchmodSync,
   fsyncSync,
   linkSync,
   lstatSync,
@@ -102,17 +103,70 @@ export function layout(projectRoot: string, sessionId: string, stateRoot: string
   };
 }
 
+/** Opens one verified user-owned private directory. Only managed Working Context directories may be tightened. */
+export function openPrivateDirectory(path: string, opts: { create?: boolean; tighten?: boolean } = {}): number | undefined {
+  if (opts.create) createConfinedDirectory(path);
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); }
+  catch (e) { if (!opts.create && (e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw new Error(`refusing linked or unavailable private directory: ${path}`, { cause: e }); }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isDirectory() || openedPath(fd) !== resolve(path) || (process.getuid && st.uid !== process.getuid())) throw new Error(`private directory is not verified or owned by this user: ${path}`);
+    if (opts.tighten) fchmodSync(fd, 0o700);
+    else if ((st.mode & 0o077) !== 0) throw new Error(`state directory must already be private (0700): ${path}`);
+    return fd;
+  } catch (e) { closeSync(fd); throw e; }
+}
+
+/** Create missing components through verified descriptors, never through linked ancestors. */
+function createConfinedDirectory(path: string): void {
+  const target = resolve(path);
+  const missing: string[] = [];
+  let existing = target;
+  for (;;) {
+    try { lstatSync(existing); break; }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    missing.unshift(basename(existing));
+    existing = dirname(existing);
+  }
+  let fd: number;
+  try { fd = openSync(existing, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); }
+  catch (e) { throw new Error('linked or unavailable private-directory ancestor; refusing creation', { cause: e }); }
+  try {
+    if (openedPath(fd) !== existing) throw new Error('linked private-directory ancestor; refusing creation');
+    for (const name of missing) {
+      if (openedPath(fd) !== existing) throw new Error('private-directory ancestor changed; refusing creation');
+      const anchored = join(`/proc/self/fd/${fd}`, name);
+      try { mkdirSync(anchored, { mode: 0o700 }); }
+      catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
+      const next = openSync(anchored, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      closeSync(fd); fd = next;
+      existing = join(existing, name);
+      if (openedPath(fd) !== existing) throw new Error('private-directory child changed; refusing creation');
+    }
+  } finally { closeSync(fd); }
+}
+
+function privateWorkingContextFile(path: string): void {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (e) { if (['ENOENT', 'ELOOP'].includes((e as NodeJS.ErrnoException).code ?? '')) return; throw e; }
+  try {
+    const st = fstatSync(fd), real = openedPath(fd);
+    if (real !== path) throw new Error('Working Context file path changed; refusing permission changes');
+    if (!st.isFile() || st.nlink !== 1 || isCredential(real, st)) return;
+    if (process.getuid && st.uid !== process.getuid()) throw new Error('Working Context file is not owned by this user');
+    fchmodSync(fd, 0o600);
+  } finally { closeSync(fd); }
+}
+
 /** Creates the private state directories (mode 0700) and the Working Context directory. */
 export function ensureDirs(l: Layout, stateRoot: string): void {
   for (const d of [stateRoot, dirname(l.stateDir), l.stateDir, l.revisions]) {
-    mkdirSync(d, { recursive: true, mode: 0o700 });
-    const st = lstatSync(d);
-    if (!st.isDirectory() || st.isSymbolicLink() || (st.mode & 0o077) !== 0 || (process.getuid && st.uid !== process.getuid())) {
-      throw new Error(`Context Engine state directory must already be private (0700) and owned by this user: ${d}`);
-    }
+    closeSync(openPrivateDirectory(d, { create: true })!);
   }
   assertWorkingContextDir(l.workingContext);
-  mkdirSync(dirname(l.workingContext), { recursive: true });
+  mkdirSync(dirname(l.workingContext), { recursive: true, mode: 0o700 });
   assertWorkingContextDir(l.workingContext);
   // Self-ignoring directory: keeps Working Contexts out of git without editing the project's .gitignore.
   const ignore = join(dirname(dirname(l.workingContext)), '.gitignore');
@@ -126,6 +180,8 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
     if (rules.at(-1) !== '*') throw new Error('.context-engine/.gitignore must end with a blanket * rule; fix it before enabling Context Engine');
   }
+  for (const dir of [dirname(dirname(l.workingContext)), dirname(l.workingContext)]) closeSync(openPrivateDirectory(dir, { tighten: true })!);
+  privateWorkingContextFile(l.workingContext);
 }
 
 const FRAME_KEY = /^[0-9a-f]{32}$/;
