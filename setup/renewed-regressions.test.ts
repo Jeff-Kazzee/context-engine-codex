@@ -29,7 +29,7 @@ test('renewed: external ledger pointer refuses before reading its target',()=>{
 test('renewed: escaped quoted table keys refuse before project activation',()=>{
  const w=world();assert.equal(w.ce(['install']).status,0);fs.mkdirSync(join(w.project,'.codex'));
  const path=join(w.project,'.codex/config.toml'),text='["fea\\u0074ures".token_budget]\nenabled = false\n';fs.writeFileSync(path,text);
- const result=w.ce(['enable']);assert.equal(result.status,1);assert.match(result.stderr,/escaped|unsupported|token_budget/);assert.equal(fs.readFileSync(path,'utf8'),text);
+ const result=w.ce(['enable']);assert.equal(result.status,1);assert.match(result.stderr,/escaped|unsupported|token_budget|unsafe configuration cannot be backed up/);assert.equal(fs.readFileSync(path,'utf8'),text);
 });
 test('renewed: complete markers with empty bodies do not bypass owned settings repair',()=>{
  const w=world();assert.equal(w.ce(['install']).status,0);assert.equal(w.ce(['enable']).status,0);
