@@ -10,8 +10,9 @@
     "core/cli.ts": "e2a255e48936d18d9c8ade79b421d6e7813d766a7f994a1d9ce9ffc6cb6a4b19",
     "core/confinement.test.ts": "e199d261a76cfba48b10bdf285f3f2667edb0bd40b35ec6d8378e6fcebc345a9",
     "core/delivery.ts": "49801096f2c1bd4dcc8cb64fae2215e84ab74c4c5aed51931a27859c92cf8dce",
+    "core/event-safety.ts": "0f7c9c77a2d6a0d75f2f755ce79cb3e321856d5e219e6e4dd5c1f12b58eb4eba",
     "core/faults.ts": "1b8e5615c3e93db552ce05410b1ba246dfed6a5fbff7120dc48cb514b8f4d004",
-    "core/hosted-regressions.test.ts": "8b5591b1382aabdf8cbe2be9a86e83ca71b51600990ff38fe490a5e949cf8d2e",
+    "core/hosted-regressions.test.ts": "6b34ead97bf6b9e714723475473651dba1fbfc7de98c4873120a77cf73a04c2c",
     "core/index.ts": "10321ec383d92f9097dcee3c70a7396168c449a9c5926ec20e5b838647b8a697",
     "core/isolation.test.ts": "dc100ec58cb6d008c3cd60921e03bbc1ba9f98f756ad84b0e11cbd84acc2447a",
     "core/late-review-regressions.test.ts": "f743f30e053cae79f697412f3171f83ae45524c116623823467275dbb027be8f",
@@ -28,15 +29,16 @@
     "core/refs.ts": "6b7ed6c971708265cfe043ac14dcba4fc51474411a04d429c961ce8cb7341611",
     "core/renewed-regressions.test.ts": "b89453eb730b247fa566e077472448e0f0c7397890a5fae38b62322e56d68ce0",
     "core/review-regressions.test.ts": "8c56a053a0353838ee481c388bf2dbf66f2ba7e6dd5ae8f19877e36bd46f988a",
-    "core/session.test.ts": "0d6b4f70851c61072efb240a4887e092afbee83df1336f9765ae409356866c47",
-    "core/session.ts": "29d1d88f30175b5666ce69760e2c321e17f27358ed20f5995abe3ce262a09351",
+    "core/session.test.ts": "bc85f05e49c0ddc84dc38596bbafe400c9dd0060c1396df2c9177ae1d286d236",
+    "core/session.ts": "a54c9ee29cf7655c129e1435164eeaa05c1cfdae9b2d849799183542288a74d6",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
     "core/store.ts": "ab4a64136955a7cabc5700ba1b9012786c54470339c71a0ff23aca3ec4ee34af",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
     "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c",
-    "core/wave7-regressions.test.ts": "871cd6a907cc3cec553f545afebeb70666a0febe1909437cb9956b6d376256f3"
+    "core/wave7-regressions.test.ts": "871cd6a907cc3cec553f545afebeb70666a0febe1909437cb9956b6d376256f3",
+    "core/wave8-regressions.test.ts": "67f5a78fc0a2e4c2f995d9e735262b5c421d93067c7e1598785055545b7ccdac"
   },
   "importedPaths": [
     ".gitignore",
@@ -105,7 +107,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "30f6cf32a7b0a650bcc33e9da7e9afe4ee60a2bb",
+  "corePatchCommit": "ced4d442d5166a69ab815efbd719fc19f746cc39",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -118,6 +120,7 @@
     "Additional hosted-review corrections: verified private-state descriptors and revision checksums; streaming Event Log scans and bounded recall snippets, with only uncommitted replay candidates retained. Largest individual JSON entries can still consume memory. Snapshot creation and backup copies are confined and exclusive. Claude retains every failed close for retry, omits request/response payloads from per-step cost logs, and returns over-budget native summaries without replacement framing. Codex conservatively refuses escaped dotted TOML keys while preserving literal string/comment data and legacy AGENTS.md restoration. Synthetic offline evidence only; no credentials, captures or runner/model acceptance inferred.",
     "Late hosted-review corrections: bounded descriptor lock reads with declared-field projection and transient publication protection; bounded frame-key repair and anchored private-state publication; structured runner-event replay and complete HEAD validation. Setup refuses recognized credential-bearing configuration before before/after and repair backup copies; conservative parsing has documented limits. Synthetic offline evidence only.",
     "Wave7 repairs: supplied setup environment controls CE/XDG/HOME state and participation; managed ownership verified before writes; temporary and orphan revision cleanup anchored; stale citation ranges validated and relocation work bounded. Codex actual descendant subtree declarations refuse without config mutation or activation. Synthetic offline evidence only, no auth/model calls or installation pointer repair.",
-    "Validation exposed a pre-existing lock-descriptor turnover race: path mismatches still refuse before payload reads, and only lock reads retry within the existing 100ms deadline. Persistent unsafe names still throw and are never eligible for dead-holder takeover. Deterministic unlink and persistent refusal/acquire controls are synthetic."
+    "Validation exposed a pre-existing lock-descriptor turnover race: path mismatches still refuse before payload reads, and only lock reads retry within the existing 100ms deadline. Persistent unsafe names still throw and are never eligible for dead-holder takeover. Deterministic unlink and persistent refusal/acquire controls are synthetic.",
+    "Wave8 local source correction: invalid no-HEAD Working Context entries are preserved/refused instead of deleted or cleared; runner events receive conservative credential omission before storage/rendering, with explicit inspection limits and synthetic accessor/schema controls. Setup validates watched roots before runner commands and Claude enable validates ledger first, failing explicitly off. No historical data scrub, real credentials, model calls, or publication in this repair phase."
   ]
 }

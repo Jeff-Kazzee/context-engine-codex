@@ -75,3 +75,5 @@ Wave7 coordinated candidate pins 33 identical shared core files at patch `5bbeba
 Final Wave7 source pin is `30f6cf32a7b0a650bcc33e9da7e9afe4ee60a2bb` (33 matching core files), including the minimal supporting lock-turnover correction exposed by validation. Unsafe descriptor payloads remain unread and persistent refusal cannot trigger dead-holder takeover.
 
 The local Wave8 candidate adds independently authored synthetic controls for no-HEAD rejection preservation, watched-root preflight, fail-closed enable and conservative runner-event credential omission. It imports no credential payloads or private captures. Inspection is heuristic and bounded by visited data; historical retention and supported-host acceptance remain separate.
+
+Wave8 local reviewed source pin: `ced4d442d5166a69ab815efbd719fc19f746cc39` (35 identical core files in both distributions). The four-finding patch does not resolve separately inventoried participation durability, removed-project uninstall or Event Log creation lease findings; supported-host trial remains held.
