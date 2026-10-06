@@ -113,7 +113,7 @@ const VERSION = '0.1.0';
 export function guidance(path: string): string {
   return [
     `Context Engine is active (${MODE}).`,
-    `Before every user turn your conversation history is replaced by your Working Context: the file ${path},`,
+    `Before every user turn your conversation history is replaced by your Working Context: the file ${JSON.stringify(path)},`,
     'delivered to you as one user message (the working_context block). Anything not in that file is gone from your view next turn.',
     'Edit it with ordinary tools to keep what you need (task, decisions, findings, open questions) and delete what you no longer need.',
     'After each turn the runner appends the prompt, one line per tool call and your replies as [[CTX_TURN n role=...]] blocks.',
@@ -130,9 +130,10 @@ export async function startTurnLoop(opts: TurnLoopOptions): Promise<CodexTurnLoo
     throw new Error(`session ${opts.sessionId} is held by pid ${opened.holder.pid} on ${opened.holder.hostname}`);
   }
   const session = opened.session;
-  const stderrFd = opts.stderrPath ? openSync(opts.stderrPath, 'a') : undefined;
+  let stderrFd: number | undefined;
   let rpc: JsonRpcConnection | undefined;
   try {
+    stderrFd = opts.stderrPath ? openSync(opts.stderrPath, 'a') : undefined;
     const args = ['app-server', '--listen', 'stdio://', ...[...(opts.configOverrides ?? []), ...OWN_OVERRIDES].flatMap((c) => ['-c', c])];
     rpc = spawnJsonRpc([...(opts.command ?? ['codex']), ...args], {
       cwd: opts.projectRoot,

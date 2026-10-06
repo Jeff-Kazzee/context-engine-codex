@@ -82,7 +82,7 @@ test('projects and sessions are isolated: separate files, nothing leaks', () => 
   const a2 = open(base(f, { sessionId: 'S2' }));
 
   for (const s of [b1, a2]) {
-    assert.deepEqual(s.sync(), { revision: 0, turns: [], chars: 0 });
+    assert.deepEqual(s.sync(), { revision: 0, turns: [], chars: 0, workingContextText: '' });
     s.record([{ role: 'user', text: 'own task' }]);
     assert.ok(!readFileSync(s.workingContextPath, 'utf8').includes('PROJECT-A-SECRET'));
   }

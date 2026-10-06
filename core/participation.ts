@@ -72,8 +72,8 @@ export function participation(ref: ParticipationRef & { env?: NodeJS.ProcessEnv 
   let reason: string;
   if (killSwitch) reason = `turned off by the kill switch ${KILL_SWITCH_ENV}=${(ref.env ?? process.env)[KILL_SWITCH_ENV]}`;
   else if (rec?.state === 'on') reason = `enabled for ${rec.project}`;
-  else if (rec?.state === 'off') reason = `disabled for ${rec.project} (context-engine disable)`;
-  else reason = on ? 'on by default' : 'not enabled for this project (the pilot is opt-in: run `context-engine enable`)';
+  else if (rec?.state === 'off') reason = `disabled for ${rec.project} (this distribution's disable command)`;
+  else reason = on ? 'on by default' : "not enabled for this project (the pilot is opt-in: use this distribution's runtime-specific enable command)";
   return { active: on && !killSwitch, state, project: rec?.project ?? null, killSwitch, reason };
 }
 

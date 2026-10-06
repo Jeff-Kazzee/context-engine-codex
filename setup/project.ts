@@ -94,6 +94,9 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
   const config = codexConfig(root);
   const existing = safeRead(config)?.toString('utf8') ?? null;
   const old = existsSync(pointer(ctx, root)) ? readLedger(JSON.parse(readFileSync(pointer(ctx, root), 'utf8')).dir) : null;
+  if (!old && existing !== null && [TOML_MARKERS.begin, TOML_MARKERS.end, TOML_TOP_MARKERS.begin, TOML_TOP_MARKERS.end].some(marker => existing.includes(marker))) {
+    throw new SetupError(`Codex: ${config} contains unowned Context Engine markers; configuration was left unchanged`);
+  }
   if (old && codexProjectSettings(root)) return ['Codex: project settings already in place'];
   const unmanaged = existing === null ? null : codexConfigRule().strip(existing, old?.files[0]?.before ? readFileSync(old.files[0].before, 'utf8') : null);
   // Check actual table/key declarations, not comments or values containing the name.

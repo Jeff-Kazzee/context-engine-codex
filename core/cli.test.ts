@@ -230,7 +230,7 @@ test('--if-enabled: in a project nobody enabled, open/sync/record do nothing and
     const out = r.json();
     assert.equal(out.ok, true);
     assert.equal(out.active, false);
-    assert.match(out.reason, /context-engine enable/);
+    assert.match(out.reason, /runtime-specific enable command/);
   }
   assert.equal(existsSync(join(f.projectRoot, '.context-engine')), false, 'no Working Context');
   assert.equal(existsSync(f.stateDir), false, 'no state written');

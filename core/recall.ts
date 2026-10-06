@@ -1,7 +1,7 @@
-// Recall: on-demand, read-only search of one session's Event Log. Takes no lock and never
+// Recall: on-demand, read-only search of one session's Event Log. Takes no session lock and never
 // touches the Working Context or any revision, so the agent can call it from its own shell
 // while the adapter holds the session. Its only write is one appended Event Log line per call
-// (for eval accounting): a single O_APPEND write, like every other Event Log append. Where that
+// (for eval accounting): an O_APPEND write under the shared append lease, completed even on short writes. Where that
 // write is not permitted (Codex's workspace-write sandbox), the result is still returned, marked
 // `accounting: 'skipped'`.
 import { createHash } from 'node:crypto';
@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { appendLog, assertSessionId, layout, readLog, readWorkingContextFile, resolveStateRoot, workingContextRelPath } from './store.ts';
 import type { RunnerEvent } from './session.ts';
 import { approxTokens, formatInt } from './size.ts';
+import { SerializeTimeout } from './lock.ts';
 
 export interface SessionRef {
   projectRoot: string;
@@ -80,7 +81,9 @@ function items(log: string): Item[] {
   for (const entry of readLog(log)) {
     if (entry.type === 'runner-events') {
       for (const { seq, event } of entry.events as Array<{ seq: number; event: RunnerEvent }>) {
-        out.push({ id: `e${seq}`, role: event.role, text: event.text });
+        // Structured runner evidence lives in the log, outside the materialized Working Context.
+        const evidence = event.item === undefined ? '' : `\n${JSON.stringify(event.item)}`;
+        out.push({ id: `e${seq}`, role: event.role, text: event.text + evidence });
       }
     } else if (entry.type === 'restored' && typeof entry.rejected === 'string') {
       out.push({ id: `r${++rejected}`, role: 'rejected-edit', text: entry.rejected });
@@ -172,10 +175,11 @@ const SKIPPED_NOTE = SKIPPED_NOTE_TEXT;
  */
 function account(log: string, entry: Record<string, unknown>): { accounting?: 'skipped'; note?: string } {
   try {
-    appendLog(log, entry);
+    appendLog(log, entry, { timeoutMs: 0 });
     return {};
   } catch (e) {
-    if (['EACCES', 'EPERM', 'EROFS'].includes((e as NodeJS.ErrnoException).code ?? '')) return { accounting: 'skipped', note: SKIPPED_NOTE };
+    if (e instanceof SerializeTimeout) return { accounting: 'skipped', note: SKIPPED_NOTE };
+    if (['EACCES', 'EPERM', 'EROFS', 'ENOSPC', 'EDQUOT', 'EIO'].includes((e as NodeJS.ErrnoException).code ?? '')) return { accounting: 'skipped', note: SKIPPED_NOTE };
     throw e;
   }
 }
@@ -269,7 +273,8 @@ export function readWorkingContext(opts: SessionRef & { part?: number; sha?: str
   const bytes = readWorkingContextFile(path);
   if (bytes === undefined) throw new Error(`no Working Context file at ${rel}`);
   if (bytes === 'not-a-file') throw new Error(`the Working Context ${rel} is a symbolic link or a hard link, which is never read; replace it with a regular file`);
-  const whole = bytes.toString('utf8');
+  // Preserve a UTF-8 BOM too: every returned part must reconstruct the original bytes.
+  const whole = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
   const parts = splitParts(whole, READ_MAX_BYTES - HEADER_BYTES);
   const part = opts.part ?? 1;
   if (!Number.isSafeInteger(part) || part < 1 || part > parts.length) throw new Error(`no part ${part} of ${parts.length}: the Working Context has ${parts.length} part(s)`);

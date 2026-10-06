@@ -309,6 +309,13 @@ function loggedEvents(f: Fixture): Array<Record<string, unknown>> {
   );
 }
 
+test('manual compaction retains its distinct trigger and delivery label', () => {
+  const f = enabledFixture(); hook(f, prompt('Task: keep going.')); hook(f, { ...preCompact, trigger: 'manual' });
+  const event = loggedEvents(f).at(-1)!;
+  assert.match(String(event.text), /reset \(manual compaction\)/); assert.match(String(event.delivery), /manual compaction/);
+  assert.doesNotMatch(String(event.text), /token.limit/);
+});
+
 test("a reset from Codex's own token limit is labelled Compaction-only in the file and the Event Log; a new_context reset is not", () => {
   const f = enabledFixture();
   hook(f, prompt('Task: keep going.'));
@@ -496,12 +503,13 @@ function status(f: Fixture) {
   return JSON.parse(r.stdout) as { revision: number; lock: { pid: number; runner: string } | null };
 }
 
-test('the session lock is owned by the runner process, even when Codex runs the hook through a login shell', () => {
+test('the session lock is owned by the runner process through controlled shell ancestry', () => {
   const f = enabledFixture();
-  // Codex 0.160.0 runs hook commands as `$SHELL -lc "<command>"`; the runner is the shell's parent.
+  // Keep the shell parent relationship without sourcing machine-wide or user login profiles.
   const input = JSON.stringify({ session_id: SID, cwd: f.projectRoot, transcript_path: null, model: 'm', ...prompt('hello') });
   for (const shell of ['sh', 'bash']) {
-    const r = spawnSync(shell, ['-lc', `"${process.execPath}" "${HOOK}"; true`], { cwd: f.projectRoot, input, encoding: 'utf8', env: env(f) });
+    const args = shell === 'bash' ? ['--noprofile', '--norc', '-c'] : ['-c'];
+    const r = spawnSync(shell, [...args, `"${process.execPath}" "${HOOK}"; true`], { cwd: f.projectRoot, input, encoding: 'utf8', env: env(f) });
     assert.equal(r.status, 0, r.stderr);
     const s = status(f);
     assert.equal(s.lock?.pid, process.pid, `owner via ${shell}`);

@@ -5,7 +5,7 @@ import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, open
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, join, parse, resolve, sep } from 'node:path';
 
-function checkComponents(path: string): void {
+export function checkComponents(path: string): void {
   const absolute = resolve(path);
   let current = parse(absolute).root;
   for (const part of absolute.slice(current.length).split(sep).filter(Boolean)) {
@@ -50,4 +50,43 @@ export function safeWrite(path: string, data: string | Buffer): void {
     if (tmp) try { unlinkSync(tmp); } catch {}
     closeSync(fd);
   }
+}
+
+/** One runner-wide lease, held until synchronous or asynchronous setup work has finished. */
+export function acquireSetupLock(path: string): () => void {
+  checkComponents(path);
+  const parent = dirname(resolve(path));
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  checkComponents(path);
+  const dir = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  let lock: number | undefined;
+  let released = false;
+  const anchored = join(`/proc/self/fd/${dir}`, basename(path));
+  const release = () => {
+    if (released) return;
+    released = true;
+    try {
+      if (lock !== undefined) {
+        try {
+          const own = fstatSync(lock), now = lstatSync(anchored);
+          if (own.dev === now.dev && own.ino === now.ino) unlinkSync(anchored);
+        } finally { closeSync(lock); }
+      }
+    } finally { closeSync(dir); }
+  };
+  try {
+    if (!fstatSync(dir).isDirectory() || realpathSync(`/proc/self/fd/${dir}`) !== parent) throw new Error(`setup cannot verify directory: ${parent}`);
+    try { lock = openSync(anchored, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`setup transaction already locked: ${path}; wait for the active setup to finish. If interrupted, verify no setup process is running before removing this lock.`);
+      throw e;
+    }
+    writeFileSync(lock, `${JSON.stringify({ pid: process.pid })}\n`);
+    return release;
+  } catch (e) { release(); throw e; }
+}
+
+export function withSetupLock<T>(path: string, action: () => T): T {
+  const release = acquireSetupLock(path);
+  try { return action(); } finally { release(); }
 }

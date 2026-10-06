@@ -73,8 +73,8 @@ test('Codex: install, trust the hooks, uninstall: config bytes restore exactly; 
   assert.match(config, /\[plugins\."context-engine@context-engine"\]/);
   assert.ok(config.startsWith(CODEX_CONFIG));
   // The installed hook commands call this checkout's CLI.
-  const hooks = readFileSync(join(w.codexHome, 'plugins', 'cache', 'context-engine', 'context-engine', '0.1.4', 'hooks', 'hooks.json'), 'utf8');
-  assert.match(hooks, /CONTEXT_ENGINE_CLI='[^']*\/core\/cli\.ts' node \\"\$PLUGIN_ROOT\/hooks\/codex-hook\.ts\\"/);
+  const hooks = readFileSync(join(w.codexHome, 'plugins', 'cache', 'context-engine', 'context-engine', '0.1.5', 'hooks', 'hooks.json'), 'utf8');
+  assert.match(hooks, /CONTEXT_ENGINE_CLI='[^']*\/core\/cli\.ts' '[^']*node' \\"\$PLUGIN_ROOT\/hooks\/codex-hook\.ts\\"/);
   assert.match(inst.stdout, /\/hooks/, 'tells the user the hooks need trust');
   trustAll(w);
 

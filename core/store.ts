@@ -27,6 +27,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { confineStep, crashPoint, fdLinkPath, type CrashPoint } from './faults.ts';
+import { serialized } from './lock.ts';
 
 export const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
 
@@ -301,7 +302,9 @@ export function assertWorkingContextDir(wc: string): void {
  * directory above it swapped for a link after assertWorkingContextDir is caught (thrown), and the
  * descriptor must not be a credential. Throws (fails closed) when /proc is unavailable.
  */
-export function readWorkingContextFile(wc: string): Buffer | undefined | 'not-a-file' {
+export function readWorkingContextFile(wc: string): Buffer | undefined | 'not-a-file';
+export function readWorkingContextFile(wc: string, maxBytes: number): Buffer | undefined | 'not-a-file' | 'too-large';
+export function readWorkingContextFile(wc: string, maxBytes?: number): Buffer | undefined | 'not-a-file' | 'too-large' {
   assertWorkingContextDir(wc);
   let fd: number;
   confineStep('before-open', wc);
@@ -318,6 +321,19 @@ export function readWorkingContextFile(wc: string): Buffer | undefined | 'not-a-
     const real = openedPath(fd);
     if (real !== wc) throw new Error(`the Working Context's directory changed while it was being opened (${wc} led to ${real}); refusing to read it`);
     if (isCredential(real, st) || !st.isFile() || st.nlink !== 1) return 'not-a-file';
+    if (maxBytes !== undefined) {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('invalid Working Context read bound');
+      if (st.size > maxBytes) return 'too-large';
+      const chunk = Buffer.alloc(Math.min(65536, maxBytes + 1)), parts: Buffer[] = [];
+      let total = 0;
+      for (;;) {
+        const n = readSync(fd, chunk, 0, Math.min(chunk.length, maxBytes + 1 - total), null);
+        if (!n) return Buffer.concat(parts, total);
+        total += n;
+        if (total > maxBytes) return 'too-large';
+        parts.push(Buffer.from(chunk.subarray(0, n)));
+      }
+    }
     return readFileSync(fd);
   } finally {
     closeSync(fd);
@@ -379,7 +395,12 @@ export function readBytes(path: string): Buffer | undefined {
 }
 
 /** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. */
-export function appendLog(path: string, entry: Record<string, unknown>): void {
+export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number } = {}): void {
+  serialized(`${path}.append.lock`, () => appendLogLocked(path, entry), opts);
+}
+
+function appendLogLocked(path: string, entry: Record<string, unknown>): void {
+  truncateTornTailLocked(path);
   const line = Buffer.from(`${JSON.stringify({ ...entry, at: new Date().toISOString() })}\n`);
   const fd = openSync(path, 'a', 0o600);
   try {
@@ -389,7 +410,12 @@ export function appendLog(path: string, entry: Record<string, unknown>): void {
       writeSync(fd, line.subarray(0, line.length >> 1));
       throw e;
     }
-    writeSync(fd, line);
+    // The append lease prevents recall accounting or another writer from interleaving chunks.
+    for (let offset = 0; offset < line.length;) {
+      const written = writeSync(fd, line, offset, line.length - offset);
+      if (written <= 0) throw Object.assign(new Error('incomplete Event Log append; state was not advanced'), { code: 'EIO' });
+      offset += written;
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -415,6 +441,11 @@ export function readLog(path: string): Array<Record<string, unknown>> {
 
 /** Cuts a torn (unterminated) final line off the Event Log. Returns the bytes removed. */
 export function truncateTornTail(path: string): number {
+  if (!existsSync(path)) return 0;
+  return serialized(`${path}.append.lock`, () => truncateTornTailLocked(path));
+}
+
+function truncateTornTailLocked(path: string): number {
   let fd: number;
   try { fd = openSync(path, 'r'); }
   catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw e; }

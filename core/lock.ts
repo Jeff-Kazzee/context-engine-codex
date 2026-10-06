@@ -142,11 +142,14 @@ function tryLink(path: string, me: LockHolder): boolean {
   const candidate = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.new`;
   const fd = openSync(candidate, 'wx', 0o600);
   try {
-    writeSync(fd, JSON.stringify(me));
-  } finally {
-    closeSync(fd);
-  }
-  try {
+    const bytes = Buffer.from(JSON.stringify(me));
+    try {
+      for (let offset = 0; offset < bytes.length;) {
+        const written = writeSync(fd, bytes, offset, bytes.length - offset);
+        if (written <= 0) throw new Error('lock record write made no progress; lock not published');
+        offset += written;
+      }
+    } finally { closeSync(fd); }
     linkSync(candidate, path);
     return true;
   } catch (e) {

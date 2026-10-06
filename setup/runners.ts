@@ -68,8 +68,14 @@ export function stageCodexPlugin(ctx: SetupContext): void {
   cpSync(join(ctx.checkout, 'adapters', 'codex', 'plugin'), plugin, { recursive: true });
   const hooksPath = join(plugin, 'hooks', 'hooks.json');
   const cli = join(ctx.checkout, 'core', 'cli.ts');
-  const hooks = readFileSync(hooksPath, 'utf8').replaceAll('"command": "node ', `"command": "CONTEXT_ENGINE_CLI=${JSON.stringify(shellQuote(cli)).slice(1, -1)} node `);
-  writeFileSync(hooksPath, hooks);
+  const hooks = JSON.parse(readFileSync(hooksPath, 'utf8'));
+  for (const groups of Object.values(hooks.hooks) as Array<Array<{ hooks: Array<{ command: string }> }>>) {
+    for (const group of groups) for (const hook of group.hooks) {
+      if (!hook.command.startsWith('node ')) throw new Error('unexpected Context Engine hook command; staging refused');
+      hook.command = `CONTEXT_ENGINE_CLI=${shellQuote(cli)} ${shellQuote(process.execPath)} ${hook.command.slice(5)}`;
+    }
+  }
+  writeFileSync(hooksPath, `${JSON.stringify(hooks, null, 2)}\n`);
   mkdirSync(join(root, '.agents', 'plugins'), { recursive: true });
   writeFileSync(
     join(root, '.agents', 'plugins', 'marketplace.json'),

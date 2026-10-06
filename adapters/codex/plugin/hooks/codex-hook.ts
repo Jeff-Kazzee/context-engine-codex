@@ -125,8 +125,9 @@ async function main(input: HookInput): Promise<void> {
     // last turn (a new_context reset reaches PreCompact too, also as `auto`). This reset is the
     // runner's, not the agent's: the marker and its Event Log entry carry the Compaction-only label.
     else if (!lastTurnIsReset) {
-      const delivery = lib.CODEX_TOKEN_LIMIT_RESET.label;
-      core(input, 'record', [{ role: 'tool', text: backstopMarker(delivery), delivery }]);
+      const manual = input.trigger === 'manual';
+      const delivery = manual ? lib.CODEX_MANUAL_COMPACTION.label : lib.CODEX_TOKEN_LIMIT_RESET.label;
+      core(input, 'record', [{ role: 'tool', text: backstopMarker(delivery, manual), delivery }]);
     }
   }
 }
@@ -208,8 +209,8 @@ const RESET_MARKER = 'Context window reset (new_context). Everything above happe
  * The same for a reset the agent did not ask for (Codex's token limit, a manual /compact), with its
  * Delivery Mode (core CODEX_TOKEN_LIMIT_RESET). Static text.
  */
-const backstopMarker = (delivery: string): string =>
-  `Context window reset (token limit). Delivery Mode: ${delivery}. Everything above happened before this point: steps recorded as done are done. The new window holds none of it: read this file back with \`context-engine read\`, read every part, then continue from here.`;
+const backstopMarker = (delivery: string, manual: boolean): string =>
+  `Context window reset (${manual ? 'manual compaction' : 'token limit'}). Delivery Mode: ${delivery}. Everything above happened before this point: steps recorded as done are done. The new window holds none of it: read this file back with \`context-engine read\`, read every part, then continue from here.`;
 /** Set by resetRefusal: whether the file's last turn is already a reset marker. */
 let lastTurnIsReset = false;
 

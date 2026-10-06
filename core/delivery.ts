@@ -34,3 +34,6 @@ export const COMPACTION_ONLY_FALLBACK = deliveryMode('Compaction-only (fallback:
  * the new window only when the agent reads it back. Never counted as Full Replacement.
  */
 export const CODEX_TOKEN_LIMIT_RESET = deliveryMode('Compaction-only (Codex token-limit reset; Working Context read back by the agent)');
+
+/** A manual /compact has the same read-back delivery, but a different trigger. */
+export const CODEX_MANUAL_COMPACTION = deliveryMode('Compaction-only (Codex manual compaction; Working Context read back by the agent)');

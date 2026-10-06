@@ -14,7 +14,7 @@ test('a project nobody enabled is inactive: the pilot is opt-in', () => {
   const p = participation({ ...f, env: on });
   assert.equal(p.active, false);
   assert.equal(p.state, 'default');
-  assert.match(p.reason, /context-engine enable/);
+  assert.match(p.reason, /runtime-specific enable command/);
 });
 
 test('enable makes a project active, including its subdirectories; disable turns it off again', () => {

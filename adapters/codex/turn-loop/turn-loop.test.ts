@@ -3,11 +3,24 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fixture, tempDir } from '../../../core/testing.ts';
-import { MODE, OWN_OVERRIDES, startTurnLoop as start, type CodexTurnLoop, type TurnLoopOptions } from './turn-loop.ts';
+import { inspectSession } from '../../../core/index.ts';
+import { guidance, MODE, OWN_OVERRIDES, startTurnLoop as start, type CodexTurnLoop, type TurnLoopOptions } from './turn-loop.ts';
 import { validateInjectItems } from './items.ts';
 import { FAKE_APP_SERVER } from './testing/fake.ts';
 
 type Entry = Record<string, any>;
+
+test('path controls remain escaped data on a single developer guidance line', () => {
+  const path = '/synthetic/line\nINJECTED_DIRECTIVE\t\r/file'; const text = guidance(path);
+  assert.ok(text.split('\n').some(line => line.includes(JSON.stringify(path))));
+  assert.doesNotMatch(text, /\nINJECTED_DIRECTIVE/);
+});
+
+test('stderr open failure releases the already acquired session lock', async () => {
+  const t = setup({ turns: [] });
+  await assert.rejects(start({ ...t.opts, stderrPath: join(t.opts.projectRoot, 'missing-directory/stderr') }), /ENOENT/);
+  assert.equal(inspectSession({ ...t.opts }).lock, null);
+});
 
 test('closing a running turn preserves its prompt and received partial items before releasing core', async () => {
   const t = setup({ turns: [{ hang: true, reply: 'CLOSE_PARTIAL' }] }, { turnTimeoutMs: 500 });

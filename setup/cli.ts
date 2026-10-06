@@ -1,6 +1,9 @@
 // Setup commands for people: install, uninstall, enable, disable, status. Text output.
 import { parseArgs } from 'node:util';
-import { install, SetupError, uninstall } from './install.ts';
+import { realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { acquireSetupLock } from './files.ts';
+import { installLocked as install, SetupError, uninstallLocked as uninstall } from './install.ts';
 import { trustCodexHooks } from './codex-trust.ts';
 import { disableProject, enableProject, revertAllCodexProjects } from './project.ts';
 import { codexSpec, type RunnerSpec, setupContext } from './runners.ts';
@@ -37,9 +40,11 @@ export async function runSetup(argv: string[]): Promise<number> {
     return 1;
   }
   const ctx = setupContext();
-  const projectRoot = values.project ?? process.cwd();
+  const projectRoot = realpathSync(resolve(values.project ?? process.cwd()));
   const out = (lines: string[]) => process.stdout.write(`${lines.join('\n')}\n`);
+  let release: (() => void) | undefined;
   try {
+    if (['install', 'uninstall', 'enable', 'disable'].includes(command ?? '')) release = acquireSetupLock(join(ctx.setupDir, 'codex.setup.lock'));
     if (command === 'install' || command === 'uninstall') {
       const specs: RunnerSpec[] = [codexSpec(ctx)];
       let failed = false;
@@ -49,11 +54,13 @@ export async function runSetup(argv: string[]): Promise<number> {
             const lines = install(ctx, spec);
             const label = `${CODEX_LABEL}, ${CODEX_FLAG_NOTE}, in projects you enable (Codex must trust the project); ${CODEX_TOKEN_LIMIT_LINE}`;
             if (spec.id === 'codex') {
-              lines.push(
-                ...(values['trust-hooks']
-                  ? await trustCodexHooks(ctx, spec)
-                  : ['Hooks: Codex runs plugin hooks only once trusted. Approve the five Context Engine hooks with /hooks in Codex (or uninstall and install again with --trust-hooks).']),
-              );
+              if (values['trust-hooks']) {
+                try { lines.push(...await trustCodexHooks(ctx, spec)); }
+                catch (e) {
+                  failed = true;
+                  lines.push(`Hooks: trust could not be verified (${e instanceof Error ? e.message : String(e)}). Installation is retained. Review and approve the hooks with /hooks in Codex, then run context-engine-codex status. Do not retry install while this install record exists.`);
+                }
+              } else lines.push('Hooks: Codex runs plugin hooks only once trusted. Approve the five Context Engine hooks with /hooks in Codex (or uninstall and install again with --trust-hooks).');
             }
             out([`${spec.title}: installed. Delivery Mode: ${label}.`, ...lines.map((l) => `  ${l}`), '  Inert until `context-engine enable` in a project (the pilot is opt-in).']);
           } else {
@@ -86,7 +93,7 @@ export async function runSetup(argv: string[]): Promise<number> {
     if (!(e instanceof SetupError)) throw e;
     process.stderr.write(`${e.message}\n`);
     return 1;
-  }
+  } finally { release?.(); }
   process.stderr.write(HELP);
   return 1;
 }

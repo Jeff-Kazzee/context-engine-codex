@@ -91,6 +91,8 @@ export type Receipt = (
 ) & { approxTokens: number; stale?: StaleReport };
 
 export interface SyncResult {
+  /** Exact immutable revision bytes decoded as text, for delivery without rereading the live file. */
+  workingContextText: string;
   /** Committed revision (0 = nothing committed yet). */
   revision: number;
   /** Runner-neutral turns parsed from the committed revision. */
@@ -330,7 +332,7 @@ class Core {
 
   private result(head: Head | null, receipt?: Receipt): SyncResult {
     const text = head ? this.snapshot(head.rev) : '';
-    const r: SyncResult = { revision: head?.rev ?? 0, turns: parseTurns(text), chars: text.length };
+    const r: SyncResult = { revision: head?.rev ?? 0, turns: parseTurns(text), chars: text.length, workingContextText: text };
     if (receipt) r.receipt = receipt;
     return r;
   }
@@ -408,7 +410,8 @@ class Core {
     atomicWrite(this.l.workingContext, text, 'wc-tmp', 0o644);
   }
 
-  private invalid(bytes: Buffer | undefined | 'not-a-file'): { reason: RestoreReason; text: string | null } | { text: string } {
+  private invalid(bytes: Buffer | undefined | 'not-a-file' | 'too-large'): { reason: RestoreReason; text: string | null } | { text: string } {
+    if (bytes === 'too-large') return { reason: 'over-hard-limit', text: null };
     if (bytes === 'not-a-file') return { reason: 'not-a-file', text: null };
     if (bytes === undefined) return { reason: 'missing', text: null };
     const text = decode(bytes);
@@ -420,8 +423,10 @@ class Core {
 
   sync(): SyncResult {
     const head = this.head();
-    const read = readWorkingContextFile(this.l.workingContext);
-    const bytes = read === 'not-a-file' ? undefined : read;
+    // Runner appends may legitimately exceed the edit limit; recognize that existing snapshot.
+    const bound = Math.max(this.hardLimit * 4, head ? statSync(join(this.l.revisions, `${head.rev}.md`)).size : 0);
+    const read = readWorkingContextFile(this.l.workingContext, bound);
+    const bytes = typeof read === 'string' ? undefined : read;
     // The file is the committed revision itself: nothing was edited, so nothing can be rejected
     // (a runner append may have taken HEAD past the hard limit; that is the budget's business).
     if (head && bytes && head.materialized && sha(bytes.toString('utf8')) === head.sha && decode(bytes) !== null) return this.result(head);
@@ -440,7 +445,7 @@ class Core {
         reason: check.reason,
         chars: restored.length,
         approxTokens: approxTokens(restored.length),
-        text: `Context Engine: your Working Context edit was not applied (${RESTORE_WORDS[check.reason]}). Revision ${head.rev} (${restored.length} chars) was restored; the rejected text is kept in the Event Log. ${sizeReadout(restored.length)}`,
+        text: `Context Engine: your Working Context edit was not applied (${RESTORE_WORDS[check.reason]}). Revision ${head.rev} (${restored.length} chars) was restored; ${read === 'too-large' ? 'oversized bytes were not read or copied; the rejection is recorded in the Event Log' : 'the rejected text is kept in the Event Log'}. ${sizeReadout(restored.length)}`,
       };
       return this.result(head, receipt);
     }
@@ -514,6 +519,11 @@ class Core {
 
   /** With no revision to restore, an unusable file's content is logged and the file removed. */
   private rejectWithoutHead(check: { reason: RestoreReason; text: string | null }, bytes: Buffer | undefined): Receipt | undefined {
+    if (check.reason === 'over-hard-limit' && bytes === undefined) {
+      appendLog(this.l.events, { type: 'restored', rev: 0, reason: check.reason, rejected: null, oversized: true });
+      this.writeWorkingContext('');
+      return { kind: 'restored', revision: 0, reason: check.reason, chars: 0, approxTokens: 0, text: 'Context Engine: oversized Working Context bytes were not read or copied. No revision exists yet, so the file was cleared; the rejection is recorded in the Event Log.' };
+    }
     if (check.reason === 'not-a-file') {
       // A link: remove the link itself (never its target) and log nothing of what it pointed at.
       appendLog(this.l.events, { type: 'restored', rev: 0, reason: check.reason, rejected: null });
@@ -546,10 +556,13 @@ class Core {
   }
 
   close(): void {
-    appendLog(this.l.events, { type: 'closed', pid: this.me.pid });
-    this.saveRecoveryCheckpoint();
-    releaseLock(this.l.lock, this.me);
-    this.closed = true;
+    try {
+      appendLog(this.l.events, { type: 'closed', pid: this.me.pid });
+      this.saveRecoveryCheckpoint();
+    } finally {
+      try { releaseLock(this.l.lock, this.me); }
+      finally { this.closed = true; }
+    }
   }
 
   // ---- recovery: the same code paths as normal operation ----
@@ -571,8 +584,8 @@ class Core {
     // A runner append committed HEAD but died before rewriting the Working Context.
     let rematerialized = false;
     if (head && !head.materialized) {
-      const read = readWorkingContextFile(this.l.workingContext);
-      const current = read && read !== 'not-a-file' ? decode(read) : null;
+      const read = readWorkingContextFile(this.l.workingContext, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size));
+      const current = read && typeof read !== 'string' ? decode(read) : null;
       const currentSha = current === null ? null : sha(current);
       if (currentSha !== head.sha && (currentSha === head.parent || current === null || current.trim() === '')) {
         this.materialize(head, this.snapshot(head.rev));

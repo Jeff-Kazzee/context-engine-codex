@@ -2,7 +2,36 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { world } from './testing/world.ts';
+import { CLI, world } from './testing/world.ts';
+import { spawn } from 'node:child_process';
+import { TOML_MARKERS } from './project.ts';
+
+test('a first enable refuses unowned marker collisions without changing user settings', () => {
+  const w = install(), path = join(w.project, '.codex/config.toml'); mkdirSync(join(w.project, '.codex'));
+  const before = `# user data\n${TOML_MARKERS.begin}\nmodel = "USER_SETTING"\n${TOML_MARKERS.end}\n`; writeFileSync(path, before);
+  const result = w.ce(['enable']); assert.notEqual(result.status, 0); assert.match(result.stderr, /unowned/); assert.equal(readFileSync(path, 'utf8'), before);
+  assert.equal(JSON.parse(w.ce(['status', '--json']).stdout).participation.active, false);
+});
+
+test('the install lease protects deferred hook trust against uninstall and project changes', async () => {
+  const w = world(), pause = join(w.home, 'synthetic-trust-pause');
+  const child = spawn(process.execPath, [CLI, 'install', '--trust-hooks'], { cwd: w.project, env: { ...process.env, ...w.env, FAKE_CODEX_TRUST_PAUSE: pause }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = ''; child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
+  const finished = new Promise<number | null>((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  try {
+    const deadline = Date.now() + 5000;
+    while (!existsSync(pause) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(existsSync(pause), output);
+    for (const command of ['uninstall', 'enable', 'disable']) {
+      const result = w.ce([command]); assert.notEqual(result.status, 0); assert.match(result.stderr, /already locked/);
+    }
+    assert.equal(existsSync(join(w.project, '.codex/config.toml')), false);
+    writeFileSync(`${pause}.release`, 'continue'); assert.equal(await finished, 0, output);
+    assert.equal(w.ce(['enable']).status, 0);
+    assert.equal(w.ce(['uninstall']).status, 0);
+    assert.equal(existsSync(join(w.project, '.codex/config.toml')), false);
+  } finally { writeFileSync(`${pause}.release`, 'continue'); child.kill(); await finished; }
+});
 
 for (const length of [186, 190, 255]) test(`setup supports project basename ${length} and round-trip rollback`, () => {
   const w = install(), project = join(w.project, 'p'.repeat(length)); mkdirSync(project);
@@ -13,6 +42,20 @@ for (const length of [186, 190, 255]) test(`setup supports project basename ${le
 });
 
 function install() { const w = world(); const r = w.ce(['install', '--codex', '--trust-hooks']); assert.equal(r.status, 0, r.stderr); return w; }
+
+test('relative enable project is canonical across later working directories', () => {
+  const w = install(), project = join(w.project, 'child'); mkdirSync(project);
+  assert.equal(w.ce(['enable', '--project', 'child']).status, 0);
+  assert.equal(w.ce(['uninstall', '--codex'], { cwd: w.home }).status, 0);
+  assert.equal(existsSync(join(project, '.codex/config.toml')), false);
+});
+
+test('hook trust failure reports the retained installation and a recovery command', () => {
+  const w = world(), result = w.ce(['install', '--codex', '--trust-hooks'], { env: { FAKE_CODEX_FAIL: 'app-server --listen' } });
+  assert.equal(result.status, 1); assert.match(result.stdout, /installed/); assert.match(result.stdout, /Installation is retained/); assert.match(result.stdout, /\/hooks/);
+  assert.ok(existsSync(join(w.stateDir, 'setup/codex.json')));
+  assert.equal(w.ce(['uninstall', '--codex']).status, 0);
+});
 for (const key of ['developer_instructions', '"developer_instructions"', "'developer_instructions'"]) test(`enable refuses ${key} without activating participation`, () => {
   const w = install(); mkdirSync(join(w.project, '.codex'));
   writeFileSync(join(w.project, '.codex/config.toml'), `${key} = "USER_GUIDANCE"\n`);

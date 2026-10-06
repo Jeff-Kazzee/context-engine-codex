@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inspectSession, openSession, recall, RECALL_GUIDANCE, RECALL_MAX_BYTES, show, SHOW_MAX_BYTES, type Session } from './index.ts';
+import { inspectSession, openSession, readWorkingContext, recall, RECALL_GUIDANCE, RECALL_MAX_BYTES, show, SHOW_MAX_BYTES, type Session } from './index.ts';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -199,7 +199,7 @@ test('an empty or oversized query is refused', () => {
   assert.throws(() => recall({ ...f, sessionId: 'S1', query: 'q'.repeat(1000) }), /query/);
 });
 
-test('when the Event Log cannot be appended to (e.g. a sandboxed shell), recall and show still answer and say accounting was skipped', () => {
+for (const code of ['EACCES', 'ENOSPC', 'EDQUOT']) test(`when accounting fails with ${code}, recall and show still return evidence`, () => {
   const f = fixture();
   const s = open(f);
   s.record([{ role: 'tool', text: 'parseDate("2024-02-30") returned Invalid Date' }]);
@@ -208,7 +208,7 @@ test('when the Event Log cannot be appended to (e.g. a sandboxed shell), recall 
   const before = readFileSync(log, 'utf8');
   const nativeOpen = fs.openSync;
   fs.openSync = ((path: any, flags: any, ...args: any[]) => {
-    if (path === log && flags === 'a') throw Object.assign(new Error('synthetic append denied'), { code: 'EACCES' });
+    if (path === log && flags === 'a') throw Object.assign(new Error('synthetic append denied'), { code });
     return (nativeOpen as any)(path, flags, ...args);
   }) as typeof fs.openSync;
   syncBuiltinESMExports();
@@ -221,6 +221,9 @@ test('when the Event Log cannot be appended to (e.g. a sandboxed shell), recall 
     const sh = show({ ...f, sessionId: 'S1', id: 'e1' });
     assert.match(sh.text, /Invalid Date/);
     assert.equal(sh.accounting, 'skipped');
+    const rd = readWorkingContext({ ...f, sessionId: 'S1' });
+    assert.match(rd.text, /Invalid Date/);
+    assert.equal(rd.accounting, 'skipped');
   } finally {
     fs.openSync = nativeOpen;
     syncBuiltinESMExports();

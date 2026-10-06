@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { safeRead, safeWrite } from './files.ts';
+import { checkComponents, safeRead, safeWrite } from './files.ts';
 
 /** How to recognise and remove our entries in one file. */
 export interface Rule {
@@ -82,6 +82,7 @@ export function timestamp(d = new Date()): string {
 
 /** Backs up `files` byte for byte into a new timestamped dir under `backupRoot`, and lists `watch`. */
 export function takeSnapshot(opts: { backupRoot: string; kind: string; files: string[]; watch: string[]; namespaced: string[]; extra?: Record<string, unknown> }): Snapshot {
+  for (const path of opts.namespaced) checkComponents(path);
   const at = new Date();
   let dir = join(opts.backupRoot, `${opts.kind}-${timestamp(at)}`);
   for (let n = 2; existsSync(dir); n++) dir = join(opts.backupRoot, `${opts.kind}-${timestamp(at)}-${n}`);

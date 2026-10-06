@@ -69,9 +69,10 @@ export function budgetMemory(entries: Iterable<Record<string, unknown>>, budgetT
   for (const e of entries) {
     if (e.type === 'revision') {
       remember(m, String(e.kind), Number(e.chars) || 0, budgetTokens);
-    } else if (e.type === 'budget-reminder' && typeof e.tier === 'number' && e.tier > m.announced) {
+    } else if (e.type === 'budget-reminder' && e.budgetTokens === budgetTokens && BUDGET_TIERS.includes(e.tier as 25 | 50 | 75) && typeof e.tier === 'number' && e.tier > m.announced) {
       m.announced = e.tier as BudgetTier;
     } else if (e.type === 'budget' && typeof e.budgetTokens === 'number') {
+      if (e.budgetTokens !== m.loggedBudget) m.announced = 0;
       m.loggedBudget = e.budgetTokens;
     }
   }

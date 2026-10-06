@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assess, completeLedger, type FileReport, type Ledger, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
-import { safeRead, safeWrite } from './files.ts';
+import { safeRead, safeWrite, withSetupLock } from './files.ts';
 import { runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
 
 const pointerPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}.json`);
@@ -19,6 +19,10 @@ export function installedLedger(ctx: SetupContext, id: string): Ledger | null {
 export class SetupError extends Error {}
 
 export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
+  return withSetupLock(join(ctx.setupDir, `${spec.id}.setup.lock`), () => installLocked(ctx, spec));
+}
+
+export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   const prior = installedLedger(ctx, spec.id);
   if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine uninstall --${spec.id}\` first`);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
@@ -57,6 +61,10 @@ function sameBytes(a: string | null, b: string | null): boolean {
 }
 
 export function uninstall(ctx: SetupContext, spec: RunnerSpec): string[] {
+  return withSetupLock(join(ctx.setupDir, `${spec.id}.setup.lock`), () => uninstallLocked(ctx, spec));
+}
+
+export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   const ledger = installedLedger(ctx, spec.id);
   if (!ledger) throw new SetupError(`${spec.title}: not installed by Context Engine (no install record in ${ctx.setupDir})`);
   const unchanged = assess(ledger, spec.rules);

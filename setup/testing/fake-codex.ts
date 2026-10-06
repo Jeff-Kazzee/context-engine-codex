@@ -150,7 +150,12 @@ function appServer(): void {
         }
         result = { status: 'ok' };
       }
-      process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n`);
+      const reply = () => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n`);
+      const pause = process.env.FAKE_CODEX_TRUST_PAUSE;
+      if (pause && msg.method === 'hooks/list' && !existsSync(`${pause}.release`)) {
+        writeFileSync(pause, 'SYNTHETIC_TRUST_WAIT');
+        const timer = setInterval(() => { if (existsSync(`${pause}.release`)) { clearInterval(timer); reply(); } }, 10);
+      } else reply();
     }
   });
 }

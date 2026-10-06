@@ -2,7 +2,7 @@
 
 An experimental, opt-in plugin that lets your agent edit its **Working Context** with ordinary tools. This repository ships only the Codex adapter and a pinned shared core. It starts **off in every project**. No default-on recommendation or accuracy gain is claimed.
 
-**Full Replacement at agent-initiated resets (any model step); history grows between resets.** The agent must call `new_context`, then read every part of its Working Context. A token-limit reset or manual `/compact` is **Compaction-only (Codex token-limit reset; Working Context read back by the agent)**.
+**Full Replacement at agent-initiated resets (any model step); history grows between resets.** The agent must call `new_context`, then read every part of its Working Context. A token-limit reset is **Compaction-only (Codex token-limit reset; Working Context read back by the agent)**; manual `/compact` is **Compaction-only (Codex manual compaction; Working Context read back by the agent)**.
 
 **Source approval and installation acceptance:** this candidate is in an open PR; main remains bootstrap-only. Source merge requires passing offline checks, independent review and Jeff's approval of the exact head. Real persistent plugin loading, interactive delivery and long-session performance remain unverified; these are installation/release acceptance gaps, not substitutes for source review. Do not recommend installation until a supported-host trial proves next-request delivery. No model evaluations or host configuration changes are part of the offline source checks.
 
@@ -37,7 +37,7 @@ evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 
 ## 1. Check compatibility before installing
 
-Shared core 0.1.4 uses the full SHA-256 of the canonical project path for private state and participation keys. Legacy 0.1.0 directories and backups are preserved, but are not automatically migrated or merged. Uninstall an old installation using its original checkout/CLI first; retain its backups and session data. After coordinated runner updates, re-enable a fresh disposable project and start a fresh session. Do not mix 0.1.0 with 0.1.4 under a shared `CONTEXT_ENGINE_STATE_DIR`; use a separate, consistently configured state root for a trial. Existing legacy data remains available through the old checkout with its old state root. Valid full-digest keys from 0.1.1 remain unchanged in 0.1.2, 0.1.3 and 0.1.4.
+Shared core 0.1.5 uses the full SHA-256 of the canonical project path for private state and participation keys. Legacy 0.1.0 directories and backups are preserved, but are not automatically migrated or merged. Uninstall an old installation using its original checkout/CLI first; retain its backups and session data. After coordinated runner updates, re-enable a fresh disposable project and start a fresh session. Do not mix 0.1.0 with 0.1.5 under a shared `CONTEXT_ENGINE_STATE_DIR`; use a separate, consistently configured state root for a trial. Existing legacy data remains available through the old checkout with its old state root. Valid full-digest keys from 0.1.1 remain unchanged in 0.1.2, 0.1.3 and 0.1.5.
 
 - Linux with `/proc` mounted, Node **24 or newer**. Project reads are checked using open file descriptors under `/proc/self/fd`; unavailable support refuses the read. Windows, macOS and constrained T3 runtimes are not validated targets. Do not relax those checks or sandbox permissions to make installation work.
 - Inherited compatibility baseline: **codex-cli 0.160.0 (token_budget under development)**. These are observed baseline versions, not a guarantee that every machine or newer version works. Inspect `codex --version`, `codex --help` and its plugin help first.
@@ -142,3 +142,7 @@ Multipart Working Context reads include a content digest in the printed next com
 Codex shell hooks first observe Working Context changes. If an opaque shell command changed or triggered restoration of the file, its command/result is kept in the host conversation rather than appended back into Working Context. Ordinary unchanged shell results still record. The headless turn loop injects validated committed turns, without reopening the mutable file path. Configuration repair retains intervening unmanaged settings and intentional file deletion for later disable.
 
 Install pointers refuse linked paths. Disable/uninstall remove managed files or blocks and retain unowned directories, including empty `.codex` and shared cache parents; configuration bytes and unrelated contents remain preserved.
+
+Setup operations for this runner are serialized by a private setup lock. If setup is interrupted and reports an existing lock, verify no setup process remains before removing the exact reported lock. Do not run concurrent install or uninstall commands.
+
+Staged hooks use the absolute Node executable that ran setup. Keep that executable and the checkout path available; reinstall if either moves. If `install --trust-hooks` fails after installation, the install is retained and reported: approve the hooks through `/hooks`, then check `context-engine-codex status`; do not repeat install over its existing record.

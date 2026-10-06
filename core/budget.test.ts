@@ -25,6 +25,12 @@ const tool = (tokens: number): RunnerEvent[] => [{ role: 'tool', text: 'x'.repea
 
 const tiersOf = (rs: SyncResult[]) => rs.map((r) => r.budget!.tier);
 
+test('a changed budget does not replay tiers announced against the prior budget', () => {
+  const f = fixture(); assert.equal(call(f, tool(760)).budget!.tier, 75);
+  const reopened = call(f, 'sync', 5000); assert.equal(reopened.budget!.tier, 0);
+  assert.equal(call(f, tool(510), 5000).budget!.tier, 25);
+});
+
 test('without a budget there is no budget report (the core imposes none)', () => {
   const f = fixture();
   assert.equal(call(f, tool(100), null).budget, undefined);
