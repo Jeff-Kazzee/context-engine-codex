@@ -7,6 +7,7 @@ import { ensureDirs, layout, removeTemps, removeDirectoryEntries } from './store
 import { fixture, tempDir } from './testing.ts';
 import { checkRefs, cite } from './refs.ts';
 import { setConfineHook } from './faults.ts';
+import { acquireLock, holderFor, readLock } from './lock.ts';
 
 test('wave7: foreign managed owner refuses before subtree writes', () => {
   const f = fixture(), l = layout(f.projectRoot, 'S1', f.stateDir), managed = join(f.projectRoot, '.context-engine');
@@ -89,4 +90,42 @@ test('wave7: relocation candidate exhaustion cannot claim a partially searched m
   const marker = cite(project, 'small.txt#L1');
   fs.writeFileSync(path, ['shift', 'needle', ...Array(4200).fill('x')].join('\n'));
   assert.equal(checkRefs(project, marker)?.refs[0]?.reason, 'changed');
+});
+
+test('wave7: lock turnover retries without reading an unlinked descriptor', () => {
+  const dir = tempDir('lock-turnover'), path = join(dir, 'lock');
+  fs.writeFileSync(path, JSON.stringify(holderFor(process.pid, 'synthetic', 100)), { mode: 0o600 });
+  const link = fs.readlinkSync, read = fs.readSync;
+  let unlinked = false, readUnlinked = false;
+  fs.readlinkSync = ((p: fs.PathLike, ...args: unknown[]) => {
+    const real = link(p, ...args as []);
+    if (!unlinked && real === path) { unlinked = true; fs.unlinkSync(path); return link(p, ...args as []); }
+    return real;
+  }) as typeof fs.readlinkSync;
+  fs.readSync = ((fd: number, ...args: unknown[]) => {
+    if (link(`/proc/self/fd/${fd}`).endsWith(' (deleted)')) readUnlinked = true;
+    return (read as (...values: unknown[]) => number)(fd, ...args);
+  }) as typeof fs.readSync;
+  syncBuiltinESMExports();
+  try { assert.equal(readLock(path), null); assert.equal(unlinked, true); assert.equal(readUnlinked, false); }
+  finally { fs.readlinkSync = link; fs.readSync = read; syncBuiltinESMExports(); }
+});
+
+test('wave7: persistent lock path mismatch refuses without reading or dead takeover', () => {
+  const dir = tempDir('lock-turnover'), path = join(dir, 'lock');
+  fs.writeFileSync(path, JSON.stringify(holderFor(process.pid, 'synthetic', 100)), { mode: 0o600 });
+  const link = fs.readlinkSync, read = fs.readSync;
+  let payload = false;
+  fs.readlinkSync = ((p: fs.PathLike, ...args: unknown[]) => {
+    const real = link(p, ...args as []); return real === path ? join(dir, 'other') : real;
+  }) as typeof fs.readlinkSync;
+  fs.readSync = ((...args: unknown[]) => { payload = true; return (read as (...values: unknown[]) => number)(...args); }) as typeof fs.readSync;
+  syncBuiltinESMExports();
+  try {
+    const refused = (error: unknown) => (error as NodeJS.ErrnoException).code === 'CE_STATE_PATH_CHANGED';
+    assert.throws(() => readLock(path), refused);
+    assert.throws(() => acquireLock(path, holderFor(process.pid, 'synthetic', 100)), refused);
+    assert.equal(payload, false); assert.deepEqual(fs.readdirSync(dir), ['lock']);
+  }
+  finally { fs.readlinkSync = link; fs.readSync = read; syncBuiltinESMExports(); }
 });

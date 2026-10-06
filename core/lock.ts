@@ -51,8 +51,9 @@ export function readLock(path: string): LockHolder | null | 'unreadable' {
   const deadline=Date.now()+100;
   for(;;){try{bytes=readBytes(path,16384);break;}catch(e){
     // A legitimate link publication briefly has two names. Wait without reading;
-    // persistent unsafe links throw and are never eligible for dead-lock takeover.
-    if((e as NodeJS.ErrnoException).code!=='CE_STATE_LINK_COUNT' || Date.now()>=deadline)throw e;
+    // Lock release/replacement can also invalidate an opened descriptor before verification.
+    // Never read it; persistent unsafe names throw and cannot become dead-lock takeovers.
+    if(!['CE_STATE_LINK_COUNT','CE_STATE_PATH_CHANGED'].includes((e as NodeJS.ErrnoException).code??'') || Date.now()>=deadline)throw e;
     sleepSync(1);
   }}
   if(bytes===undefined)return null;

@@ -16,7 +16,7 @@
     "core/isolation.test.ts": "dc100ec58cb6d008c3cd60921e03bbc1ba9f98f756ad84b0e11cbd84acc2447a",
     "core/late-review-regressions.test.ts": "f743f30e053cae79f697412f3171f83ae45524c116623823467275dbb027be8f",
     "core/lock.test.ts": "eed1b01f1d21c33b629adffd7fa1ba8a887fc670ee9389a69e6ed49150ed2d02",
-    "core/lock.ts": "bbcbaefb28d80132c3cd07a09792f57951a27bdceb91834c399b2c75e98ff827",
+    "core/lock.ts": "e7f08079edd256d5c603e75b06fa804c5676d2277af8d6fc6bcdd294c3870397",
     "core/native-compaction.test.ts": "e1bb45b88ae2089b49da6b0106e3abfd400e8dfd23af11e7e5362009c5457039",
     "core/participation.test.ts": "4b77377ac94cfb840630d670e9186c835be933ef5d12962f1e4b6fdc157244c7",
     "core/participation.ts": "d6a6e431817ff528d3f1904dd3646a660b1d664095c14ff2f960a5c7f43cd7b7",
@@ -32,11 +32,11 @@
     "core/session.ts": "29d1d88f30175b5666ce69760e2c321e17f27358ed20f5995abe3ce262a09351",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "9100bdebe577c8ab945529c51f5fa24e63cfcdbbcaa09ff2f7ea1f40bdebd4dd",
+    "core/store.ts": "ab4a64136955a7cabc5700ba1b9012786c54470339c71a0ff23aca3ec4ee34af",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
     "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c",
-    "core/wave7-regressions.test.ts": "2e34745824a068f27cb6af373397e80a5674e0c238d8b5ea3e4664ed9e42768f"
+    "core/wave7-regressions.test.ts": "871cd6a907cc3cec553f545afebeb70666a0febe1909437cb9956b6d376256f3"
   },
   "importedPaths": [
     ".gitignore",
@@ -105,7 +105,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "5bbeba8ee93191572a7280624f4c6260214f3fb1",
+  "corePatchCommit": "30f6cf32a7b0a650bcc33e9da7e9afe4ee60a2bb",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -117,6 +117,7 @@
     "Coordinated review fixes: descriptor-verified Event Log append/truncation; confined Working Context directory creation; bounded 16 MiB citation reads; corrupt nearest participation records fail closed; revision directory fsync precedes HEAD publication. Setup confines ledger and backup paths to caller-derived policies, compares opaque rollback bytes exactly, and restores absent managed-only JSON files. Runtime corrections reset Claude tool-read state, repair Codex owned settings, refuse escaped TOML table keys, size the IPC response envelope and release refused injection threads. Offline evidence does not establish real power-loss or host installation behavior.",
     "Additional hosted-review corrections: verified private-state descriptors and revision checksums; streaming Event Log scans and bounded recall snippets, with only uncommitted replay candidates retained. Largest individual JSON entries can still consume memory. Snapshot creation and backup copies are confined and exclusive. Claude retains every failed close for retry, omits request/response payloads from per-step cost logs, and returns over-budget native summaries without replacement framing. Codex conservatively refuses escaped dotted TOML keys while preserving literal string/comment data and legacy AGENTS.md restoration. Synthetic offline evidence only; no credentials, captures or runner/model acceptance inferred.",
     "Late hosted-review corrections: bounded descriptor lock reads with declared-field projection and transient publication protection; bounded frame-key repair and anchored private-state publication; structured runner-event replay and complete HEAD validation. Setup refuses recognized credential-bearing configuration before before/after and repair backup copies; conservative parsing has documented limits. Synthetic offline evidence only.",
-    "Wave7 repairs: supplied setup environment controls CE/XDG/HOME state and participation; managed ownership verified before writes; temporary and orphan revision cleanup anchored; stale citation ranges validated and relocation work bounded. Codex actual descendant subtree declarations refuse without config mutation or activation. Synthetic offline evidence only, no auth/model calls or installation pointer repair."
+    "Wave7 repairs: supplied setup environment controls CE/XDG/HOME state and participation; managed ownership verified before writes; temporary and orphan revision cleanup anchored; stale citation ranges validated and relocation work bounded. Codex actual descendant subtree declarations refuse without config mutation or activation. Synthetic offline evidence only, no auth/model calls or installation pointer repair.",
+    "Validation exposed a pre-existing lock-descriptor turnover race: path mismatches still refuse before payload reads, and only lock reads retry within the existing 100ms deadline. Persistent unsafe names still throw and are never eligible for dead-holder takeover. Deterministic unlink and persistent refusal/acquire controls are synthetic."
   ]
 }
