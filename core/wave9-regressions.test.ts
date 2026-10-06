@@ -22,7 +22,7 @@ test('wave9: participation fsyncs file before rename, then directory and state r
   syncBuiltinESMExports();
   try { setParticipation({ ...f, state: 'off' }); }
   finally { fs.fsyncSync = sync; fs.renameSync = rename; syncBuiltinESMExports(); }
-  assert.deepEqual(calls, ['file-sync', 'rename', 'directory-sync', 'root-sync']);
+  assert.deepEqual(calls, ['root-sync', 'file-sync', 'rename', 'directory-sync', 'root-sync']);
   assert.equal(participation({ ...f, env: {} }).state, 'off');
 });
 

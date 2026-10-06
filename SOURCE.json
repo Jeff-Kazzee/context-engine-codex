@@ -41,7 +41,7 @@
     "core/wave11-regressions.test.ts": "194a523df9bd5bed8b80d2ebaa6c48023b25bfc3cfa41560aba4382f11d76159",
     "core/wave7-regressions.test.ts": "871cd6a907cc3cec553f545afebeb70666a0febe1909437cb9956b6d376256f3",
     "core/wave8-regressions.test.ts": "67f5a78fc0a2e4c2f995d9e735262b5c421d93067c7e1598785055545b7ccdac",
-    "core/wave9-regressions.test.ts": "0b67ef7c47ee2b736d643eddc424d6b4ee615718e3d9548fb878714fc1e8f21a"
+    "core/wave9-regressions.test.ts": "6eb960efdd0943d305c4c8426715a2ca22b50f05143c1684339a449a5382ee51"
   },
   "importedPaths": [
     ".gitignore",
@@ -110,7 +110,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "efe2b77346646b81a142e57b84e034bef81aa01d",
+  "corePatchCommit": "33ad316291f34f20e7cf0148dd7397c474892854",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",

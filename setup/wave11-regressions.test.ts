@@ -9,17 +9,20 @@ import { installLocked } from './install.ts';
 import { takeSnapshot, completeLedger, readLedger } from './ledger.ts';
 import { jsonRule, tomlTablesRule } from './rules.ts';
 
-for(const replacement of [false,true])test('wave11: failed install pointer flush '+(replacement?'preserves unrelated replacement':'removes its published pointer'),()=>{
+for(const replacement of ['none','early','late'])test('wave11: failed install pointer flush '+replacement,()=>{
   const root=tempDir('install-flush'),ctx=setupContext({HOME:root,CONTEXT_ENGINE_STATE_DIR:join(root,'state')}),config=join(root,'settings.json');
   fs.writeFileSync(config,'{"theme":"original"}\n');
   const spec:RunnerSpec={id:'claude',title:'Synthetic',home:root,bin:'unused',files:[config],watch:[],namespaced:[],rules:{[config]:jsonRule([['owned']])},install:[],uninstall:[],prepare:()=>fs.writeFileSync(config,'{"theme":"original","owned":true}\n')};
-  const pointer=join(ctx.setupDir,'claude.json'),native=fs.fsyncSync;let failed=false;
-  fs.fsyncSync=((fd:number)=>{if(!failed&&fs.fstatSync(fd).isDirectory()&&fs.realpathSync(`/proc/self/fd/${fd}`)===ctx.setupDir&&fs.existsSync(pointer)){failed=true;if(replacement)fs.writeFileSync(pointer,'{"dir":"/synthetic/unrelated-snapshot"}\n');throw new Error('synthetic pointer flush failure');}native(fd);}) as typeof fs.fsyncSync;
+  const pointer=join(ctx.setupDir,'claude.json'),native=fs.fsyncSync,unlink=fs.unlinkSync,rename=fs.renameSync;let failed=false,replaced=false;
+  const replace=()=>{fs.writeFileSync(pointer,'{"dir":"/synthetic/unrelated-snapshot"}\n');replaced=true;};
+  fs.fsyncSync=((fd:number)=>{if(!failed&&fs.fstatSync(fd).isDirectory()&&fs.realpathSync(`/proc/self/fd/${fd}`)===ctx.setupDir&&fs.existsSync(pointer)){failed=true;if(replacement==='early')replace();throw new Error('synthetic pointer flush failure');}native(fd);}) as typeof fs.fsyncSync;
+  fs.unlinkSync=((path:any)=>{if(replacement==='late'&&failed&&!replaced&&String(path).endsWith('/claude.json'))replace();return unlink(path);}) as typeof fs.unlinkSync;
+  fs.renameSync=((from:any,to:any)=>{if(replacement==='late'&&failed&&!replaced&&String(from).endsWith('/claude.json'))replace();return rename(from,to);}) as typeof fs.renameSync;
   syncBuiltinESMExports();
   try {assert.throws(()=>installLocked(ctx,spec),/synthetic pointer flush failure/);}
-  finally {fs.fsyncSync=native;syncBuiltinESMExports();}
-  assert.equal(failed,true);assert.equal(fs.existsSync(pointer),replacement);assert.deepEqual(JSON.parse(fs.readFileSync(config,'utf8')),{theme:'original'});
-  if(replacement)assert.equal(JSON.parse(fs.readFileSync(pointer,'utf8')).dir,'/synthetic/unrelated-snapshot');
+  finally {fs.fsyncSync=native;fs.unlinkSync=unlink;fs.renameSync=rename;syncBuiltinESMExports();}
+  assert.equal(failed,true);assert.equal(fs.existsSync(pointer),replacement!=='none');assert.deepEqual(JSON.parse(fs.readFileSync(config,'utf8')),{theme:'original'});
+  if(replacement!=='none'){assert.equal(replaced,true);assert.equal(JSON.parse(fs.readFileSync(pointer,'utf8')).dir,'/synthetic/unrelated-snapshot');}
 });
 
 test('wave11: ledger refuses backup bytes from a sibling snapshot',()=>{
