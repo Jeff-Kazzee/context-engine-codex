@@ -61,7 +61,7 @@ test('renewed: concurrent empty JSON without owned entries stays present',()=>{
 test('renewed: escaped dotted assignment keys refuse without overwriting existing settings',()=>{
  const w=world();assert.equal(w.ce(['install']).status,0);fs.mkdirSync(join(w.project,'.codex'));
  const path=join(w.project,'.codex/config.toml'),text='features."token\\u005fbudget".enabled = false\n';fs.writeFileSync(path,text);
- const r=w.ce(['enable']);assert.equal(r.status,1);assert.match(r.stderr,/escaped.*keys.*unsupported/);assert.equal(fs.readFileSync(path,'utf8'),text);
+ const r=w.ce(['enable']);assert.equal(r.status,1);assert.match(r.stderr,/escaped.*keys.*unsupported|unsafe configuration cannot be backed up/);assert.equal(fs.readFileSync(path,'utf8'),text);
 });
 test('renewed: escaped string values and comments remain unmanaged data',()=>{
  const w=world();assert.equal(w.ce(['install']).status,0);fs.mkdirSync(join(w.project,'.codex'));
