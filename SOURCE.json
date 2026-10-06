@@ -11,7 +11,7 @@
     "core/confinement.test.ts": "e199d261a76cfba48b10bdf285f3f2667edb0bd40b35ec6d8378e6fcebc345a9",
     "core/delivery.ts": "49801096f2c1bd4dcc8cb64fae2215e84ab74c4c5aed51931a27859c92cf8dce",
     "core/faults.ts": "1b8e5615c3e93db552ce05410b1ba246dfed6a5fbff7120dc48cb514b8f4d004",
-    "core/hosted-regressions.test.ts": "b237aaae6b7177bb4d5fc75b14c148309ba9fefb0ae2a858d8ad1492d59e2620",
+    "core/hosted-regressions.test.ts": "45037c172ec58972d1dfa6fa1fa1e68c75115a2683ba6654ff1168881cc3f00d",
     "core/index.ts": "7368d2b5b04ba6696c525a168ed666b0ad7788a8749a0ef93f089f489cef8003",
     "core/isolation.test.ts": "dc100ec58cb6d008c3cd60921e03bbc1ba9f98f756ad84b0e11cbd84acc2447a",
     "core/lock.test.ts": "eed1b01f1d21c33b629adffd7fa1ba8a887fc670ee9389a69e6ed49150ed2d02",
@@ -30,10 +30,10 @@
     "core/session.ts": "4807b904ae6927ed65b2f275572a279b723bfa2971eb920d6b4a60f2a111cf53",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "df75d36bb261ebd1431c4f4f17f24cf660be4eae61a7b8c7326fb48ce85e0e1a",
+    "core/store.ts": "9b1e72af9948a2d78df6039ac0c605a17fcbb6d8b3b477a9a55686df0151ab02",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
-    "core/turns.ts": "efae110aaf709809f53746dccd1cf07dec859cc83259cfedc14a76b8f288ef96"
+    "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c"
   },
   "importedPaths": [
     ".gitignore",
@@ -102,12 +102,13 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "05c3603a86607075a5a06087ea036a7128cb7949",
+  "corePatchCommit": "3e4bf0bcd50764f3855ff2af7b39b8f270e74664",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
     "Shared core 0.1.3: known project credential paths refused before reads; absolute custom state roots; exclusive unique participation temporaries; digest-bound multipart reads. Claude ambiguous Bash edits stand aside before recording.",
     "Shared core 0.1.4: complete short writes before atomic publication and expose confined Working Context reads; coordinated pointer/rollback corrections, Claude uncertain-record stand-aside, Codex validated-revision delivery and repair preservation.",
-    "Shared core 0.1.5: recall structured evidence, strict UTF-8 paging and best-effort accounting; budget-specific reminder recovery; accurate manual compaction; complete lock/log writes under an append lease; close releases on logging failure; bounded model-edit reads and immutable revision delivery. Both setup CLIs serialize full mutations, canonicalize projects, and refuse linked namespaces; Codex pins hook Node, reports retained install after trust failure, and refuses unowned marker collisions."
+    "Shared core 0.1.5: recall structured evidence, strict UTF-8 paging and best-effort accounting; budget-specific reminder recovery; accurate manual compaction; complete lock/log writes under an append lease; close releases on logging failure; bounded model-edit reads and immutable revision delivery. Both setup CLIs serialize full mutations, canonicalize projects, and refuse linked namespaces; Codex pins hook Node, reports retained install after trust failure, and refuses unowned marker collisions.",
+    "Coordinated 0.1.5 review corrections: existing nonprivate, linked or differently owned state directories are refused without chmod; non-assistant role rendering cannot sanitize into assistant authorship. Setup preserves preexisting managed JSON leaves and reassesses current config after runner removal; Codex checks actual cwd guidance, refuses ambiguous TOML keys, and rejects RPCs on input-pipe failure. Committed dependency lockfiles unchanged; pinned TypeScript 7.0.2 and Node declarations 24.19.1 checked locally."
   ]
 }
