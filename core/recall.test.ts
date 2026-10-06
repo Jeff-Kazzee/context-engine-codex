@@ -4,7 +4,7 @@ import { inspectSession, openSession, readWorkingContext, recall, RECALL_GUIDANC
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fixture, tempDir } from './testing.ts';
 
 type Fixture = ReturnType<typeof fixture>;
@@ -208,7 +208,7 @@ for (const code of ['EACCES', 'ENOSPC', 'EDQUOT']) test(`when accounting fails w
   const before = readFileSync(log, 'utf8');
   const nativeOpen = fs.openSync;
   fs.openSync = ((path: any, flags: any, ...args: any[]) => {
-    if (path === log && (flags === 'a' || typeof flags === 'number' && !!(flags & fs.constants.O_APPEND))) throw Object.assign(new Error('synthetic append denied'), { code });
+    if (fs.realpathSync(dirname(String(path))) === dirname(log) && String(path).endsWith('/events.jsonl') && (flags === 'a' || typeof flags === 'number' && !!(flags & fs.constants.O_APPEND))) throw Object.assign(new Error('synthetic append denied'), { code });
     return (nativeOpen as any)(path, flags, ...args);
   }) as typeof fs.openSync;
   syncBuiltinESMExports();
