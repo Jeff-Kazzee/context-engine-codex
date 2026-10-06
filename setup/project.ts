@@ -21,7 +21,7 @@ import { experimentOn, findRecord, killSwitchOn, participation, setParticipation
 import { projectKey } from '../core/store.ts';
 import { projectCodexToml } from '../adapters/codex/guidance.ts';
 import { describe, installedLedger, SetupError } from './install.ts';
-import { assess, completeLedger, readLedger, revert, rollbackSnapshot, takeSnapshot, type Rule } from './ledger.ts';
+import { assess, completeLedger, readLedger, revert, rollbackSnapshot, takeSnapshot, type Ledger, type Rule } from './ledger.ts';
 import { safeRead, safeWrite } from './files.ts';
 import { appendBlock, blockRule, prependBlock, type Markers } from './rules.ts';
 import type { SetupContext } from './runners.ts';
@@ -113,14 +113,23 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
   });
   const experiments = experimentOn('stale-refs') ? ['stale-refs'] : [];
   const toml = projectCodexToml({ experiments });
-  let ledger;
+  let ledger: Ledger;
   try {
     safeWrite(config, appendBlock(prependBlock(unmanaged, toml.top, TOML_TOP_MARKERS), toml.table, TOML_MARKERS));
     ledger = completeLedger(snap);
-    // Repair updates the post-edit snapshot while keeping the original rollback bytes.
+    // A repair must retain changes made since the initial enable. Keep the old
+    // rollback bytes only when the currently unmanaged text still matches them.
     if (old) {
-      ledger.files = ledger.files.map(f => ({ ...f, before: old.files.find(o => o.path === f.path)?.before ?? null }));
-      writeFileSync(join(ledger.dir, 'ledger.json'), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+      ledger.files = ledger.files.map((f, i) => {
+        if (unmanaged === null) return { ...f, before: null };
+        const previous = old.files.find(o => o.path === f.path)?.before ?? null;
+        const previousText = previous ? readFileSync(previous, 'utf8') : '';
+        if (unmanaged === previousText) return { ...f, before: previous };
+        const repairBefore = join(ledger.dir, 'before', `repair-unmanaged-${i}`);
+        safeWrite(repairBefore, unmanaged ?? '');
+        return { ...f, before: repairBefore };
+      });
+      safeWrite(join(ledger.dir, 'ledger.json'), `${JSON.stringify(ledger, null, 2)}\n`);
     }
     mkdirSync(projectsDir(ctx), { recursive: true, mode: 0o700 });
     safeWrite(pointer(ctx, root), `${JSON.stringify({ dir: ledger.dir, projectRoot: root })}\n`);

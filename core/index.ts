@@ -5,7 +5,7 @@ export { approxTokens, inspectSession, openSession, withSessionSerialized } from
 export type { OpenOptions, OpenResult, Receipt, RestoreReason, RunnerEvent, Session, SessionStatus, SyncResult } from './session.ts';
 export { SerializeTimeout } from './lock.ts';
 export type { LockHolder } from './lock.ts';
-export { WORKING_CONTEXT_DIR, workingContextPath, workingContextRelPath } from './store.ts';
+export { WORKING_CONTEXT_DIR, readWorkingContextFile, workingContextPath, workingContextRelPath } from './store.ts';
 export { CODEX_TOOL_OUTPUT_CAP_BYTES, READ_MAX_BYTES, readWorkingContext, recall, RECALL_GUIDANCE, RECALL_MAX_BYTES, sessionProjectFrom, show, SHOW_MAX_BYTES } from './recall.ts';
 export type { ReadResult, RecallHit, RecallResult, SessionRef, ShowResult } from './recall.ts';
 export { cite, experimentOn, MAX_STALE_LISTED, STALE_REFS_GUIDANCE } from './refs.ts';

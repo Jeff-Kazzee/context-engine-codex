@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { tempDir } from '../core/testing.ts';
 import { safeRead, safeWrite } from './files.ts';
 import { install, installedLedger, uninstall } from './install.ts';
@@ -15,14 +15,14 @@ test('pointer publication failure rolls back and can be retried', () => {
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
   const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {}, install: [], prepare() { writeFileSync(config, 'CHANGED'); } };
-  const nativeWrite = fs.writeFileSync;
-  fs.writeFileSync = ((path: any, ...args: any[]) => {
-    if (path === join(ctx.setupDir, 'fake.json')) throw Object.assign(new Error('synthetic pointer denied'), { code: 'EACCES' });
-    return (nativeWrite as any)(path, ...args);
-  }) as typeof fs.writeFileSync;
+  const nativeRename = fs.renameSync;
+  fs.renameSync = ((from: any, to: any) => {
+    if (basename(String(to)) === 'fake.json' && fs.realpathSync(dirname(String(to))) === ctx.setupDir) throw Object.assign(new Error('synthetic pointer denied'), { code: 'EACCES' });
+    return nativeRename(from, to);
+  }) as typeof fs.renameSync;
   syncBuiltinESMExports();
   try { assert.throws(() => install(ctx, spec), /synthetic pointer denied/); }
-  finally { fs.writeFileSync = nativeWrite; syncBuiltinESMExports(); }
+  finally { fs.renameSync = nativeRename; syncBuiltinESMExports(); }
   assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
   assert.equal(installedLedger(ctx, 'fake'), null);
   spec.prepare = undefined;

@@ -66,3 +66,20 @@ test('stale trust hashes cannot report Codex delivery active', () => {
   const r = w.ce(['status', '--project', w.project, '--json']); assert.equal(r.status, 0, r.stderr);
   const status = JSON.parse(r.stdout); assert.equal(status.codex.active, false); assert.equal(status.codex.hookTrustEntries, 0);
 });
+
+for (const originallyPresent of [false, true]) test(`config repair preserves intervening unmanaged settings (original file ${originallyPresent})`, () => {
+  const w = world(); const config = join(w.project, '.codex', 'config.toml');
+  if (originallyPresent) { mkdirSync(join(w.project, '.codex'), { recursive: true }); writeFileSync(config, '# original\n'); }
+  assert.equal(w.ce(['install']).status, 0); assert.equal(w.ce(['enable']).status, 0);
+  writeFileSync(config, '# current user settings\nmodel = "SYNTHETIC_USER_MODEL"\n');
+  assert.equal(w.ce(['enable']).status, 0); assert.equal(w.ce(['disable']).status, 0);
+  assert.equal(readFileSync(config, 'utf8'), '# current user settings\nmodel = "SYNTHETIC_USER_MODEL"\n');
+});
+
+for (const originallyPresent of [false, true]) test(`repair preserves intentional config deletion (original file ${originallyPresent})`, () => {
+  const w = world(), config = join(w.project, '.codex', 'config.toml');
+  if (originallyPresent) { mkdirSync(join(w.project, '.codex'), { recursive: true }); writeFileSync(config, '# initial\n'); }
+  assert.equal(w.ce(['install']).status, 0); assert.equal(w.ce(['enable']).status, 0);
+  unlinkSync(config); assert.equal(w.ce(['enable']).status, 0); assert.equal(w.ce(['disable']).status, 0);
+  assert.equal(existsSync(config), false);
+});

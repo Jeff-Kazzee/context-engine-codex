@@ -77,12 +77,17 @@ async function main(input: HookInput): Promise<void> {
     // call for many turns). Codex hands additionalContext to the model as a developer message, so
     // only the core's static budget text goes there: numbers and fixed wording, never the prompt or
     // any Working Context text.
-    if (result.budget) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: result.budget.text } });
+    const notices = [...(result.receipt?.kind === 'restored' ? [result.receipt.text] : []), ...(result.budget ? [result.budget.text] : [])];
+    if (notices.length) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
     // echoing it back would duplicate the file into itself, or re-add what the agent offloaded.
-    const ownFile = touchesWorkingContext(input);
-    const result = ownFile ? core(input, 'sync') : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }]);
+    let ownFile = touchesWorkingContext(input);
+    const shell = typeof (input.tool_input as Record<string, unknown> | undefined)?.command === 'string';
+    const observed = ownFile || shell ? core(input, 'sync') : undefined;
+    // Actual file effects, not arbitrary command syntax, decide whether shell text could resurrect edits.
+    if (shell && (observed?.receipt?.kind === 'committed' || observed?.receipt?.kind === 'restored')) ownFile = true;
+    const result = ownFile ? observed! : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }]);
     // A restore (always) and stale citations (stale-refs experiment, Working Context calls only) go
     // out as `block`, which replaces the tool result the model sees, the original output kept below
     // the notice: the agent must see them before it touches the file again. A budget reminder (a tier
@@ -145,7 +150,8 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
     // user's turn. Without the core it is stopped only when the file is plainly missing or empty.
     let text = '';
     try {
-      text = readFileSync(join(input.cwd, path), 'utf8');
+      const bytes = lib.readWorkingContextFile(join(input.cwd, path));
+      if (Buffer.isBuffer(bytes)) text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     } catch {}
     return text.trim() ? null : `${notReset} Your Working Context ${path} is missing or empty. Write the current task, decisions and next step into it.`;
   }
@@ -234,7 +240,8 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[]):
   const hardLimit = process.env.CONTEXT_ENGINE_HARD_LIMIT || String(DEFAULT_HARD_LIMIT);
   const args = [command, '--session', input.session_id, '--project', input.cwd, '--runner', RUNNER, '--hard-limit', hardLimit, '--owner-pid', String(runnerPid()), '--if-enabled', '--budget', String(budgetTokens)];
   const [file, argv] = /\.[cm]?[jt]s$/.test(cli) ? [process.execPath, [cli, ...args]] : [cli, args];
-  const r = spawnSync(file, argv, { input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout: 20_000 });
+  const maxBuffer = Math.max(16 * 1024 * 1024, Math.ceil((Number(hardLimit) || DEFAULT_HARD_LIMIT) * 6) + 1024 * 1024);
+  const r = spawnSync(file, argv, { maxBuffer, input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout: 20_000 });
   let out: CoreResult | undefined;
   try {
     out = JSON.parse(r.stdout) as CoreResult;

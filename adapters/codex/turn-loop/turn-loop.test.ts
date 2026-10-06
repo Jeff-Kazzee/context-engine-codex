@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fixture, tempDir } from '../../../core/testing.ts';
 import { MODE, OWN_OVERRIDES, startTurnLoop as start, type CodexTurnLoop, type TurnLoopOptions } from './turn-loop.ts';
@@ -265,4 +265,33 @@ test('the kill switch CONTEXT_ENGINE=off stops the turn loop before it opens a s
   await assert.rejects(start({ ...t.opts, env: { ...t.opts.env, CONTEXT_ENGINE: 'off' } }), /turned off.*CONTEXT_ENGINE=off/);
   assert.equal(existsSync(t.f.stateDir), false, 'no session state');
   assert.deepEqual(t.log(), [], 'no app-server spawned');
+});
+
+test('actual turn loop uses the validated revision when its workspace path is replaced after sync', async () => {
+  const { stripTypeScriptTypes } = await import('node:module');
+  const coreModule = await import('../../../core/index.ts');
+  const fsModule = await import('node:fs');
+  const itemsModule = await import('./items.ts');
+  const rpcModule = await import('./jsonrpc.ts');
+  const source = readFileSync(new URL('./turn-loop.ts', import.meta.url), 'utf8');
+  const erased = stripTypeScriptTypes(source).replace(/^import[\s\S]*?from ['"][^'"]+['"];\s*/gm, '').replace(/^export (?=(?:const|async function|function|class))/gm, '');
+  let replace = false;
+  const t = setup({ turns: [{ reply: 'first reply' }, { reply: 'second reply' }] });
+  const privatePath = join(t.f.projectRoot, 'synthetic-private-target'); writeFileSync(privatePath, 'MUST_NOT_INJECT_SYNTHETIC');
+  const openSession = (opts: any) => {
+    const opened = coreModule.openSession(opts);
+    if (opened.status !== 'open') return opened;
+    const session = new Proxy(opened.session, { get(target, key) {
+      if (key === 'sync') return () => { const result = target.sync(); if (replace) { replace = false; rmSync(t.wcPath); symlinkSync(privatePath, t.wcPath); } return result; };
+      const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    return { ...opened, session };
+  };
+  const load = new Function('coreModule', 'fsModule', 'itemsModule', 'rpcModule', 'openSession', `const {${Object.keys(coreModule).filter(k => k !== 'openSession').join(',')}} = coreModule; const {closeSync,openSync} = fsModule; const {workingContextItems} = itemsModule; const {spawnJsonRpc} = rpcModule; ${erased}; return startTurnLoop;`);
+  const actualStart = load(coreModule, fsModule, itemsModule, rpcModule, openSession);
+  const loop = await actualStart(t.opts); open.push(loop);
+  await loop.runTurn('VALIDATED_SENTINEL'); replace = true;
+  const result = await loop.runTurn('next request'); assert.equal(result.status, 'completed');
+  const injected = t.sent('thread/inject_items');
+  assert.match(JSON.stringify(injected), /VALIDATED_SENTINEL/); assert.doesNotMatch(JSON.stringify(injected), /MUST_NOT_INJECT_SYNTHETIC/);
 });

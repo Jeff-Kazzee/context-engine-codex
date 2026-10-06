@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assess, completeLedger, type FileReport, type Ledger, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
+import { safeRead, safeWrite } from './files.ts';
 import { runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
 
 const pointerPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}.json`);
@@ -10,8 +11,9 @@ const pointerPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}
 /** The install ledger of a runner, or null when Context Engine isn't installed there. */
 export function installedLedger(ctx: SetupContext, id: string): Ledger | null {
   const p = pointerPath(ctx, id);
-  if (!existsSync(p)) return null;
-  return readLedger(JSON.parse(readFileSync(p, 'utf8')).dir);
+  const bytes = safeRead(p);
+  if (bytes === null) return null;
+  return readLedger(JSON.parse(bytes.toString('utf8')).dir);
 }
 
 export class SetupError extends Error {}
@@ -20,6 +22,7 @@ export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
   const prior = installedLedger(ctx, spec.id);
   if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine uninstall --${spec.id}\` first`);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
+  let published = false;
   try {
     spec.prepare?.();
     for (const cmd of spec.install) {
@@ -31,7 +34,8 @@ export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
     }
     const ledger = completeLedger(snap);
     mkdirSync(ctx.setupDir, { recursive: true, mode: 0o700 });
-    writeFileSync(pointerPath(ctx, spec.id), `${JSON.stringify({ dir: ledger.dir })}\n`, { mode: 0o600 });
+    safeWrite(pointerPath(ctx, spec.id), `${JSON.stringify({ dir: ledger.dir })}\n`);
+    published = true;
     const changed = ledger.files.filter((f) => !sameBytes(f.before, f.after)).map((f) => f.path);
     return [
       `Changed by \`${spec.bin} plugin\`: ${changed.join(', ') || '(no config file)'}`,
@@ -42,7 +46,7 @@ export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
     let retained: string[];
     try { retained = rollbackSnapshot(snap, spec.rules); }
     catch (rollbackError) { throw new AggregateError([e, rollbackError], `${spec.title}: install failed and rollback was incomplete; before backups are preserved at ${join(snap.dir, 'before')}`); }
-    try { unlinkSync(pointerPath(ctx, spec.id)); } catch (cleanupError) { if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanupError; }
+    if (published) try { unlinkSync(pointerPath(ctx, spec.id)); } catch (cleanupError) { if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanupError; }
     throw new SetupError(`${e instanceof Error ? e.message : String(e)}; tracked configuration restored; ${retained.length} unowned new paths retained; before backups: ${join(snap.dir, 'before')}`, { cause: e });
   }
 }

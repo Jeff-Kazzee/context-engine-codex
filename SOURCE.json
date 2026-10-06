@@ -1,7 +1,7 @@
 {
   "source": "https://github.com/Jeff-Kazzee/context-engine",
   "commit": "ac87e4447803cd439c422e5c6c4b8c2da8f75376",
-  "coreVersion": "0.1.3",
+  "coreVersion": "0.1.4",
   "runtime": "codex",
   "coreSha256": {
     "core/budget.test.ts": "776fa09b6a5af7f5246e771f5fa354568accf0e21996aaf07fa1595d23959b12",
@@ -11,8 +11,8 @@
     "core/confinement.test.ts": "e199d261a76cfba48b10bdf285f3f2667edb0bd40b35ec6d8378e6fcebc345a9",
     "core/delivery.ts": "539566ee9951de001707f0ba04638bb527f6ac80b0f4b4951dd090d2ef2c3166",
     "core/faults.ts": "1b8e5615c3e93db552ce05410b1ba246dfed6a5fbff7120dc48cb514b8f4d004",
-    "core/hosted-regressions.test.ts": "f226ebaf9f00ce24503e19fcf75f097525e94d3197eb22d7a58582b035ea4d47",
-    "core/index.ts": "88e91812526fb9aa74ecbfe4b3a1914ba080997be05dfa43c90dc561d86c25c1",
+    "core/hosted-regressions.test.ts": "c5e361b151a5524c5d53108d938bd763d4856b662e848aff57f1909514a80261",
+    "core/index.ts": "43a3e4ce25ce0786cc66d917472313e82e65893a16fc9856c1eb4aa481f34a6b",
     "core/isolation.test.ts": "3f0a28cbca63006099107215a702671e875bef0634b04f40aed6040419845d3c",
     "core/lock.test.ts": "eed1b01f1d21c33b629adffd7fa1ba8a887fc670ee9389a69e6ed49150ed2d02",
     "core/lock.ts": "4d1481311a1ab00515a419ed0475584d3406fecbf3e15bd8ee2b9fa44543d583",
@@ -30,7 +30,7 @@
     "core/session.ts": "6bdc96ef2a83df787e6c51413722650112ed1e8adb06a7e863e45900cfe4889a",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "7e47e875c94a727f0afcfc0004c0a58ebabe4b9913f2644c1a9ed7984a212c05",
+    "core/store.ts": "5c2d702c92e7281ac016ff0b1ab6612773b586d613dfc5f9ac3ced4d09210e62",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
     "core/turns.ts": "efae110aaf709809f53746dccd1cf07dec859cc83259cfedc14a76b8f288ef96"
@@ -102,10 +102,11 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "d61994892188ae15da14732edad36a8e07f4b41c",
+  "corePatchCommit": "7df4e4814bd14224d3ea1d357ae833353f45909a",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
-    "Shared core 0.1.3: known project credential paths refused before reads; absolute custom state roots; exclusive unique participation temporaries; digest-bound multipart reads. Claude ambiguous Bash edits stand aside before recording."
+    "Shared core 0.1.3: known project credential paths refused before reads; absolute custom state roots; exclusive unique participation temporaries; digest-bound multipart reads. Claude ambiguous Bash edits stand aside before recording.",
+    "Shared core 0.1.4: complete short writes before atomic publication and expose confined Working Context reads; coordinated pointer/rollback corrections, Claude uncertain-record stand-aside, Codex validated-revision delivery and repair preservation."
   ]
 }

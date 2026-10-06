@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { cite, openSession, readWorkingContext, setParticipation, participation } from './index.ts';
-import { resolveStateRoot } from './store.ts';
+import { atomicWrite, resolveStateRoot } from './store.ts';
 import { fixture, tempDir } from './testing.ts';
 
 test('relative explicit and environment state roots refuse before any state write', () => {
@@ -58,4 +58,25 @@ test('same-process interleaved participation writes use unique exclusive tempora
     setParticipation({ ...f, state: 'on' });
     assert.equal(new Set(paths).size, 2); assert.equal(participation({ ...f, env: {} }).state, 'on');
   } finally { fs.writeFileSync = native; syncBuiltinESMExports(); }
+});
+
+test('atomic publication completes repeated short writes without truncation', () => {
+  const path = join(tempDir('short-write'), 'snapshot');
+  const native = fs.writeSync; const expected = '€漢字'.repeat(40); let calls = 0;
+  try {
+    fs.writeSync = ((fd: number, bytes: Uint8Array, offset: number, length: number) => {
+      calls++; return native(fd, bytes, offset, Math.min(7, length));
+    }) as typeof fs.writeSync; syncBuiltinESMExports();
+    atomicWrite(path, expected, 'snapshot-tmp');
+    assert.equal(fs.readFileSync(path, 'utf8'), expected); assert.ok(calls > 1);
+  } finally { fs.writeSync = native; syncBuiltinESMExports(); }
+});
+test('zero-progress writes refuse publication and keep the prior snapshot', () => {
+  const path = join(tempDir('zero-write'), 'snapshot'); fs.writeFileSync(path, 'prior');
+  const native = fs.writeSync;
+  try {
+    fs.writeSync = (() => 0) as typeof fs.writeSync; syncBuiltinESMExports();
+    assert.throws(() => atomicWrite(path, 'replacement', 'snapshot-tmp'), /no progress/);
+    assert.equal(fs.readFileSync(path, 'utf8'), 'prior');
+  } finally { fs.writeSync = native; syncBuiltinESMExports(); }
 });

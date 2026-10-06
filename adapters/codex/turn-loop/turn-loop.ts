@@ -31,8 +31,8 @@
 // developerInstructions: each fresh thread gets `guidance(path)`, static text written here (the
 // mode, the file's path, how it is delivered). It never carries model-authored text; the Working
 // Context itself only ever travels as the one injected user message.
-import { closeSync, openSync, readFileSync } from 'node:fs';
-import { KILL_SWITCH_ENV, killSwitchOn, openSession, type Receipt, type RunnerEvent, type Session } from '../../../core/index.ts';
+import { closeSync, openSync } from 'node:fs';
+import { KILL_SWITCH_ENV, killSwitchOn, openSession, renderTurns, type Receipt, type RunnerEvent, type Session } from '../../../core/index.ts';
 import { workingContextItems, type WorkingContextRejectReason } from './items.ts';
 import { spawnJsonRpc, type JsonRpcConnection, type Notification } from './jsonrpc.ts';
 
@@ -231,7 +231,8 @@ class TurnLoop {
         return notDelivered('delivery-failed', `the app-server did not start a fresh thread (${errorText(e)})`);
       }
     } else {
-      const text = readFileSync(this.session.workingContextPath, 'utf8');
+      // Inject the validated committed turns, never reopen the mutable workspace path.
+      const text = renderTurns(synced.turns);
       const built = workingContextItems(text, { path: this.session.workingContextPath, hardLimit: this.hardLimit });
       // Fail closed: never run a turn whose Working Context can't be delivered.
       if (!built.ok) return notDelivered(built.reason, built.detail);

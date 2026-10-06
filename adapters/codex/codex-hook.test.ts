@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fixture, tempDir } from '../../core/testing.ts';
@@ -508,4 +508,31 @@ test('the session lock is owned by the runner process, even when Codex runs the 
     assert.equal(s.lock?.runner, 'codex');
   }
   assert.equal(status(f).revision, 2, 'both prompts were recorded by the same owner');
+});
+
+test('actual shell edit does not resurrect its removed command text or output', () => {
+  const f = enabledFixture(); hook(f, prompt('REMOVE_THIS_SENTINEL keep active task'));
+  writeFileSync(wcPath(f), wc(f).replace('REMOVE_THIS_SENTINEL', 'RETAINED_SENTINEL'));
+  const r = hook(f, toolUse('Bash', { command: 'opaque-script REMOVE_THIS_SENTINEL' }, 'REMOVE_THIS_SENTINEL'));
+  assert.equal(r.status, 0, r.stderr); assert.ok(wc(f).includes('RETAINED_SENTINEL')); assert.ok(!wc(f).includes('REMOVE_THIS_SENTINEL'));
+});
+test('prompt submission surfaces a discarded-edit restore receipt', () => {
+  const f = enabledFixture(); hook(f, prompt('prior task'));
+  writeFileSync(wcPath(f), ''); const r = hook(f, prompt('continue'));
+  assert.equal(r.status, 0, r.stderr); assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /restor/i);
+  assert.doesNotMatch(r.stdout, /prior task/);
+});
+test('unavailable core backstop refuses a synthetic linked Working Context', () => {
+  const f = enabledFixture(); hook(f, prompt('active task'));
+  const target = join(f.projectRoot, 'synthetic-private-data'); writeFileSync(target, 'SYNTHETIC_TARGET_ONLY');
+  rmSync(wcPath(f)); symlinkSync(target, wcPath(f));
+  const r = hook(f, { hook_event_name: 'PreCompact' }, { CONTEXT_ENGINE_CLI: 'nonexistent-context-engine-test-only' });
+  assert.equal(r.status, 0, r.stderr); assert.equal(JSON.parse(r.stdout).continue, false); assert.doesNotMatch(r.stdout, /SYNTHETIC_TARGET_ONLY/);
+  assert.equal(readFileSync(target, 'utf8'), 'SYNTHETIC_TARGET_ONLY');
+});
+test('supported Unicode Working Context above one MiB remains recordable and resettable', () => {
+  const f = enabledFixture(); const r = hook(f, prompt('漢'.repeat(400000)));
+  assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /Working Context/); assert.equal(wc(f).includes('漢'.repeat(100)), true);
+  const gate = hook(f, { hook_event_name: 'PreToolUse', tool_name: 'new_context' });
+  assert.equal(gate.status, 0, gate.stderr); assert.equal(gate.stdout, '');
 });

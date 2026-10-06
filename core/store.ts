@@ -336,7 +336,12 @@ function writeTemp(path: string, data: string, point: CrashPoint, mode: number):
   // 'wx' (O_EXCL): a fresh file, never something already at that name (a symlink included).
   const fd = openSync(tmp, 'wx', mode);
   try {
-    writeSync(fd, data);
+    const bytes = Buffer.from(data);
+    for (let offset = 0; offset < bytes.length;) {
+      const written = writeSync(fd, bytes, offset, bytes.length - offset);
+      if (written <= 0) throw new Error('atomic write made no progress; refusing publication');
+      offset += written;
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);
