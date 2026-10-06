@@ -264,7 +264,7 @@ class Core {
   private pendingReceipt: Receipt | undefined;
   private closed = false;
   private unloggedCommit: { head: Head; text: string } | undefined;
-  private recoveryReceiptHead: {rev:number;sha:string} | undefined;
+  private recoveryReceiptHeads: Array<{rev:number;sha:string}> = [];
   private readonly l: Layout;
   private readonly hardLimit: number;
   private readonly me: LockHolder;
@@ -302,11 +302,11 @@ class Core {
       const published = this.head();
       if (!published || published.rev !== head.rev || published.sha !== head.sha) this.unloggedCommit = undefined;
       else {
-      const receipt = this.repairRevisionLog(head);
-      if (receipt) this.retainReceipt({revision:head.rev,chars:text.length,workingContextText:text,turns:[],receipt});
-      if (this.budgetTokens !== null) this.memory = budgetMemory(readLog(this.l.events), this.budgetTokens);
-      if (!head.materialized) this.materialize(head, text);
-      this.unloggedCommit = undefined;
+        const receipt = this.repairRevisionLog(head);
+        if (receipt) this.retainReceipt({revision:head.rev,chars:text.length,workingContextText:text,turns:[],receipt});
+        if (this.budgetTokens !== null) this.memory = budgetMemory(readLog(this.l.events), this.budgetTokens);
+        if (!head.materialized) this.materialize(head, text);
+        this.unloggedCommit = undefined;
       }
     }
     const result = fn();
@@ -347,7 +347,7 @@ class Core {
     try {
       const head = this.head();
       const log = this.checkpointLog();
-      if (!log || this.unloggedCommit || this.recoveryReceiptHead || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
+      if (!log || this.unloggedCommit || this.recoveryReceiptHeads.length || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
       const payload = { version: 2, log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
       atomicWrite(join(this.l.stateDir, 'recovery.json'), JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) }), 'recovery-checkpoint-tmp');
     } catch { /* A cache failure never changes the session result; next open rebuilds. */ }
@@ -385,9 +385,9 @@ class Core {
   }
 
   private deliver(r: SyncResult): SyncResult {
-    if (this.recoveryReceiptHead) {
-      appendLog(this.l.events, {type:'revision-receipt-delivered',...this.recoveryReceiptHead});
-      this.recoveryReceiptHead = undefined;
+    while (this.recoveryReceiptHeads.length) {
+      appendLog(this.l.events, {type:'revision-receipt-delivered',...this.recoveryReceiptHeads[0]});
+      this.recoveryReceiptHeads.shift();
     }
     this.pendingReceipt = undefined;
     return r;
@@ -617,30 +617,45 @@ class Core {
 
   /** HEAD is already committed: repair missing accounting before checkpoint/budget recovery. */
   private repairRevisionLog(head: Head | null): Receipt | undefined {
-    let logged = false, recovered = false, acknowledged = false, committed: string | undefined;
+    let logged = false, committed: string | undefined;
+    const pending = new Map<string, {rev:number;sha:string;kind:CommitKind;chars:number}>();
     const snapshot = () => committed ??= this.snapshot(head!.rev);
     // Scan even without HEAD so cross-record corruption is refused before materialization.
     for (const entry of readLog(this.l.events)) {
       if (head && entry.type === 'revision' && entry.rev === head.rev && entry.sha === head.sha) {
         if (head.kind && (entry.kind !== head.kind || entry.chars !== snapshot().length)) throw new Error('committed revision accounting metadata conflicts with HEAD; refusing recovery');
         logged = true;
-        recovered ||= entry.recovered === true;
       }
-      if (head && entry.type === 'revision-receipt-delivered' && entry.rev === head.rev && entry.sha === head.sha) acknowledged = true;
+      if (entry.type === 'revision' && entry.recovered === true) {
+        if (!head || !Number.isSafeInteger(entry.rev) || Number(entry.rev) < 1 || Number(entry.rev) > head.rev || typeof entry.sha !== 'string' || !/^[a-f0-9]{64}$/.test(entry.sha) || !['init','model-edit','runner-append','native-compaction'].includes(String(entry.kind)) || !Number.isSafeInteger(entry.chars) || Number(entry.chars) < 0) throw new Error('invalid recovered revision accounting; refusing recovery');
+        pending.set(`${entry.rev}:${entry.sha}`, {rev:Number(entry.rev),sha:entry.sha,kind:entry.kind as CommitKind,chars:Number(entry.chars)});
+      }
+      if (entry.type === 'revision-receipt-delivered') pending.delete(`${entry.rev}:${entry.sha}`);
     }
-    if (!head || !head.kind || (logged && (!recovered || acknowledged))) return;
-    const text = snapshot();
-    let previousChars = 0;
-    if (head.rev > 1) {
-      const previous = readBytes(join(this.l.revisions, `${head.rev - 1}.md`), SNAPSHOT_MAX_BYTES);
-      if (!previous) throw new Error('previous committed snapshot missing during revision-log recovery');
-      const decoded = new TextDecoder('utf-8', {fatal:true,ignoreBOM:true}).decode(previous);
-      if (sha(decoded) !== head.parent) throw new Error('previous committed snapshot checksum mismatch during revision-log recovery');
-      previousChars = decoded.length;
+    if (head?.kind && !logged) {
+      const text = snapshot();
+      const entry = {rev:head.rev,kind:head.kind,sha:head.sha,chars:text.length};
+      appendLog(this.l.events, {type:'revision',...entry,recovered:true});
+      pending.set(`${head.rev}:${head.sha}`, entry);
     }
-    if (!logged) appendLog(this.l.events, {type:'revision',rev:head.rev,kind:head.kind,sha:head.sha,chars:text.length,recovered:true});
-    this.recoveryReceiptHead = {rev:head.rev,sha:head.sha};
-    return {kind:'committed',revision:head.rev,previousChars,chars:text.length,approxTokens:approxTokens(text.length),text:`Context Engine: recovered the Event Log accounting for already committed revision ${head.rev}. ${sizeReadout(text.length)}`};
+    const receipts: Receipt[] = [];
+    for (const entry of pending.values()) {
+      const bytes = readBytes(join(this.l.revisions, `${entry.rev}.md`), SNAPSHOT_MAX_BYTES);
+      if (!bytes) throw new Error('recovered committed snapshot missing; refusing recovery');
+      const text = new TextDecoder('utf-8', {fatal:true,ignoreBOM:true}).decode(bytes);
+      if (sha(text) !== entry.sha || text.length !== entry.chars) throw new Error('recovered revision accounting conflicts with its snapshot');
+      let previousChars = 0;
+      if (entry.rev > 1) {
+        const previous = readBytes(join(this.l.revisions, `${entry.rev - 1}.md`), SNAPSHOT_MAX_BYTES);
+        if (!previous) throw new Error('previous committed snapshot missing during revision-log recovery');
+        const decoded = new TextDecoder('utf-8', {fatal:true,ignoreBOM:true}).decode(previous);
+        if (entry.rev === head?.rev && sha(decoded) !== head.parent) throw new Error('previous committed snapshot checksum mismatch during revision-log recovery');
+        previousChars = decoded.length;
+      }
+      receipts.push({kind:'committed',revision:entry.rev,previousChars,chars:text.length,approxTokens:approxTokens(text.length),text:`Context Engine: recovered the Event Log accounting for already committed revision ${entry.rev}. ${sizeReadout(text.length)}`});
+    }
+    this.recoveryReceiptHeads = [...pending.values()].map(({rev,sha}) => ({rev,sha}));
+    return receipts[0] ? {...receipts[0],text:receipts.map(receipt=>receipt.text).join('\n')} : undefined;
   }
 
   recover(tornBytes: number): void {
@@ -675,6 +690,7 @@ class Core {
       }
     }
 
+    if (repairedReceipt && interruptedReceipt && !interruptedReceipt.text.includes(repairedReceipt.text)) interruptedReceipt = {...interruptedReceipt,text:`${repairedReceipt.text}\n${interruptedReceipt.text}`};
     const log = cached ? [] : readLog(this.l.events);
     if (!cached && this.budgetTokens !== null) this.memory = budgetMemory(readLog(this.l.events), this.budgetTokens);
     const logged: Pending[] = [];

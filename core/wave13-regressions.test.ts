@@ -83,6 +83,16 @@ test('wave13: conflicting revision accounting refuses instead of suppressing rec
   fs.writeFileSync(log,rows.map(row=>JSON.stringify(row)).join('\n')+'\n');assert.throws(()=>openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000,budgetTokens:1000}),/accounting metadata conflicts/);assert.deepEqual(fs.readFileSync(wc),before);
 });
 
+test('wave13: undelivered repair notice survives advancing HEAD and failed delivery',()=>{
+  const f=fixture(),r=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000,budgetTokens:1000});assert.equal(r.status,'open');r.session.record([{role:'user',text:'ORIGINAL'}]);const log=join(r.session.stateDir,'events.jsonl'),native=fs.writeSync;
+  fs.writeSync=((fd:number,data:any,...args:any[])=>{if(fs.readlinkSync(`/proc/self/fd/${fd}`)===log&&String(data).includes('"type":"revision"'))throw new Error('synthetic accounting failure');return (native as any)(fd,data,...args);}) as typeof fs.writeSync;syncBuiltinESMExports();
+  try {assert.throws(()=>r.session.record([{role:'assistant',text:'SECOND'}]),/synthetic accounting failure/);r.session.close();}finally {fs.writeSync=native;syncBuiltinESMExports();}
+  const reopened=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000,budgetTokens:1000});assert.equal(reopened.status,'open');
+  fs.writeSync=((fd:number,data:any,...args:any[])=>{if(fs.readlinkSync(`/proc/self/fd/${fd}`)===log&&String(data).includes('"type":"revision-receipt-delivered"'))throw new Error('synthetic receipt delivery failure');return (native as any)(fd,data,...args);}) as typeof fs.writeSync;syncBuiltinESMExports();
+  try {assert.throws(()=>reopened.session.record([{role:'assistant',text:'THIRD'}]),/synthetic receipt delivery failure/);reopened.session.close();}finally {fs.writeSync=native;syncBuiltinESMExports();}
+  const retry=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000,budgetTokens:1000});assert.equal(retry.status,'open');const result=retry.session.sync();assert.equal(result.revision,3);assert.match(result.workingContextText,/THIRD/);assert.match(result.receipt?.text??'',/recovered.*revision 2/);assert.equal(retry.session.sync().receipt,undefined);retry.session.close();assert.equal([...readLog(log)].filter(e=>e.type==='revision'&&e.rev===2).length,1);
+});
+
 test('wave13: relative HOME fails before deriving a relative state tree',()=>{
   assert.throws(()=>resolveStateRoot(undefined,{HOME:'relative-home'}),/HOME.*absolute|state root.*absolute/);
   assert.equal(resolveStateRoot(undefined,{HOME:'relative-home',XDG_STATE_HOME:'/absolute-state'}),'/absolute-state/context-engine');assert.equal(resolveStateRoot('/explicit-state',{HOME:'relative-home'}),'/explicit-state');

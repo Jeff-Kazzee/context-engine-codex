@@ -74,6 +74,8 @@ test('wave10: exhausted revision counter refuses before adding a runner event', 
   const headPath = join(state, 'HEAD'), head = JSON.parse(fs.readFileSync(headPath, 'utf8'));
   fs.renameSync(join(state, 'revisions', `${head.rev}.md`), join(state, 'revisions', `${Number.MAX_SAFE_INTEGER}.md`));
   head.rev = Number.MAX_SAFE_INTEGER; fs.writeFileSync(headPath, JSON.stringify(head));
+  // This control isolates counter exhaustion, with complete matching accounting.
+  appendLog(join(state, 'events.jsonl'), {type:'revision',rev:head.rev,kind:head.kind,sha:head.sha,chars:fs.readFileSync(s.workingContextPath,'utf8').length});
   const r = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }); assert.equal(r.status, 'open');
   const log = fs.readFileSync(join(state, 'events.jsonl')), before = fs.readFileSync(headPath);
   assert.throws(() => r.session.record([{ role: 'user', text: 'MUST_NOT_APPEND' }]), /revision counter exhausted/);
