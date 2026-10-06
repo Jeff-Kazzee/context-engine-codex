@@ -2,7 +2,6 @@
 // sees the old file or the new one, never a torn one.
 import { createHash, randomBytes } from 'node:crypto';
 import {
-  chmodSync,
   closeSync,
   constants,
   existsSync,
@@ -107,7 +106,10 @@ export function layout(projectRoot: string, sessionId: string, stateRoot: string
 export function ensureDirs(l: Layout, stateRoot: string): void {
   for (const d of [stateRoot, dirname(l.stateDir), l.stateDir, l.revisions]) {
     mkdirSync(d, { recursive: true, mode: 0o700 });
-    chmodSync(d, 0o700);
+    const st = lstatSync(d);
+    if (!st.isDirectory() || st.isSymbolicLink() || (st.mode & 0o077) !== 0 || (process.getuid && st.uid !== process.getuid())) {
+      throw new Error(`Context Engine state directory must already be private (0700) and owned by this user: ${d}`);
+    }
   }
   assertWorkingContextDir(l.workingContext);
   mkdirSync(dirname(l.workingContext), { recursive: true });

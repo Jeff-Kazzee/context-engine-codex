@@ -62,7 +62,7 @@ export async function runSetup(argv: string[]): Promise<number> {
                 }
               } else lines.push('Hooks: Codex runs plugin hooks only once trusted. Approve the five Context Engine hooks with /hooks in Codex (or uninstall and install again with --trust-hooks).');
             }
-            out([`${spec.title}: installed. Delivery Mode: ${label}.`, ...lines.map((l) => `  ${l}`), '  Inert until `context-engine enable` in a project (the pilot is opt-in).']);
+            out([`${spec.title}: installed. Delivery Mode: ${label}.`, ...lines.map((l) => `  ${l}`), '  Inert until `context-engine-codex enable` in a project (the pilot is opt-in).']);
           } else {
             const lines = spec.id === 'codex' ? revertAllCodexProjects(ctx) : [];
             lines.push(...uninstall(ctx, spec));

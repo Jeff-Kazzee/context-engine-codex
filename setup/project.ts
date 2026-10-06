@@ -62,10 +62,42 @@ function projectRules(root: string): Record<string, Rule> {
 
 /** Whether a TOML text sets `developer_instructions` at the top level (before its first table). */
 function topLevelDeveloperInstructions(text: string): boolean {
+  // Track multiline values so array elements and string contents cannot be mistaken
+  // for table declarations. Only statement starts can introduce a top-level key.
+  let quote = '', multiline = false, depth = 0;
   for (const line of text.split('\n')) {
-    if (/^\s*\[/.test(line)) return false;
-    if (/^\s*(?:developer_instructions|"developer_instructions"|'developer_instructions')\s*=/.test(line)) return true;
+    if (!quote && depth === 0) {
+      if (/^\s*\[/.test(line)) return false;
+      if (/^\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*=/.test(line)) {
+        throw new SetupError('Codex: escaped quoted project TOML keys are unsupported; configuration was left unchanged');
+      }
+      if (/^\s*(?:developer_instructions|"developer_instructions"|'developer_instructions')\s*=/.test(line)) return true;
+    }
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]!;
+      if (quote) {
+        if (quote === '"' && ch === '\\') { i++; continue; }
+        if (ch === quote && (!multiline || line.slice(i, i + 3) === quote.repeat(3))) {
+          if (multiline) {
+            let end = i + 3;
+            while (line[end] === quote) end++;
+            if (end - i > 5) throw new SetupError('Codex: malformed project TOML quote sequence; configuration was left unchanged');
+            i = end - 1;
+          }
+          quote = ''; multiline = false;
+        }
+        continue;
+      }
+      if (ch === '#') break;
+      if (ch === '"' || ch === "'") {
+        quote = ch; multiline = line.slice(i, i + 3) === ch.repeat(3);
+        if (multiline) i += 2;
+      } else if (ch === '[' || ch === '{') depth++;
+      else if (ch === ']' || ch === '}') depth--;
+    }
+    if (depth < 0 || (quote && !multiline)) throw new SetupError('Codex: malformed project TOML; configuration was left unchanged');
   }
+  if (quote || depth !== 0) throw new SetupError('Codex: incomplete project TOML; configuration was left unchanged');
   return false;
 }
 

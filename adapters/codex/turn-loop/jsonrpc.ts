@@ -59,8 +59,13 @@ export function spawnJsonRpc(command: string[], opts: SpawnOptions): JsonRpcConn
   const exited = new Promise<Error>(resolve => { resolveExit = resolve; });
 
   const write = (msg: object) => {
-    if (exitError || !child.stdin?.writable) return;
-    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...msg })}\n`);
+    if (exitError) return;
+    if (!child.stdin?.writable || child.stdin.destroyed || child.stdin.writableEnded) {
+      failAll(new Error('app-server input is closed'));
+      return;
+    }
+    try { child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...msg })}\n`); }
+    catch (e) { failAll(new Error(`app-server input failed: ${e instanceof Error ? e.message : String(e)}`)); }
   };
   const emit = (n: Notification) => {
     for (const l of [...listeners]) l(n);
@@ -77,7 +82,8 @@ export function spawnJsonRpc(command: string[], opts: SpawnOptions): JsonRpcConn
 
   child.on('error', (e) => failAll(new Error(`app-server could not run: ${e.message}`)));
   child.on('exit', (code, signal) => failAll(new Error(`app-server exited (code ${code}, signal ${signal})`)));
-  child.stdin?.on('error', () => {});
+  child.stdin?.on('error', (e) => failAll(new Error(`app-server input failed: ${e.message}`)));
+  child.stdin?.on('close', () => failAll(new Error('app-server input is closed')));
 
   createInterface({ input: child.stdout! }).on('line', (line) => {
     if (!line.trim()) return;

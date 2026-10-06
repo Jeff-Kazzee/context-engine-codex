@@ -4,10 +4,10 @@
 // and the watched directories are listed. After it, the new bytes are kept too, and whatever the
 // edit created is recorded. To revert:
 //
-// 1. `assess` (before any runner command runs): a file is "unchanged otherwise" when, with our own
+// 1. `assess` (after runner removal commands finish): a file is "unchanged otherwise" when, with our own
 //    entries stripped, it reads the same as right after the edit (whitespace and JSON key order
 //    aside). Anything else is a change someone else made since.
-// 2. The runner's own removal commands run (the caller's job).
+// 2. Assessment uses the current bytes after the runner's removal commands (the caller's job).
 // 3. `revert`: an unchanged-otherwise file gets its exact original bytes back (or is deleted, if
 //    it didn't exist). A changed one keeps the other changes: only our entries are removed (a
 //    minimal reverse edit), and the report says so. Created files are removed when they are still
@@ -156,7 +156,7 @@ export function rollbackSnapshot(s: Snapshot, rules: Record<string, Rule>): stri
   return list(s.watch).filter(p => !before.has(p));
 }
 
-/** Per file: true when nothing but our own entries changed since the edit. Call before runner commands. */
+/** Per file: true when nothing but our own entries changed since the edit. Call after runner removal commands. */
 export function assess(l: Ledger, rules: Record<string, Rule>): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   for (const f of l.files) {

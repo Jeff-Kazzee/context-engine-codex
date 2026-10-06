@@ -88,3 +88,17 @@ test('if the server exits, pending requests reject instead of hanging', async ()
     await rpc.close();
   }
 });
+
+test('a live child with a closed input pipe rejects pending and future requests immediately', async () => {
+  const dir=tempDir('closed-stdin'), script=join(dir,'closed-input.cjs');
+  writeFileSync(script, "require('node:fs').closeSync(0); console.log(JSON.stringify({method:'inputClosed'})); setInterval(()=>{},1000);");
+  const rpc=spawnJsonRpc([process.execPath,script],{cwd:dir});
+  let timer:NodeJS.Timeout|undefined;
+  try {
+    await new Promise<void>(resolve=>rpc.onNotification(n=>{if(n.method==='inputClosed')resolve();}));
+    const first=rpc.request('turn/start',{payload:'x'.repeat(1024*1024)},{timeoutMs:30000});
+    await Promise.race([assert.rejects(first,/input.*(failed|closed)|stdin|EPIPE/i),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('closed pipe did not fail promptly')),700);})]);
+    clearTimeout(timer); await assert.rejects(rpc.request('second'),/input.*(failed|closed)|stdin|EPIPE/i);
+    assert.match((await rpc.exited).message,/input.*(failed|closed)|stdin|EPIPE/i);
+  } finally {clearTimeout(timer);await rpc.close();}
+});

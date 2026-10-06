@@ -34,7 +34,8 @@ const tidy = (body: string): string => body.replace(/^(?:[ \t]*\r?\n)+/, '').rep
 
 /** Renders one block header. `role` may be any runner label; non-word characters are dropped. */
 export function renderHeader(n: number, role: string): string {
-  const safe = role.replace(/[^\w-]/g, '').replace(/^[^A-Za-z]+/, '') || 'user';
+  const candidate = role.replace(/[^\w-]/g, '').replace(/^[^A-Za-z]+/, '') || 'user';
+  const safe = candidate.toLowerCase() === 'assistant' && role.toLowerCase() !== 'assistant' ? 'user' : candidate;
   return `[[CTX_TURN ${n} role=${safe}]]`;
 }
 

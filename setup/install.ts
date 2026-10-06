@@ -24,7 +24,7 @@ export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
 
 export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   const prior = installedLedger(ctx, spec.id);
-  if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine uninstall --${spec.id}\` first`);
+  if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine-${spec.id} uninstall\` first`);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
   let published = false;
   try {
@@ -67,13 +67,12 @@ export function uninstall(ctx: SetupContext, spec: RunnerSpec): string[] {
 export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   const ledger = installedLedger(ctx, spec.id);
   if (!ledger) throw new SetupError(`${spec.title}: not installed by Context Engine (no install record in ${ctx.setupDir})`);
-  const unchanged = assess(ledger, spec.rules);
   const lines: string[] = [];
   for (const cmd of spec.uninstall) {
     const r = runBinary(spec.bin, cmd, ctx.env);
     if (!r.ok) lines.push(`\`${spec.bin} ${cmd.join(' ')}\` failed (${r.output.slice(0, 200)}); Context Engine's entries were removed directly instead`);
   }
-  lines.push(...describe(revert(ledger, spec.rules, unchanged)));
+  lines.push(...describe(revert(ledger, spec.rules, assess(ledger, spec.rules))));
   unlinkSync(pointerPath(ctx, spec.id));
   lines.push(`Backups kept: ${ledger.dir}`);
   if (ledger.retainedPaths?.length) lines.push(`Unowned new paths retained: ${ledger.retainedPaths.length}`);

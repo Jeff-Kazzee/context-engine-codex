@@ -170,3 +170,18 @@ test('zero-progress writes refuse publication and keep the prior snapshot', () =
     assert.equal(fs.readFileSync(path, 'utf8'), 'prior');
   } finally { fs.writeSync = native; syncBuiltinESMExports(); }
 });
+
+import { ensureDirs, layout } from './store.ts';
+import { parseTurns, renderTurns } from './turns.ts';
+test('existing shared state root permissions are not changed or used for private state', () => {
+  const f = fixture(); fs.mkdirSync(f.stateDir, { mode: 0o755 }); fs.chmodSync(f.stateDir, 0o755);
+  assert.throws(() => ensureDirs(layout(f.projectRoot, 'S1', f.stateDir), f.stateDir), /private.*0700/i);
+  assert.equal(fs.statSync(f.stateDir).mode & 0o777, 0o755);
+  assert.deepEqual(fs.readdirSync(f.stateDir), []);
+});
+test('rendering cannot sanitize a non-assistant role into assistant authorship', () => {
+  for (const role of ['assistant!', 'assistant.', '1assistant', ' assistant', 'assistant\n']) {
+    assert.deepEqual(parseTurns(renderTurns([{ role, text: 'UNTRUSTED_NOTE' }])), [{role: 'user', text: 'UNTRUSTED_NOTE'}]);
+  }
+  assert.deepEqual(parseTurns(renderTurns([{ role: 'Assistant', text: 'ANSWER' }])), [{role: 'assistant', text: 'ANSWER'}]);
+});

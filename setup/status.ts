@@ -78,7 +78,7 @@ export async function statusText(ctx: SetupContext, projectRoot: string): Promis
     .map((e) => e.trim())
     .filter((e) => KNOWN_EXPERIMENTS.includes(e));
   const enabledLine =
-    p.state === 'on' ? `enabled (${p.project})` : p.state === 'off' ? `disabled (${p.project})` : 'not enabled (the pilot is opt-in: `context-engine enable`)';
+    p.state === 'on' ? `enabled (${p.project})` : p.state === 'off' ? `disabled (${p.project})` : 'not enabled (the pilot is opt-in: `context-engine-codex enable`)';
   const lines = [
     `Context Engine (checkout ${ctx.checkout})`,
     `Project: ${projectRoot}: ${enabledLine}`,
@@ -92,7 +92,7 @@ export async function statusText(ctx: SetupContext, projectRoot: string): Promis
   const codex = installedLedger(ctx, 'codex');
   const settingsRoot = p.project ?? projectRoot;
   const hasSettings = codexProjectSettings(settingsRoot);
-  const trusted = codexTrusts(ctx, settingsRoot);
+  const trusted = codexTrusts(ctx, projectRoot);
   const trust = codex ? await currentCodexTrust(ctx, codexSpec(ctx)) : 0;
   const pluginOn = codex ? codexPluginEnabled(ctx) : false;
   lines.push(`Codex: ${codex ? `installed ${codex.at} (${ctx.codexHome})` : 'not installed'}`);
@@ -100,12 +100,12 @@ export async function statusText(ctx: SetupContext, projectRoot: string): Promis
   let probe: { seen: boolean; detail: string } | null = null;
   if (codex) {
     if (!p.active) codexInactive = p.reason;
-    else if (!hasSettings) codexInactive = `${join(settingsRoot, '.codex', 'config.toml')} has no Context Engine settings (run \`context-engine enable\` again)`;
-    else if (!trusted) codexInactive = `Codex does not trust ${settingsRoot}, so it ignores the project's .codex/config.toml`;
+    else if (!hasSettings) codexInactive = `${join(settingsRoot, '.codex', 'config.toml')} has no Context Engine settings (run \`context-engine-codex enable\` again)`;
+    else if (!trusted) codexInactive = `Codex does not trust ${projectRoot}, so it ignores the project's .codex/config.toml`;
     else if (!pluginOn) codexInactive = `the Context Engine plugin is not enabled in ${join(ctx.codexHome, 'config.toml')}`;
     else if (trust < CODEX_HOOK_COUNT) codexInactive = `only ${trust}/${CODEX_HOOK_COUNT} plugin hooks are trusted (untrusted hooks do not run: approve them with /hooks in Codex, or reinstall with --trust-hooks)`;
     else {
-      probe = probeCodexGuidance(ctx, settingsRoot);
+      probe = probeCodexGuidance(ctx, projectRoot);
       if (!probe.seen) codexInactive = probe.detail;
     }
     lines.push(codexInactive ? `  Delivery Mode: inactive here (${codexInactive})` : `  Delivery Mode: ${CODEX_LABEL}, ${CODEX_FLAG_NOTE}`);

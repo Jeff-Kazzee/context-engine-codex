@@ -35,16 +35,27 @@ export function jsonRule(paths: string[][]): Rule {
       const prior = before === null ? undefined : parse(before);
       let changed = false;
       for (const path of paths) {
+        const restore = has(prior, path);
         const parents: Json[] = [obj];
         for (const k of path.slice(0, -1)) {
-          const next = parents.at(-1)![k];
+          const parent = parents.at(-1)!;
+          if (!(k in parent) && restore) { parent[k] = {}; changed = true; }
+          const next = parent[k];
           if (!isObject(next)) break;
           parents.push(next);
         }
         if (parents.length !== path.length) continue;
         const last = path.at(-1)!;
-        if (last in parents.at(-1)!) {
-          delete parents.at(-1)![last];
+        const parent = parents.at(-1)!;
+        if (restore) {
+          let original: unknown = prior;
+          for (const key of path) original = (original as Json)[key];
+          if (JSON.stringify(parent[last]) !== JSON.stringify(original)) {
+            parent[last] = original;
+            changed = true;
+          }
+        } else if (last in parent) {
+          delete parent[last];
           changed = true;
         }
         for (let depth = path.length - 1; depth > 0; depth--) {
