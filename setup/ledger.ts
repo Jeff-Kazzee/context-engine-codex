@@ -87,6 +87,11 @@ export function timestamp(d = new Date()): string {
 
 /** Backs up `files` byte for byte into a new timestamped dir under `backupRoot`, and lists `watch`. */
 export function takeSnapshot(opts: { backupRoot: string; kind: string; files: string[]; watch: string[]; namespaced: string[]; extra?: Record<string, unknown> }): Snapshot {
+  for (const path of opts.watch) {
+    checkComponents(path);
+    try { if (!lstatSync(path).isDirectory()) throw new Error(`setup watched root is not a directory: ${path}`); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  }
   for (const path of opts.namespaced) checkComponents(path);
   const before=opts.files.map(path=>{const bytes=safeRead(path);assertBackupSafe(path,bytes);return bytes;});
   const at = new Date();

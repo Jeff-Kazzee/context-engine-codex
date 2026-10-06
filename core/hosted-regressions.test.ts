@@ -59,8 +59,11 @@ test('an oversized sparse Working Context is restored without reading or logging
 
 test('an oversized first file has a visible metadata-only rejection without a revision', () => {
   const f = fixture(), path = join(f.projectRoot, '.context-engine/S1/context.md'); fs.mkdirSync(dirname(path), { recursive: true }); fs.writeFileSync(path, ''); fs.truncateSync(path, 1024 * 1024 * 1024);
-  const opened = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }); assert.equal(opened.status, 'open');
-  const result = opened.session.sync(); assert.equal(result.receipt?.kind, 'restored'); assert.match(result.receipt?.text ?? '', /not read or copied/); assert.equal(fs.statSync(path).size, 0); assert.ok(fs.statSync(join(opened.session.stateDir, 'events.jsonl')).size < 10000); opened.session.close();
+  assert.throws(() => openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }), /not read or copied.*preserved/);
+  const l = layout(f.projectRoot, 'S1', f.stateDir);
+  assert.equal(fs.statSync(path).size, 1024 * 1024 * 1024); assert.ok(fs.statSync(l.events).size < 10000); assert.equal(fs.existsSync(l.lock), false);
+  fs.writeFileSync(path, 'repaired synthetic notes');
+  const repaired = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }); assert.equal(repaired.status, 'open'); repaired.session.close();
 });
 
 test('a committed runner append over the edit bound is not falsely restored', () => {

@@ -8,7 +8,7 @@
 // - The Working Context is a materialized view of HEAD. A runner append commits first and then
 //   rewrites the file; HEAD.materialized says whether that rewrite finished.
 // - record() always syncs first, so a runner append never overwrites an uncommitted model edit.
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { crashPoint } from './faults.ts';
 import { acquireLock, holderFor, isAlive, readLock, releaseLock, serialized, type LockHolder } from './lock.ts';
@@ -34,6 +34,7 @@ import { checkRefs, experimentOn, staleText, type StaleReport } from './refs.ts'
 import { budgetMemory, checkBudget, remember, type BudgetMemory, type BudgetReport } from './budget.ts';
 import { COMPACTION_ONLY_FALLBACK } from './delivery.ts';
 import { approxTokens } from './size.ts';
+import { retainRunnerEvent } from './event-safety.ts';
 
 export interface OpenOptions {
   /** The project (workspace) root. The Working Context lives at `<projectRoot>/.context-engine/<sessionId>/context.md`. */
@@ -62,13 +63,13 @@ export interface OpenOptions {
   budgetTokens?: number;
 }
 
-/** A runner event: rendered into the Working Context as one turn block, stored verbatim in the Event Log. */
+/** A runner event: rendered into the Working Context as one turn block, retained in the Event Log subject to the credential-retention policy. */
 export interface RunnerEvent {
   /** 'user', 'assistant', or any runner label ('tool', ...). Non-assistant roles parse back as user. */
   role: string;
   /** Text rendered into the Working Context. */
   text: string;
-  /** Anything else the adapter wants kept verbatim in the Event Log (never rendered). */
+  /** Adapter metadata retained subject to the same credential policy (never rendered). */
   [extra: string]: unknown;
 }
 
@@ -120,7 +121,7 @@ export interface Session {
   record(events: RunnerEvent[]): SyncResult;
   /**
    * The runner's own compaction replaced the conversation (the Compaction-only fallback, taken when
-   * the Working Context alone is over its budget): syncs, logs the runner's result verbatim
+   * the Working Context alone is over its budget): syncs, applies the credential-retention policy, logs the runner's result
    * (write-ahead), and commits it, rendered as turn blocks, as the whole next Revision (kind
    * `native-compaction`). The Event Log records the delivery as COMPACTION_ONLY_FALLBACK.
    */
@@ -482,14 +483,20 @@ class Core {
   }
 
   record(events: RunnerEvent[], replace = false): SyncResult {
-    if (!Array.isArray(events) || events.some((e) => !e || typeof e.role !== 'string' || typeof e.text !== 'string')) {
+    const stringField = (event: unknown, key: string): string | undefined => {
+      if (!event || typeof event !== 'object') return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(event, key);
+      return descriptor?.enumerable && 'value' in descriptor && typeof descriptor.value === 'string' ? descriptor.value : undefined;
+    };
+    if (!Array.isArray(events) || events.some((e) => stringField(e, 'role') === undefined || stringField(e, 'text') === undefined)) {
       throw new Error(`${replace ? 'nativeCompaction' : 'record'}() takes an array of { role: string, text: string } events`);
     }
-    if (replace && events.every((e) => e.text.trim() === '')) throw new Error('nativeCompaction() needs the runner result: at least one non-empty event');
+    if (replace && events.every((e) => stringField(e, 'text')!.trim() === '')) throw new Error('nativeCompaction() needs the runner result: at least one non-empty event');
+    const retained = events.map(retainRunnerEvent);
     const synced = this.deliver(this.sync());
     if (events.length === 0) return synced;
     this.lastSeq = Math.max(this.lastSeq, this.head()?.through ?? 0);
-    const numbered: Pending[] = events.map((event) => ({ seq: ++this.lastSeq, event }));
+    const numbered: Pending[] = retained.map((event) => ({ seq: ++this.lastSeq, event }));
     const replacement: Replacement | undefined = replace
       ? { kind: 'native-compaction', reason: 'over-budget', approxTokensBefore: approxTokens(synced.chars), budgetTokens: this.budgetTokens }
       : undefined;
@@ -533,25 +540,16 @@ class Core {
     return next;
   }
 
-  /** With no revision to restore, an unusable file's content is logged and the file removed. */
+  /** Without a revision, invalid entries are logged and preserved for explicit user repair. */
   private rejectWithoutHead(check: { reason: RestoreReason; text: string | null }, bytes: Buffer | undefined): Receipt | undefined {
     if (check.reason === 'over-hard-limit' && bytes === undefined) {
       appendLog(this.l.events, { type: 'restored', rev: 0, reason: check.reason, rejected: null, oversized: true });
-      this.writeWorkingContext('');
-      return { kind: 'restored', revision: 0, reason: check.reason, chars: 0, approxTokens: 0, text: 'Context Engine: oversized Working Context bytes were not read or copied. No revision exists yet, so the file was cleared; the rejection is recorded in the Event Log.' };
+      throw new Error('Context Engine: oversized Working Context bytes were not read or copied; no revision exists to restore and the file was preserved. Repair it or remove that exact entry yourself before retrying.');
     }
     if (check.reason === 'not-a-file') {
-      // A link: remove the link itself (never its target) and log nothing of what it pointed at.
+      // Preserve the entry: no portable inode-conditional unlink can protect a concurrent replacement.
       appendLog(this.l.events, { type: 'restored', rev: 0, reason: check.reason, rejected: null });
-      unlinkSync(this.l.workingContext);
-      return {
-        kind: 'restored',
-        revision: 0,
-        reason: check.reason,
-        chars: 0,
-        approxTokens: 0,
-        text: `Context Engine: your Working Context edit was not applied (${RESTORE_WORDS[check.reason]}). No revision exists yet, so the link was removed.`,
-      };
+      throw new Error('Context Engine: unusable Working Context has no revision to restore; file preserved. Repair it or remove that exact entry yourself before retrying.');
     }
     if (bytes === undefined || check.reason === 'empty') return undefined;
     appendLog(this.l.events, {
@@ -560,15 +558,7 @@ class Core {
       reason: check.reason,
       ...(check.text !== null ? { rejected: check.text } : { rejectedBase64: bytes.toString('base64') }),
     });
-    unlinkSync(this.l.workingContext);
-    return {
-      kind: 'restored',
-      revision: 0,
-      reason: check.reason,
-      chars: 0,
-      approxTokens: 0,
-      text: `Context Engine: your Working Context edit was not applied (${RESTORE_WORDS[check.reason]}). No revision exists yet, so the file was cleared; the rejected text is kept in the Event Log.`,
-    };
+    throw new Error('Context Engine: unusable Working Context has no revision to restore; file preserved. Repair it or remove that exact entry yourself before retrying.');
   }
 
   close(): void {

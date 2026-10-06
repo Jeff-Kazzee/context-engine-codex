@@ -15,7 +15,7 @@ The part of every model call the agent can't edit: the runner's system prompt, t
 _Avoid_: protected region, header
 
 **Event Log**:
-The append-only, verbatim record of everything that happened in a session. The model never edits it, and it is not part of the working context.
+The append-only record of retained session events. Ordinary inspected runner events are kept verbatim; recognized credential-bearing or uninspectable events are replaced by omission notices before storage. This heuristic does not scrub existing history or runner transcripts. The model never edits the Event Log, and it is not part of the working context.
 _Avoid_: transcript (when meaning ours), history, archive
 
 **Offload**:

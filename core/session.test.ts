@@ -140,14 +140,14 @@ test('receipts show the revision and an approximate token count (chars / 4)', ()
   assert.match(restored!.text, /Revision 2\b.*~250 tokens \(approx/);
 });
 
-test('a file written before any revision is committed as revision 1; an unusable one is logged and cleared', () => {
+test('a file written before any revision is committed as revision 1; an unusable one is logged and preserved for repair', () => {
   const f = fixture();
   const s = open(f, 'S1', 50);
   writeFileSync(s.workingContextPath, 'y'.repeat(80));
-  const r = s.sync();
-  assert.equal(r.revision, 0);
-  assert.equal(r.receipt?.kind === 'restored' && r.receipt.reason, 'over-hard-limit');
+  assert.throws(() => s.sync(), /file preserved/);
+  assert.equal(readFileSync(s.workingContextPath, 'utf8'), 'y'.repeat(80));
   assert.equal(eventsOf(s).find((e) => e.type === 'restored')?.rejected, 'y'.repeat(80));
+  writeFileSync(s.workingContextPath, '');
   assert.equal(s.record([{ role: 'user', text: 'Task.' }]).revision, 1);
 
   const s2 = open(f, 'S2', 50);
