@@ -250,7 +250,9 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[]):
   const hardLimit = process.env.CONTEXT_ENGINE_HARD_LIMIT || String(DEFAULT_HARD_LIMIT);
   const args = [command, '--session', input.session_id, '--project', input.cwd, '--runner', RUNNER, '--hard-limit', hardLimit, '--owner-pid', String(runnerPid()), '--if-enabled', '--budget', String(budgetTokens)];
   const [file, argv] = /\.[cm]?[jt]s$/.test(cli) ? [process.execPath, [cli, ...args]] : [cli, args];
-  const maxBuffer = Math.max(16 * 1024 * 1024, Math.ceil((Number(hardLimit) || DEFAULT_HARD_LIMIT) * 6) + 1024 * 1024);
+  // JSON can escape each character into six bytes, in both text and parsed turns.
+  // Size for the supported 16 MiB payload envelope as well as the character hard limit.
+  const maxBuffer = Math.max(16 * 1024 * 1024 * 12, Math.ceil((Number(hardLimit) || DEFAULT_HARD_LIMIT) * 12)) + 1024 * 1024;
   const r = spawnSync(file, argv, { maxBuffer, input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout: 20_000 });
   let out: CoreResult | undefined;
   try {

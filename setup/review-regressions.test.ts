@@ -15,7 +15,7 @@ test('overlapping install and uninstall cannot share a setup transaction', () =>
     assert.throws(() => uninstall(ctx, spec), /already locked/);
     writeFileSync(config, 'INSTALLED');
   } };
-  install(ctx, spec); assert.ok(installedLedger(ctx, 'fake')); assert.equal(readFileSync(config, 'utf8'), 'INSTALLED');
+  install(ctx, spec); assert.ok(installedLedger(ctx, 'fake', spec)); assert.equal(readFileSync(config, 'utf8'), 'INSTALLED');
   uninstall(ctx, spec); assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
 });
 import { install, installedLedger, uninstall } from './install.ts';
@@ -38,10 +38,10 @@ test('pointer publication failure rolls back and can be retried', () => {
   try { assert.throws(() => install(ctx, spec), /synthetic pointer denied/); }
   finally { fs.renameSync = nativeRename; syncBuiltinESMExports(); }
   assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
-  assert.equal(installedLedger(ctx, 'fake'), null);
+  assert.equal(installedLedger(ctx, 'fake', spec), null);
   spec.prepare = undefined;
   install(ctx, spec);
-  assert.ok(installedLedger(ctx, 'fake'));
+  assert.ok(installedLedger(ctx, 'fake', spec));
 });
 
 test('setup never reads, backs up or overwrites linked configuration targets', () => {
@@ -72,7 +72,7 @@ test('prepare failure rolls back without needing to finalize a ledger', () => {
   const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); throw new Error('prepare failed'); } };
   assert.throws(() => install(ctx, spec), /prepare failed/);
   assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
-  assert.equal(installedLedger(ctx, 'fake'), null);
+  assert.equal(installedLedger(ctx, 'fake', spec), null);
 });
 
 test('ledger finalization failure restores config and preserves unrelated files', () => {

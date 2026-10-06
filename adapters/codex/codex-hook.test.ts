@@ -557,3 +557,10 @@ test('unavailable core backstop refuses a sparse file above the multipart read l
   const r=hook(f,{hook_event_name:'PreCompact'},{CONTEXT_ENGINE_CLI:'nonexistent-context-engine-test-only'});
   assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).continue,false);
 });
+
+test('renewed: duplicated supported IPC payload exceeds old 16 MiB floor without denial',()=>{
+ const f=enabledFixture();hook(f,prompt('SYNTHETIC_TASK'));
+ const fake=join(f.projectRoot,'synthetic-core.ts');
+ writeFileSync(fake,"const text='x'.repeat(9*1024*1024);process.stdout.write(JSON.stringify({ok:true,revision:1,workingContextText:text,turns:[{role:'user',text}],budget:{overBudget:false}}));");
+ const r=hook(f,newContext,{CONTEXT_ENGINE_CLI:fake});assert.equal(r.status,0,r.stderr);assert.equal(r.stdout,'','a successful synthetic sync must pass IPC');
+});

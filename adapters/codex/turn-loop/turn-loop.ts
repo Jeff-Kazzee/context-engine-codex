@@ -215,7 +215,7 @@ class TurnLoop {
 
     let replaced = false;
     let revisionInjected: number | null = null;
-    let threadId: string;
+    let threadId: string | undefined;
     const notDelivered = (reason: WorkingContextRejectReason | 'delivery-failed', detail: string): TurnResult => {
       receipts.push({
         kind: 'not-replaced',
@@ -242,6 +242,7 @@ class TurnLoop {
         threadId = await this.newThread();
         await this.rpc.request('thread/inject_items', { threadId, items: built.items });
       } catch (e) {
+        if (threadId) await this.rpc.request('thread/unsubscribe', { threadId }).catch(() => {});
         return notDelivered('delivery-failed', `the app-server refused it (${errorText(e)})`);
       }
       replaced = true;

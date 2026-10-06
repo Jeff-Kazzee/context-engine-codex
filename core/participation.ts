@@ -77,11 +77,12 @@ export function findRecord(ref: ParticipationRef): { project: string; state: 'on
     } finally { closeSync(recordFd); }
     if (bytes) {
       try {
-        const rec = JSON.parse(bytes.toString('utf8'));
+        const rec = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
         if (rec.projectRoot === dir && (rec.state === 'on' || rec.state === 'off')) return { project: dir, state: rec.state, at: rec.at };
       } catch {
-        // A corrupt record counts as no record.
+        // An existing corrupt record must not inherit an ancestor's opt-in.
       }
+      return { project: dir, state: 'off' };
     }
     if (dirname(dir) === dir) return null;
   }

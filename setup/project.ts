@@ -64,14 +64,17 @@ function projectRules(root: string): Record<string, Rule> {
 function topLevelDeveloperInstructions(text: string): boolean {
   // Track multiline values so array elements and string contents cannot be mistaken
   // for table declarations. Only statement starts can introduce a top-level key.
-  let quote = '', multiline = false, depth = 0;
+  let quote = '', multiline = false, depth = 0, inTable = false;
   for (const line of text.split('\n')) {
     if (!quote && depth === 0) {
-      if (/^\s*\[/.test(line)) return false;
+      if (/^\s*\[/.test(line)) {
+        if (/"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"/.test(line)) throw new SetupError('Codex: escaped quoted project TOML table keys are unsupported; configuration was left unchanged');
+        inTable = true;
+      }
       if (/^\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*=/.test(line)) {
         throw new SetupError('Codex: escaped quoted project TOML keys are unsupported; configuration was left unchanged');
       }
-      if (/^\s*(?:developer_instructions|"developer_instructions"|'developer_instructions')\s*=/.test(line)) return true;
+      if (!inTable && /^\s*(?:developer_instructions|"developer_instructions"|'developer_instructions')\s*=/.test(line)) return true;
     }
     for (let i = 0; i < line.length; i++) {
       const ch = line[i]!;
@@ -106,7 +109,12 @@ export function codexProjectSettings(root: string): boolean {
   const p = codexConfig(root);
   try {
     const text = safeRead(p)?.toString('utf8') ?? '';
-    return [TOML_MARKERS.begin, TOML_MARKERS.end, TOML_TOP_MARKERS.begin, TOML_TOP_MARKERS.end].every(m => text.includes(m));
+    const expected = projectCodexToml({experiments:experimentOn('stale-refs') ? ['stale-refs'] : []});
+    const matches = (m: Markers, body: string) => {
+      const start = text.indexOf(m.begin+'\n'), stop = text.indexOf(m.end+'\n',start);
+      return start >= 0 && stop > start && text.slice(start+m.begin.length+1,stop).trim() === body.trim();
+    };
+    return matches(TOML_TOP_MARKERS,expected.top) && matches(TOML_MARKERS,expected.table);
   } catch { return false; }
 }
 
@@ -125,7 +133,8 @@ export function codexTrusts(ctx: SetupContext, root: string): boolean {
 function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
   const config = codexConfig(root);
   const existing = safeRead(config)?.toString('utf8') ?? null;
-  const old = existsSync(pointer(ctx, root)) ? readLedger(JSON.parse(readFileSync(pointer(ctx, root), 'utf8')).dir) : null;
+  const pointerBytes = safeRead(pointer(ctx,root));
+  const old = pointerBytes ? readLedger(JSON.parse(pointerBytes.toString('utf8')).dir,{backupRoot:join(ctx.setupDir,'backups'),files:[config],namespaced:[]}) : null;
   if (!old && existing !== null && [TOML_MARKERS.begin, TOML_MARKERS.end, TOML_TOP_MARKERS.begin, TOML_TOP_MARKERS.end].some(marker => existing.includes(marker))) {
     throw new SetupError(`Codex: ${config} contains unowned Context Engine markers; configuration was left unchanged`);
   }
@@ -180,9 +189,10 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
 }
 
 /** Reverts the Codex project files of one project (by pointer file). */
-function revertCodexProjectFiles(pointerFile: string): string[] {
-  const { dir, projectRoot } = JSON.parse(readFileSync(pointerFile, 'utf8')) as { dir: string; projectRoot: string };
-  const ledger = readLedger(dir);
+function revertCodexProjectFiles(ctx: SetupContext, pointerFile: string): string[] {
+  const { dir, projectRoot } = JSON.parse(safeRead(pointerFile)!.toString('utf8')) as { dir: string; projectRoot: string };
+  if (typeof projectRoot !== 'string' || pointer(ctx, projectRoot) !== pointerFile) throw new SetupError('project ledger pointer violates confinement policy');
+  const ledger = readLedger(dir,{backupRoot:join(ctx.setupDir,'backups'),files:[codexConfig(projectRoot)],namespaced:[]});
   const rules = projectRules(projectRoot);
   const lines = describe(revert(ledger, rules, assess(ledger, rules)));
   unlinkSync(pointerFile);
@@ -194,7 +204,7 @@ export function revertAllCodexProjects(ctx: SetupContext): string[] {
   if (!existsSync(projectsDir(ctx))) return [];
   return readdirSync(projectsDir(ctx))
     .filter((f) => f.endsWith('.json'))
-    .flatMap((f) => revertCodexProjectFiles(join(projectsDir(ctx), f)));
+    .flatMap((f) => revertCodexProjectFiles(ctx,join(projectsDir(ctx), f)));
 }
 
 export function enableProject(ctx: SetupContext, projectRoot: string): string[] {
@@ -218,6 +228,6 @@ export function disableProject(ctx: SetupContext, projectRoot: string): string[]
   const p = participation({ projectRoot, env: {} });
   const lines = [`Context Engine disabled for ${p.project} and its subdirectories (new sessions; a running Codex session stops at its next hook).`];
   const ptr = pointer(ctx, p.project!);
-  if (existsSync(ptr)) lines.push(...revertCodexProjectFiles(ptr));
+  if (existsSync(ptr)) lines.push(...revertCodexProjectFiles(ctx,ptr));
   return lines;
 }

@@ -29,6 +29,7 @@ function has(obj: unknown, path: string[]): boolean {
  */
 export function jsonRule(paths: string[][]): Rule {
   return {
+    empty(text) { const value = parse(text); return isObject(value) && Object.keys(value).length === 0; },
     strip(text, before) {
       const obj = parse(text);
       if (!isObject(obj)) return text;

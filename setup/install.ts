@@ -4,16 +4,17 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { join } from 'node:path';
 import { assess, completeLedger, type FileReport, type Ledger, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
 import { safeRead, safeWrite, withSetupLock } from './files.ts';
-import { runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
+import { codexSpec, runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
 
 const pointerPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}.json`);
 
 /** The install ledger of a runner, or null when Context Engine isn't installed there. */
-export function installedLedger(ctx: SetupContext, id: string): Ledger | null {
+export function installedLedger(ctx: SetupContext, id: string, spec?: RunnerSpec): Ledger | null {
   const p = pointerPath(ctx, id);
   const bytes = safeRead(p);
   if (bytes === null) return null;
-  return readLedger(JSON.parse(bytes.toString('utf8')).dir);
+  spec ??= codexSpec(ctx);
+  return readLedger(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)).dir, {backupRoot:join(ctx.setupDir,'backups'),files:spec.files,namespaced:spec.namespaced});
 }
 
 export class SetupError extends Error {}
@@ -23,7 +24,7 @@ export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
 }
 
 export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
-  const prior = installedLedger(ctx, spec.id);
+  const prior = installedLedger(ctx, spec.id, spec);
   if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine-${spec.id} uninstall\` first`);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
   let published = false;
@@ -65,7 +66,7 @@ export function uninstall(ctx: SetupContext, spec: RunnerSpec): string[] {
 }
 
 export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
-  const ledger = installedLedger(ctx, spec.id);
+  const ledger = installedLedger(ctx, spec.id, spec);
   if (!ledger) throw new SetupError(`${spec.title}: not installed by Context Engine (no install record in ${ctx.setupDir})`);
   const lines: string[] = [];
   for (const cmd of spec.uninstall) {

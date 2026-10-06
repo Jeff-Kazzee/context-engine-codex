@@ -44,6 +44,7 @@ export function locallyEnabled(project: string): boolean {
           let record: { projectRoot?: unknown; state?: unknown } | undefined;
           try { record = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, used))); } catch {}
           if (record?.projectRoot === dir && (record.state === 'on' || record.state === 'off')) return record.state === 'on';
+          return false;
         }
       } finally { if (fd !== undefined) closeSync(fd); }
       if (dirname(dir) === dir) return false;

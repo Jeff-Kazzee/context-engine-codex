@@ -315,3 +315,10 @@ test('relative project root is canonical for both app-server cwd and thread cwd'
   await loop.runTurn('SYNTHETIC_PROMPT');
   assert.equal(t.sent('thread/start')[0].cwd,t.f.projectRoot);
 });
+
+test('renewed: refused injection unsubscribes the newly allocated thread',async()=>{
+ const t=setup({turns:[{reply:'BASE'}],errors:{'thread/inject_items':{code:-32600,message:'synthetic refusal'}}});
+ const loop=await startCodexTurnLoop(t.opts);await loop.runTurn('baseline');
+ const result=await loop.runTurn('refuse');assert.equal(result.status,'refused');
+ assert.deepEqual(t.sent('thread/unsubscribe'),[{threadId:t.sent('thread/start').length===2?'thread-2':'unexpected'}]);
+});

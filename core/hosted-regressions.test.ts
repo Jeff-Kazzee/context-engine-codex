@@ -44,7 +44,7 @@ test('a failed partial log append does not commit and cannot swallow the next su
 
 test('close logging failure releases the live session lock and closes the facade', () => {
   const f = fixture(), opened = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }); assert.equal(opened.status, 'open'); const s = opened.session, log = join(s.stateDir, 'events.jsonl'), native = fs.openSync;
-  fs.openSync = ((path: any, flags: any, ...args: any[]) => { if (path === log && flags === 'a') throw Object.assign(new Error('synthetic storage full'), { code: 'ENOSPC' }); return (native as any)(path, flags, ...args); }) as typeof fs.openSync; syncBuiltinESMExports();
+  fs.openSync = ((path: any, flags: any, ...args: any[]) => { if (path === log && (flags === 'a' || typeof flags === 'number' && !!(flags & fs.constants.O_APPEND))) throw Object.assign(new Error('synthetic storage full'), { code: 'ENOSPC' }); return (native as any)(path, flags, ...args); }) as typeof fs.openSync; syncBuiltinESMExports();
   try { assert.throws(() => s.close(), /synthetic storage full/); }
   finally { fs.openSync = native; syncBuiltinESMExports(); }
   assert.equal(inspectSession({ ...f, sessionId: 'S1' }).lock, null); assert.throws(() => s.sync(), /closed/);

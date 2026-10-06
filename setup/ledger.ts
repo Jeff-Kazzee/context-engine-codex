@@ -15,7 +15,9 @@
 //    are removed only when empty, and unowned directories remain.
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { closeSync } from 'node:fs';
+import { openPrivateDirectory } from '../core/store.ts';
 import { checkComponents, safeRead, safeWrite } from './files.ts';
 
 /** How to recognise and remove our entries in one file. */
@@ -24,6 +26,8 @@ export interface Rule {
   strip(text: string, before: string | null): string;
   /** A form that ignores formatting, for "unchanged otherwise". */
   canon(text: string): string;
+  /** Whether stripped text has no unmanaged content when the original file was absent. */
+  empty?(text: string): boolean;
 }
 
 export interface Ledger {
@@ -138,8 +142,22 @@ export function completeLedger(s: Snapshot): Ledger {
   return ledger;
 }
 
-export function readLedger(dir: string): Ledger {
-  return JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8')) as Ledger;
+export interface LedgerPolicy { backupRoot: string; files: string[]; namespaced: string[] }
+export function readLedger(dir: string, policy: LedgerPolicy): Ledger {
+  const within = (root: string, path: unknown): path is string => typeof path === 'string' && isAbsolute(path) && path === resolve(path) && !!relative(root,path) && relative(root,path) !== '..' && !relative(root,path).startsWith('..'+sep) && !isAbsolute(relative(root,path));
+  const root = resolve(policy.backupRoot);
+  if (!within(root, dir) || dirname(dir) !== root) throw new Error('ledger directory is outside the confined backup root');
+  closeSync(openPrivateDirectory(root)!); closeSync(openPrivateDirectory(dir)!);
+  const bytes = safeRead(join(dir,'ledger.json'));
+  if (!bytes) throw new Error('missing confined ledger');
+  const l = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as Ledger;
+  const backup = (path: unknown) => path === null || (within(root,path) && ['before','after'].includes(dirname(path).split(sep).at(-1)!) && dirname(dirname(path)) !== root && dirname(dirname(dirname(path))) === root);
+  const owned = (path: unknown): path is string => typeof path === 'string' && policy.namespaced.some(n => path === n || within(n,path));
+  if (l.version !== 1 || l.dir !== dir || !Array.isArray(l.files) || l.files.length !== policy.files.length || !l.files.every((f,i) => f.path === policy.files[i] && backup(f.before) && backup(f.after)) || !Array.isArray(l.namespaced) || l.namespaced.length !== policy.namespaced.length || !l.namespaced.every((n,i) => n.path === policy.namespaced[i] && typeof n.existed === 'boolean') || !Array.isArray(l.createdFiles) || !l.createdFiles.every(f => owned(f.path) && /^[a-f0-9]{64}$/.test(f.sha)) || !Array.isArray(l.createdDirs) || !l.createdDirs.every(owned)) throw new Error('ledger paths or schema violate confinement policy');
+  // Validate all referenced paths before any restore or namespace removal can occur.
+  for (const f of l.files) for (const p of [f.before,f.after]) if (p !== null) { checkComponents(p); closeSync(openPrivateDirectory(dirname(p))!); }
+  for (const p of [...l.files.map(f=>f.path),...l.namespaced.map(n=>n.path),...l.createdDirs,...l.createdFiles.map(f=>f.path)]) checkComponents(p);
+  return l;
 }
 
 /** Reverse known managed fields; preserve concurrent changes without post-edit ownership proof. */
@@ -162,10 +180,19 @@ export function assess(l: Ledger, rules: Record<string, Rule>): Record<string, b
   const out: Record<string, boolean> = {};
   for (const f of l.files) {
     const rule = rules[f.path];
+    if (!rule) {
+      const after = f.after ? safeRead(f.after) : null, now = safeRead(f.path);
+      out[f.path] = after === null ? now === null : now !== null && after.equals(now);
+      continue;
+    }
     const before = f.before ? readText(f.before) : null;
     const after = f.after ? readText(f.after) : null;
     const now = readText(f.path);
-    const form = (t: string | null) => (t === null ? '\u0000absent' : rule ? rule.canon(rule.strip(t, before)) : t);
+    const form = (t: string | null) => {
+      if (t === null) return '\u0000absent';
+      const stripped = rule.strip(t, before);
+      return before === null && stripped !== t && rule.empty?.(stripped) ? '\u0000absent' : rule.canon(stripped);
+    };
     out[f.path] = form(now) === form(after);
   }
   return out;
@@ -175,7 +202,7 @@ export function assess(l: Ledger, rules: Record<string, Rule>): Record<string, b
 export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record<string, boolean>): FileReport[] {
   const reports: FileReport[] = [];
   for (const f of l.files) {
-    const before = f.before ? readFileSync(f.before) : null;
+    const before = f.before ? safeRead(f.before) : null;
     if (unchanged[f.path]) {
       if (before) {
         mkdirSync(dirname(f.path), { recursive: true });

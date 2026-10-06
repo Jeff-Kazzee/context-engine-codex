@@ -19,7 +19,7 @@ import {
   realpathSync,
   renameSync,
   statSync,
-  truncateSync,
+  ftruncateSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -166,7 +166,7 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
     closeSync(openPrivateDirectory(d, { create: true })!);
   }
   assertWorkingContextDir(l.workingContext);
-  mkdirSync(dirname(l.workingContext), { recursive: true, mode: 0o700 });
+  createConfinedDirectory(dirname(l.workingContext));
   assertWorkingContextDir(l.workingContext);
   // Self-ignoring directory: keeps Working Contexts out of git without editing the project's .gitignore.
   const ignore = join(dirname(dirname(l.workingContext)), '.gitignore');
@@ -324,9 +324,24 @@ export function readConfined(root: string, rel: string): { bytes: Buffer } | { r
     if (isCredential(real, st)) return { refused: 'credential' };
     if (!isWithin(realRoot, real)) return { refused: 'outside' };
     if (!st.isFile() || st.nlink !== 1) return { refused: 'not-a-file' };
-    return { bytes: readFileSync(fd) };
+    const bytes = boundedRead(fd, st.size, 16 * 1024 * 1024);
+    if (bytes === 'too-large') throw new Error('cited source exceeds the 16 MiB size limit');
+    return { bytes };
   } finally {
     closeSync(fd);
+  }
+}
+
+function boundedRead(fd: number, size: number, maxBytes: number): Buffer | 'too-large' {
+  if (size > maxBytes) return 'too-large';
+  const chunk = Buffer.alloc(Math.min(65536, maxBytes + 1)), parts: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const n = readSync(fd, chunk, 0, Math.min(chunk.length, maxBytes + 1 - total), null);
+    if (!n) return Buffer.concat(parts, total);
+    total += n;
+    if (total > maxBytes) return 'too-large';
+    parts.push(Buffer.from(chunk.subarray(0, n)));
   }
 }
 
@@ -425,7 +440,16 @@ function writeTemp(path: string, data: string, point: CrashPoint, mode: number):
 }
 
 export function atomicWrite(path: string, data: string, point: CrashPoint, mode = 0o600): void {
-  if (point !== 'wc-tmp') return renameSync(writeTemp(path, data, point, mode), path);
+  if (point !== 'wc-tmp') {
+    const parent = dirname(resolve(path));
+    const fd = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      if (openedPath(fd) !== parent) throw new Error('atomic publication parent is not verified');
+      renameSync(writeTemp(path, data, point, mode), path);
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    return;
+  }
   // The editable workspace is not private state. Anchor both names to one
   // verified open directory, so a later parent swap cannot redirect a write.
   assertWorkingContextDir(path);
@@ -437,6 +461,7 @@ export function atomicWrite(path: string, data: string, point: CrashPoint, mode 
     const target = join(fdLinkPath(fd), basename(path));
     tmp = writeTemp(target, data, point, mode);
     renameSync(tmp, target);
+    fsyncSync(fd);
   } finally {
     if (tmp) try { unlinkSync(tmp); } catch {}
     closeSync(fd);
@@ -460,7 +485,7 @@ export function appendLog(path: string, entry: Record<string, unknown>, opts: { 
 function appendLogLocked(path: string, entry: Record<string, unknown>): void {
   truncateTornTailLocked(path);
   const line = Buffer.from(`${JSON.stringify({ ...entry, at: new Date().toISOString() })}\n`);
-  const fd = openSync(path, 'a', 0o600);
+  const fd = verifiedLogDescriptor(path, true);
   try {
     try {
       crashPoint('log-torn');
@@ -503,9 +528,18 @@ export function truncateTornTail(path: string): number {
   return serialized(`${path}.append.lock`, () => truncateTornTailLocked(path));
 }
 
+function verifiedLogDescriptor(path: string, append: boolean): number {
+  const fd = openSync(path, (append ? constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT : constants.O_RDWR) | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1 || openedPath(fd) !== resolve(path) || (process.getuid && st.uid !== process.getuid())) throw new Error('Event Log is not a verified unlinked owned regular file');
+    return fd;
+  } catch (e) { closeSync(fd); throw e; }
+}
+
 function truncateTornTailLocked(path: string): number {
   let fd: number;
-  try { fd = openSync(path, 'r'); }
+  try { fd = verifiedLogDescriptor(path, false); }
   catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw e; }
   let size: number, keep = 0;
   try {
@@ -523,8 +557,9 @@ function truncateTornTailLocked(path: string): number {
       if (at >= 0) { keep = start + at + 1; break; }
       end = start;
     }
+    ftruncateSync(fd, keep);
+    fsyncSync(fd);
   } finally { closeSync(fd); }
-  truncateSync(path, keep);
   return size! - keep;
 }
 

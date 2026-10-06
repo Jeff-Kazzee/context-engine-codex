@@ -208,7 +208,7 @@ for (const code of ['EACCES', 'ENOSPC', 'EDQUOT']) test(`when accounting fails w
   const before = readFileSync(log, 'utf8');
   const nativeOpen = fs.openSync;
   fs.openSync = ((path: any, flags: any, ...args: any[]) => {
-    if (path === log && flags === 'a') throw Object.assign(new Error('synthetic append denied'), { code });
+    if (path === log && (flags === 'a' || typeof flags === 'number' && !!(flags & fs.constants.O_APPEND))) throw Object.assign(new Error('synthetic append denied'), { code });
     return (nativeOpen as any)(path, flags, ...args);
   }) as typeof fs.openSync;
   syncBuiltinESMExports();
