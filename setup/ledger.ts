@@ -11,7 +11,8 @@
 // 3. `revert`: an unchanged-otherwise file gets its exact original bytes back (or is deleted, if
 //    it didn't exist). A changed one keeps the other changes: only our entries are removed (a
 //    minimal reverse edit), and the report says so. Created files are removed when they are still
-//    as the edit left them, our namespaced dirs are removed only when empty; unowned directories remain.
+//    as the edit left them, newly created explicit namespaces are removed; other owned created directories
+//    are removed only when empty, and unowned directories remain.
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
