@@ -9,7 +9,7 @@
 //
 // Records live in the state root (never in the project): participation/<project key>.json.
 import { basename, dirname, join } from 'node:path';
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, fsyncSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { openPrivateDirectory, projectKey, resolveStateRoot } from './store.ts';
 
@@ -115,10 +115,21 @@ export function setParticipation(ref: ParticipationRef & { state: 'on' | 'off' }
     dirFd = openPrivateDirectory(dirname(path), { create: true })!;
     const anchored = `/proc/self/fd/${dirFd}`;
     tmp = join(anchored, `.participation-${process.pid}-${randomBytes(16).toString('hex')}.tmp`);
-    writeFileSync(tmp, `${JSON.stringify({ projectRoot, state: ref.state, at: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
+    const file = openSync(tmp, 'wx', 0o600);
     created = true;
+    try {
+      const bytes = Buffer.from(`${JSON.stringify({ projectRoot, state: ref.state, at: new Date().toISOString() })}\n`);
+      for (let offset = 0; offset < bytes.length;) {
+        const written = writeSync(file, bytes, offset, bytes.length - offset);
+        if (written <= 0) throw new Error('participation write made no progress; refusing publication');
+        offset += written;
+      }
+      fsyncSync(file);
+    } finally { closeSync(file); }
     if (realpathSync(anchored) !== dirname(path)) throw new Error('participation directory changed before publication');
     renameSync(tmp, join(anchored, basename(path)));
+    fsyncSync(dirFd);
+    fsyncSync(rootFd);
   } finally {
     if (created && tmp) try { unlinkSync(tmp); } catch {}
     if (dirFd !== undefined) closeSync(dirFd);

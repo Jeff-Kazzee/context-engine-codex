@@ -15,10 +15,10 @@
 // The file is backed up byte for byte first and reverted by disable (or uninstall) as ledger.ts
 // does. (Enables made before this change also wrote an AGENTS.md section; its rule stays so they
 // revert cleanly.)
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { experimentOn, findRecord, killSwitchOn, participation, setParticipation } from '../core/index.ts';
-import { projectKey } from '../core/store.ts';
+import { projectKey, projectKeyForCanonicalPath } from '../core/store.ts';
 import { projectCodexToml } from '../adapters/codex/guidance.ts';
 import { describe, installedLedger, SetupError } from './install.ts';
 import { assess, completeLedger, readLedger, revert, rollbackSnapshot, takeSnapshot, type Ledger, type Rule } from './ledger.ts';
@@ -47,6 +47,10 @@ const agentsMd = (root: string) => join(root, 'AGENTS.md');
 const projectsDir = (ctx: SetupContext) => join(ctx.setupDir, 'projects');
 const pointer = (ctx: SetupContext, root: string) => {
   const key = projectKey(root);
+  return join(projectsDir(ctx), `${key.length <= 250 ? key : `${key.slice(0, 128)}-${key.slice(-64)}`}.json`);
+};
+const recordedPointer = (ctx: SetupContext, root: string) => {
+  const key = projectKeyForCanonicalPath(root);
   return join(projectsDir(ctx), `${key.length <= 250 ? key : `${key.slice(0, 128)}-${key.slice(-64)}`}.json`);
 };
 
@@ -211,8 +215,14 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
 /** Reverts the Codex project files of one project (by pointer file). */
 function revertCodexProjectFiles(ctx: SetupContext, pointerFile: string): string[] {
   const { dir, projectRoot } = JSON.parse(safeRead(pointerFile)!.toString('utf8')) as { dir: string; projectRoot: string };
-  if (typeof projectRoot !== 'string' || pointer(ctx, projectRoot) !== pointerFile) throw new SetupError('project ledger pointer violates confinement policy');
+  if (typeof projectRoot !== 'string' || recordedPointer(ctx, projectRoot) !== pointerFile) throw new SetupError('project ledger pointer violates confinement policy');
   const ledger = readLedger(dir,{backupRoot:join(ctx.setupDir,'backups'),files:[codexConfig(projectRoot)],namespaced:[],alternativeFiles:[[codexConfig(projectRoot),agentsMd(projectRoot)]]});
+  try { lstatSync(projectRoot); }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    unlinkSync(pointerFile);
+    return ['Codex: recorded project is missing or moved; project files were left untouched and backups preserved. Clean up any relocated project settings manually.'];
+  }
   const rules = projectRules(projectRoot);
   const lines = describe(revert(ledger, rules, assess(ledger, rules)));
   unlinkSync(pointerFile);

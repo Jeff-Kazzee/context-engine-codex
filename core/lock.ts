@@ -1,9 +1,9 @@
 // Single-writer session lock. The holder is identified by pid + hostname + process start marker
 // (Linux: start time from /proc/<pid>/stat, so a recycled pid is not mistaken for the holder).
 import { randomBytes } from 'node:crypto';
-import { closeSync, linkSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, linkSync, openSync, readFileSync, readlinkSync, unlinkSync, writeSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { lockStep } from './faults.ts';
+import { fdLinkPath, lockStep } from './faults.ts';
 import { atomicWrite, readBytes, openPrivateDirectory } from './store.ts';
 import { dirname, basename, join } from 'node:path';
 
@@ -46,10 +46,15 @@ export function isAlive(h: LockHolder): boolean {
   return !(h.startMarker && marker && marker !== h.startMarker);
 }
 
-export function readLock(path: string): LockHolder | null | 'unreadable' {
+const atParent = (path: string, parentFd?: number) => parentFd === undefined ? path : join(fdLinkPath(parentFd), basename(path));
+
+export function readLock(path: string, parentFd?: number): LockHolder | null | 'unreadable' {
   let bytes: Buffer | undefined;
   const deadline=Date.now()+100;
-  for(;;){try{bytes=readBytes(path,16384);break;}catch(e){
+  for(;;){try{
+    const expected = parentFd === undefined ? undefined : join(readlinkSync(fdLinkPath(parentFd)), basename(path));
+    bytes=readBytes(atParent(path,parentFd),16384,expected);break;
+  }catch(e){
     // A legitimate link publication briefly has two names. Wait without reading;
     // Lock release/replacement can also invalidate an opened descriptor before verification.
     // Never read it; persistent unsafe names throw and cannot become dead-lock takeovers.
@@ -103,9 +108,9 @@ export function acquireLock(path: string, me: LockHolder): Acquired {
   }
 }
 
-export function releaseLock(path: string, me: LockHolder): void {
-  const current = readLock(path);
-  if (current && current !== 'unreadable' && sameProcess(current, me)) unlinkSync(path);
+export function releaseLock(path: string, me: LockHolder, parentFd?: number): void {
+  const current = readLock(path, parentFd);
+  if (current && current !== 'unreadable' && sameProcess(current, me)) unlinkSync(atParent(path, parentFd));
 }
 
 /** Thrown by `serialized` when the operation lock stays held by a live process past the timeout. */
@@ -122,16 +127,16 @@ const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuf
  * place), and a holder that died is taken over through `removeIfDead`. A live holder is waited
  * for, up to `timeoutMs`; after that SerializeTimeout is thrown and nothing is done.
  */
-export function serialized<T>(path: string, fn: () => T, opts: { timeoutMs?: number } = {}): T {
+export function serialized<T>(path: string, fn: () => T, opts: { timeoutMs?: number; parentFd?: number } = {}): T {
   const me = holderFor(process.pid, 'serialize', 0);
   const deadline = Date.now() + (opts.timeoutMs ?? 15_000);
   for (;;) {
-    if (tryLink(path, me)) break;
-    const current = readLock(path);
+    if (tryLink(path, me, opts.parentFd)) break;
+    const current = readLock(path, opts.parentFd);
     if (current === null) continue; // released between our link and our read: try again
     if (current === 'unreadable' || !isAlive(current)) {
       lockStep('stale-seen', path);
-      if (removeIfDead(path) !== 'busy') continue;
+      if (removeIfDead(path, opts.parentFd) !== 'busy') continue;
     } else lockStep('live-wait', path);
     if (Date.now() > deadline) throw new SerializeTimeout(`session busy: another call has held ${path} for too long`);
     sleepSync(5);
@@ -139,12 +144,12 @@ export function serialized<T>(path: string, fn: () => T, opts: { timeoutMs?: num
   try {
     return fn();
   } finally {
-    releaseLock(path, me);
+    releaseLock(path, me, opts.parentFd);
   }
 }
 
-function tryLink(path: string, me: LockHolder): boolean {
-  const parent=openPrivateDirectory(dirname(path))!;
+function tryLink(path: string, me: LockHolder, parentFd?: number): boolean {
+  const parent=parentFd ?? openPrivateDirectory(dirname(path))!;
   const target=join(`/proc/self/fd/${parent}`,basename(path));
   const candidate = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.new`;
   try {
@@ -166,7 +171,7 @@ function tryLink(path: string, me: LockHolder): boolean {
   } finally {
     unlinkSync(candidate);
   }
-  } finally {closeSync(parent);}
+  } finally {if(parentFd === undefined)closeSync(parent);}
 }
 
 /**
@@ -179,25 +184,25 @@ function tryLink(path: string, me: LockHolder): boolean {
  * Returns 'done' when the lock is gone or was found live (the caller re-checks), 'busy' when
  * another contender holds the break lock.
  */
-function removeIfDead(path: string): 'done' | 'busy' {
+function removeIfDead(path: string, parentFd?: number): 'done' | 'busy' {
   const breakPath = `${path}.break`;
   const me = holderFor(process.pid, 'lock-break', 0);
-  if (!tryLink(breakPath, me)) {
-    const breaker = readLock(breakPath);
-    if (breaker !== null && (breaker === 'unreadable' || !isAlive(breaker))) removeIfDead(breakPath);
+  if (!tryLink(breakPath, me, parentFd)) {
+    const breaker = readLock(breakPath, parentFd);
+    if (breaker !== null && (breaker === 'unreadable' || !isAlive(breaker))) removeIfDead(breakPath, parentFd);
     return 'busy';
   }
   try {
-    const current = readLock(path);
+    const current = readLock(path, parentFd);
     if (current === null || (current !== 'unreadable' && isAlive(current))) return 'done';
     lockStep('stale-removing', path);
     try {
-      unlinkSync(path);
+      unlinkSync(atParent(path, parentFd));
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
     }
     return 'done';
   } finally {
-    releaseLock(breakPath, me);
+    releaseLock(breakPath, me, parentFd);
   }
 }

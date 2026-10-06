@@ -54,7 +54,12 @@ export function resolveStateRoot(explicit?: string, environment: NodeJS.ProcessE
 
 /** `<basename>-<sha256(realpath)>`: readable, with collision-resistant project isolation. */
 export function projectKey(projectRoot: string): string {
-  const real = realpathSync(projectRoot);
+  return projectKeyForCanonicalPath(realpathSync(projectRoot));
+}
+
+/** A recorded canonical project identity remains usable after the project moves or disappears. */
+export function projectKeyForCanonicalPath(real: string): string {
+  if (!isAbsolute(real) || resolve(real) !== real) throw new Error('recorded project root must be an absolute canonical path');
   // Preserve every previously valid state-directory key (255-byte component).
   // Only longer, previously unusable names need a shorter readable prefix.
   const raw = basename(real).replace(/[^\w.-]/g, '_') || 'root';
@@ -486,14 +491,14 @@ export function atomicWrite(path: string, data: string, point: CrashPoint, mode 
   }
 }
 
-export function readBytes(path: string, maxBytes?: number): Buffer | undefined {
+export function readBytes(path: string, maxBytes?: number, expectedPath = resolve(path)): Buffer | undefined {
   let fd: number;
   try { fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK); }
   catch(e) {if((e as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw e;}
   try {
     const st=fstatSync(fd),real=openedPath(fd);
     if(st.nlink!==1)throw Object.assign(new Error('private state file is linked under multiple names; refusing payload'),{code:'CE_STATE_LINK_COUNT'});
-    if(real!==resolve(path))throw Object.assign(new Error('private state file path changed; refusing payload'),{code:'CE_STATE_PATH_CHANGED'});
+    if(real!==expectedPath)throw Object.assign(new Error('private state file path changed; refusing payload'),{code:'CE_STATE_PATH_CHANGED'});
     if (!st.isFile() || isCredential(real,st) || (process.getuid&&st.uid!==process.getuid())) throw new Error('private state file is not verified, unlinked and user-owned');
     if(maxBytes!==undefined){const bytes=boundedRead(fd,st.size,maxBytes);if(bytes==='too-large')throw Object.assign(new Error('private state payload exceeds size limit'),{code:'CE_SIZE_LIMIT'});return bytes;}
     return readFileSync(fd);
@@ -502,13 +507,16 @@ export function readBytes(path: string, maxBytes?: number): Buffer | undefined {
 
 /** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. */
 export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number } = {}): void {
-  serialized(`${path}.append.lock`, () => appendLogLocked(path, entry), opts);
+  const parent = openPrivateDirectory(dirname(resolve(path)));
+  if (parent === undefined) throw Object.assign(new Error('Event Log parent is unavailable'), { code: 'ENOENT' });
+  try { serialized(`${path}.append.lock`, () => appendLogLocked(path, entry, parent), { ...opts, parentFd: parent }); }
+  finally { closeSync(parent); }
 }
 
-function appendLogLocked(path: string, entry: Record<string, unknown>): void {
-  truncateTornTailLocked(path);
+function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd: number): void {
+  truncateTornTailLocked(path, parentFd);
   const line = Buffer.from(`${JSON.stringify({ ...entry, at: new Date().toISOString() })}\n`);
-  const fd = verifiedLogDescriptor(path, true);
+  const fd = verifiedLogDescriptor(path, true, false, parentFd);
   try {
     try {
       crashPoint('log-torn');
@@ -575,21 +583,26 @@ function validLogEntry(entry: unknown): entry is Record<string,unknown> {
 /** Cuts a torn (unterminated) final line off the Event Log. Returns the bytes removed. */
 export function truncateTornTail(path: string): number {
   if (!existsSync(path)) return 0;
-  return serialized(`${path}.append.lock`, () => truncateTornTailLocked(path));
+  const parent = openPrivateDirectory(dirname(resolve(path)));
+  if (parent === undefined) return 0;
+  try { return serialized(`${path}.append.lock`, () => truncateTornTailLocked(path, parent), { parentFd: parent }); }
+  finally { closeSync(parent); }
 }
 
-function verifiedLogDescriptor(path: string, append: boolean, readOnly=false): number {
-  const fd = openSync(path, (append ? constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT : readOnly ? constants.O_RDONLY : constants.O_RDWR) | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+function verifiedLogDescriptor(path: string, append: boolean, readOnly=false, parentFd?: number): number {
+  const target = parentFd === undefined ? path : join(fdLinkPath(parentFd), basename(path));
+  const expected = parentFd === undefined ? resolve(path) : join(openedPath(parentFd), basename(path));
+  const fd = openSync(target, (append ? constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT : readOnly ? constants.O_RDONLY : constants.O_RDWR) | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
   try {
     const st = fstatSync(fd);
-    if (!st.isFile() || st.nlink !== 1 || openedPath(fd) !== resolve(path) || (process.getuid && st.uid !== process.getuid())) throw new Error('Event Log is not a verified unlinked owned regular file');
+    if (!st.isFile() || st.nlink !== 1 || openedPath(fd) !== expected || (process.getuid && st.uid !== process.getuid())) throw new Error('Event Log is not a verified unlinked owned regular file');
     return fd;
   } catch (e) { closeSync(fd); throw e; }
 }
 
-function truncateTornTailLocked(path: string): number {
+function truncateTornTailLocked(path: string, parentFd?: number): number {
   let fd: number;
-  try { fd = verifiedLogDescriptor(path, false); }
+  try { fd = verifiedLogDescriptor(path, false, false, parentFd); }
   catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw e; }
   let size: number, keep = 0;
   try {

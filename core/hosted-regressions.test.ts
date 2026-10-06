@@ -44,7 +44,7 @@ test('a failed partial log append does not commit and cannot swallow the next su
 
 test('close logging failure releases the live session lock and closes the facade', () => {
   const f = fixture(), opened = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }); assert.equal(opened.status, 'open'); const s = opened.session, log = join(s.stateDir, 'events.jsonl'), native = fs.openSync;
-  fs.openSync = ((path: any, flags: any, ...args: any[]) => { if (path === log && (flags === 'a' || typeof flags === 'number' && !!(flags & fs.constants.O_APPEND))) throw Object.assign(new Error('synthetic storage full'), { code: 'ENOSPC' }); return (native as any)(path, flags, ...args); }) as typeof fs.openSync; syncBuiltinESMExports();
+  fs.openSync = ((path: any, flags: any, ...args: any[]) => { if (fs.realpathSync(dirname(String(path))) === dirname(log) && String(path).endsWith('/events.jsonl') && (flags === 'a' || typeof flags === 'number' && !!(flags & fs.constants.O_APPEND))) throw Object.assign(new Error('synthetic storage full'), { code: 'ENOSPC' }); return (native as any)(path, flags, ...args); }) as typeof fs.openSync; syncBuiltinESMExports();
   try { assert.throws(() => s.close(), /synthetic storage full/); }
   finally { fs.openSync = native; syncBuiltinESMExports(); }
   assert.equal(inspectSession({ ...f, sessionId: 'S1' }).lock, null); assert.throws(() => s.sync(), /closed/);
@@ -137,22 +137,23 @@ test('multipart read requires its first content digest and refuses a changed fil
 });
 
 test('same-process interleaved participation writes use unique exclusive temporaries', () => {
-  const f = fixture(), native = fs.writeFileSync; const paths: string[] = []; let inner = false;
+  const f = fixture(), nativeOpen = fs.openSync, nativeWrite = fs.writeSync;
+  const paths: string[] = [], temporaries = new Set<number>(); let inner = false;
   try {
-    fs.writeFileSync = ((path: any, data: any, options: any) => {
-      if (String(path).endsWith('.tmp')) {
-        paths.push(String(path)); assert.equal(options.flag, 'wx');
-        native(path, data, options);
-        if (!inner) { inner = true; setParticipation({ ...f, state: 'off' }); }
-        return;
-      }
-      return native(path, data, options);
-    }) as typeof fs.writeFileSync; syncBuiltinESMExports();
+    fs.openSync = ((path: any, flags: any, mode: any) => {
+      const fd = nativeOpen(path, flags, mode);
+      if (String(path).endsWith('.tmp')) { paths.push(String(path)); assert.equal(flags, 'wx'); temporaries.add(fd); }
+      return fd;
+    }) as typeof fs.openSync;
+    fs.writeSync = ((fd: number, ...args: any[]) => {
+      const written = (nativeWrite as any)(fd, ...args);
+      if (temporaries.has(fd) && !inner) { inner = true; setParticipation({ ...f, state: 'off' }); }
+      return written;
+    }) as typeof fs.writeSync; syncBuiltinESMExports();
     setParticipation({ ...f, state: 'on' });
     assert.equal(new Set(paths).size, 2); assert.equal(participation({ ...f, env: {} }).state, 'on');
-  } finally { fs.writeFileSync = native; syncBuiltinESMExports(); }
+  } finally { fs.openSync = nativeOpen; fs.writeSync = nativeWrite; syncBuiltinESMExports(); }
 });
-
 test('atomic publication completes repeated short writes without truncation', () => {
   const path = join(tempDir('short-write'), 'snapshot');
   const native = fs.writeSync; const expected = '€漢字'.repeat(40); let calls = 0;
