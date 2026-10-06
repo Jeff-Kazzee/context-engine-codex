@@ -54,6 +54,12 @@ function span(text: string, a: number, b: number): string | null {
   return b <= all.length ? all.slice(a - 1, b).join('\n') : null;
 }
 
+const validRange = (a: number, b: number) => Number.isSafeInteger(a) && Number.isSafeInteger(b) && a >= 1 && b >= a;
+
+interface RelocationBudget { candidates: number; work: number }
+// Per check: bound window hashes and their UTF-8/line work; exhausted searches are changed.
+const relocationBudget = (): RelocationBudget => ({ candidates: 4096, work: 1024 * 1024 });
+
 const lineRange = (a: number, b: number) => `L${a}${b === a ? '' : `-${b}`}`;
 
 /** A project-relative, '/'-separated path that stays inside the project, or null. */
@@ -78,6 +84,7 @@ export function cite(projectRoot: string, ref: string): string {
   const m = /^(.+?)(?:#L(\d+)(?:-(\d+))?)?$/.exec(ref)!;
   const rel = insideProject(projectRoot, m[1]!);
   if (!rel || !/^[\w./+-]+$/.test(rel)) throw new Error(`cannot cite ${m[1]}: not inside the project, or the path has characters other than letters, digits, '.', '_', '+', '-', '/'`);
+  if (m[2] !== undefined && !validRange(Number(m[2]), Number(m[3] ?? m[2]))) throw new Error('citation line range must use positive ordered safe integers');
   // Lexically inside is not enough: a symlink in the project can lead anywhere.
   const target = readConfined(projectRoot, rel);
   if ('refused' in target) throw new Error(`cannot cite ${rel}: ${REFUSED[target.refused]}`);
@@ -85,7 +92,7 @@ export function cite(projectRoot: string, ref: string): string {
   if (m[2] === undefined) return `⟦src:${rel}@${hash8(text)}⟧`;
   const a = Number(m[2]);
   const b = m[3] === undefined ? a : Number(m[3]);
-  const lines = a >= 1 && b >= a ? span(text, a, b) : null;
+  const lines = span(text, a, b);
   if (lines === null) throw new Error(`${rel} has no lines ${a}-${b}`);
   return `⟦src:${rel}#${lineRange(a, b)}@${hash8(lines)}⟧`;
 }
@@ -96,6 +103,7 @@ const MARKER = /⟦(?:src:([\w./+-]+)(?:#L(\d+)(?:-(\d+))?)?@([0-9a-f]{8})|commi
 export function checkRefs(projectRoot: string, text: string): StaleReport | undefined {
   const stale: StaleRef[] = [];
   const seen = new Set<string>();
+  const budget = relocationBudget();
   let inRepo: boolean | undefined;
   for (const m of text.matchAll(MARKER)) {
     const marker = m[0];
@@ -109,7 +117,8 @@ export function checkRefs(projectRoot: string, text: string): StaleReport | unde
     } else {
       const rel = insideProject(projectRoot, path!);
       if (rel === null) continue;
-      found = checkSource(projectRoot, rel, a === undefined ? null : [Number(a), Number(b ?? a)], hash!);
+      const lines: [number, number] | null = a === undefined ? null : [Number(a), Number(b ?? a)];
+      found = lines && !validRange(...lines) ? { reason: 'changed' } : checkSource(projectRoot, rel, lines, hash!, budget);
     }
     if (found) stale.push({ marker, ...found });
   }
@@ -117,7 +126,7 @@ export function checkRefs(projectRoot: string, text: string): StaleReport | unde
   return { count: stale.length, refs: stale.slice(0, MAX_STALE_LISTED) };
 }
 
-function checkSource(projectRoot: string, rel: string, lines: [number, number] | null, hash: string): Omit<StaleRef, 'marker'> | null {
+function checkSource(projectRoot: string, rel: string, lines: [number, number] | null, hash: string, budget: RelocationBudget): Omit<StaleRef, 'marker'> | null {
   let content: string;
   try {
     const target = readConfined(projectRoot, rel);
@@ -134,17 +143,22 @@ function checkSource(projectRoot: string, rel: string, lines: [number, number] |
   const [from, to] = lines;
   const target = span(content, from, to);
   if (target !== null && hash8(target) === hash) return null;
-  const at = relocate(content, to - from + 1, hash, from);
+  const at = relocate(content, to - from + 1, hash, from, budget);
   return at === null ? { reason: 'changed' } : { reason: 'moved', to: lineRange(at, at + to - from) };
 }
 
 /** First line of the window of `size` lines hashing to `hash` that is nearest `near`, or null. */
-function relocate(content: string, size: number, hash: string, near: number): number | null {
+function relocate(content: string, size: number, hash: string, near: number, budget: RelocationBudget): number | null {
   const all = content.split('\n');
+  if (size > all.length) return null;
+  let work = size;
+  for (let n = 0; n < size; n++) work += all[n]!.length * 3;
   let best: number | null = null;
   for (let i = 0; i + size <= all.length; i++) {
-    if (hash8(all.slice(i, i + size).join('\n')) !== hash) continue;
-    if (best === null || Math.abs(i + 1 - near) < Math.abs(best - near)) best = i + 1;
+    if (budget.candidates <= 0 || work > budget.work) return null;
+    budget.candidates--; budget.work -= work;
+    if (hash8(all.slice(i, i + size).join('\n')) === hash && (best === null || Math.abs(i + 1 - near) < Math.abs(best - near))) best = i + 1;
+    if (i + size < all.length) work += (all[i + size]!.length - all[i]!.length) * 3;
   }
   return best;
 }

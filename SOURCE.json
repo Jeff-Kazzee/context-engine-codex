@@ -25,17 +25,18 @@
     "core/recall.test.ts": "8618810feaf916d5c27aa12020d3772b55b4fc77b8296ad43f7cdf472e95ef80",
     "core/recall.ts": "6a09031ad0e91d8a7a661d156d367627b2ef0001c982e7877c1c382e0b2341c7",
     "core/recovery.test.ts": "5047b2ca9410c1d572c244155bd3e9d2f6948555c0402e10b5f48b1c53d360f3",
-    "core/refs.ts": "213ad1849c37eb4537c04c38076f27d90328ebd5eaeb99f797821fae47e122bb",
+    "core/refs.ts": "6b7ed6c971708265cfe043ac14dcba4fc51474411a04d429c961ce8cb7341611",
     "core/renewed-regressions.test.ts": "b89453eb730b247fa566e077472448e0f0c7397890a5fae38b62322e56d68ce0",
     "core/review-regressions.test.ts": "8c56a053a0353838ee481c388bf2dbf66f2ba7e6dd5ae8f19877e36bd46f988a",
     "core/session.test.ts": "0d6b4f70851c61072efb240a4887e092afbee83df1336f9765ae409356866c47",
-    "core/session.ts": "36b8d2ec87ca97f0dd5ca846c05bab417f64421dc109b596a65a3f1895a15be9",
+    "core/session.ts": "29d1d88f30175b5666ce69760e2c321e17f27358ed20f5995abe3ce262a09351",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "711e36033c06a6ef317bae1eee2949b9adc33bb52715eb59e7696b965a8eb84c",
+    "core/store.ts": "9100bdebe577c8ab945529c51f5fa24e63cfcdbbcaa09ff2f7ea1f40bdebd4dd",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
-    "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c"
+    "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c",
+    "core/wave7-regressions.test.ts": "2e34745824a068f27cb6af373397e80a5674e0c238d8b5ea3e4664ed9e42768f"
   },
   "importedPaths": [
     ".gitignore",
@@ -104,7 +105,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "fb1de2e451d4ab094bd0dab4dc05cc49ded0fe34",
+  "corePatchCommit": "5bbeba8ee93191572a7280624f4c6260214f3fb1",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -115,6 +116,7 @@
     "Coordinated review fixes: multipart payloads bounded at 16 MiB; fatal UTF-8 citations; private Working Context modes; descriptor-verified participation paths and directory creation; interrupted committed append recovery preserves stale edits in the Event Log. Setup validates private roots before mutation and preserves concurrent unmanaged rollback changes. Codex verifies cache-local opt-in before checkout imports and canonicalizes turn-loop project roots. Existing dependency lockfiles unchanged. Reset backstops share the multipart byte bound, including core-unavailable fallback.",
     "Coordinated review fixes: descriptor-verified Event Log append/truncation; confined Working Context directory creation; bounded 16 MiB citation reads; corrupt nearest participation records fail closed; revision directory fsync precedes HEAD publication. Setup confines ledger and backup paths to caller-derived policies, compares opaque rollback bytes exactly, and restores absent managed-only JSON files. Runtime corrections reset Claude tool-read state, repair Codex owned settings, refuse escaped TOML table keys, size the IPC response envelope and release refused injection threads. Offline evidence does not establish real power-loss or host installation behavior.",
     "Additional hosted-review corrections: verified private-state descriptors and revision checksums; streaming Event Log scans and bounded recall snippets, with only uncommitted replay candidates retained. Largest individual JSON entries can still consume memory. Snapshot creation and backup copies are confined and exclusive. Claude retains every failed close for retry, omits request/response payloads from per-step cost logs, and returns over-budget native summaries without replacement framing. Codex conservatively refuses escaped dotted TOML keys while preserving literal string/comment data and legacy AGENTS.md restoration. Synthetic offline evidence only; no credentials, captures or runner/model acceptance inferred.",
-    "Late hosted-review corrections: bounded descriptor lock reads with declared-field projection and transient publication protection; bounded frame-key repair and anchored private-state publication; structured runner-event replay and complete HEAD validation. Setup refuses recognized credential-bearing configuration before before/after and repair backup copies; conservative parsing has documented limits. Synthetic offline evidence only."
+    "Late hosted-review corrections: bounded descriptor lock reads with declared-field projection and transient publication protection; bounded frame-key repair and anchored private-state publication; structured runner-event replay and complete HEAD validation. Setup refuses recognized credential-bearing configuration before before/after and repair backup copies; conservative parsing has documented limits. Synthetic offline evidence only.",
+    "Wave7 repairs: supplied setup environment controls CE/XDG/HOME state and participation; managed ownership verified before writes; temporary and orphan revision cleanup anchored; stale citation ranges validated and relocation work bounded. Codex actual descendant subtree declarations refuse without config mutation or activation. Synthetic offline evidence only, no auth/model calls or installation pointer repair."
   ]
 }

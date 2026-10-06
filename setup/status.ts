@@ -75,7 +75,7 @@ function onPath(env: NodeJS.ProcessEnv): string | null {
 export async function statusText(ctx: SetupContext, projectRoot: string): Promise<{ lines: string[]; json: Record<string, unknown> }> {
   const rootFd = openPrivateDirectory(dirname(ctx.setupDir));
   if (rootFd !== undefined) closeSync(rootFd);
-  const p = participation({ projectRoot, env: ctx.env });
+  const p = participation({ projectRoot, stateDir: dirname(ctx.setupDir), env: ctx.env });
   const experiments = (ctx.env.CONTEXT_ENGINE_EXPERIMENTS ?? '')
     .split(',')
     .map((e) => e.trim())

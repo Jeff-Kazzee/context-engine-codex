@@ -22,6 +22,7 @@ import {
   readWorkingContextFile,
   assertWorkingContextDir,
   removeTemps,
+  removeDirectoryEntries,
   resolveStateRoot,
   sessionFrameKey,
   sha,
@@ -586,15 +587,10 @@ class Core {
     const removed = removeTemps([this.l.stateDir, this.l.revisions], [dirname(this.l.workingContext)]);
 
     const head = this.head();
-    if (existsSync(this.l.revisions)) {
-      for (const f of readdirSync(this.l.revisions)) {
-        const m = /^(\d+)\.md$/.exec(f);
-        if (m && Number(m[1]) > (head?.rev ?? 0)) {
-          unlinkSync(join(this.l.revisions, f));
-          removed.push(join(this.l.revisions, f));
-        }
-      }
-    }
+    removed.push(...removeDirectoryEntries(this.l.revisions, name => {
+      const m = /^(\d+)\.md$/.exec(name);
+      return !!m && Number(m[1]) > (head?.rev ?? 0);
+    }));
 
     // A runner append committed HEAD but died before rewriting the Working Context.
     let rematerialized = false;

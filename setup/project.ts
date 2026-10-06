@@ -61,11 +61,15 @@ function projectRules(root: string): Record<string, Rule> {
   return { [codexConfig(root)]: codexConfigRule(), [agentsMd(root)]: blockRule(MD_MARKERS) };
 }
 
-/** Whether a TOML text sets `developer_instructions` at the top level (before its first table). */
-function topLevelDeveloperInstructions(text: string): boolean {
+/** Inspect actual statement keys for conflicting instructions or the token_budget subtree. */
+function projectTomlSettings(text: string): { developerInstructions: boolean; tokenBudget: boolean } {
   // Track multiline values so array elements and string contents cannot be mistaken
   // for table declarations. Only statement starts can introduce a top-level key.
   let quote = '', multiline = false, depth = 0, inTable = false;
+  let table: string[] = [];
+  const found = { developerInstructions: false, tokenBudget: false };
+  const parts = (key: string): string[] => [...key.matchAll(/"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+/g)].map(([part]) => /^["']/.test(part) ? part.slice(1, -1) : part);
+  const tokenBudget = (key: string[]) => key[0] === 'features' && key[1] === 'token_budget';
   for (const line of text.split('\n')) {
     if (!quote && depth === 0) {
       const escapedKey = (key: string) => [...key.matchAll(/"(?:[^"\\]|\\.)*"/g)].some(([part]) => part.includes('\\'));
@@ -73,6 +77,8 @@ function topLevelDeveloperInstructions(text: string): boolean {
         const header = /^\s*\[\[?((?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\]"'])+)\]\]?\s*(?:#.*)?$/.exec(line);
         if (!header) throw new SetupError('Codex: unsupported project TOML table syntax; configuration was left unchanged');
         if (escapedKey(header[1]!)) throw new SetupError('Codex: escaped quoted project TOML table keys are unsupported; configuration was left unchanged');
+        table = parts(header[1]!);
+        if (tokenBudget(table)) found.tokenBudget = true;
         inTable = true;
       }
       // Inspect only key tokens before '=', including dotted segments. Values,
@@ -81,7 +87,11 @@ function topLevelDeveloperInstructions(text: string): boolean {
       if (assignment && escapedKey(assignment[1]!)) {
         throw new SetupError('Codex: escaped quoted project TOML keys are unsupported; configuration was left unchanged');
       }
-      if (!inTable && /^\s*(?:developer_instructions|"developer_instructions"|'developer_instructions')\s*=/.test(line)) return true;
+      if (assignment) {
+        const key = parts(assignment[1]!);
+        if (!inTable && key.length === 1 && key[0] === 'developer_instructions') found.developerInstructions = true;
+        if (tokenBudget([...table, ...key]) || (!inTable && key[0] === 'token_budget')) found.tokenBudget = true;
+      }
     }
     for (let i = 0; i < line.length; i++) {
       const ch = line[i]!;
@@ -108,7 +118,7 @@ function topLevelDeveloperInstructions(text: string): boolean {
     if (depth < 0 || (quote && !multiline)) throw new SetupError('Codex: malformed project TOML; configuration was left unchanged');
   }
   if (quote || depth !== 0) throw new SetupError('Codex: incomplete project TOML; configuration was left unchanged');
-  return false;
+  return found;
 }
 
 /** Whether Context Engine's Codex settings are in the project's .codex/config.toml. */
@@ -148,11 +158,12 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string): string[] {
   }
   if (old && codexProjectSettings(root,experimentOn('stale-refs')?['stale-refs']:[])) return ['Codex: project settings already in place'];
   const unmanaged = existing === null ? null : codexConfigRule().strip(existing, old?.files[0]?.before ? safeRead(old.files[0].before)!.toString('utf8') : null);
-  // Check actual table/key declarations, not comments or values containing the name.
-  if (unmanaged !== null && /^\s*(?:\[\s*(?:features|"features"|'features')\s*\.\s*(?:token_budget|"token_budget"|'token_budget')\s*\]|(?:(?:features|"features"|'features')\s*\.\s*)?(?:token_budget|"token_budget"|'token_budget')\s*=)/m.test(unmanaged)) {
+  // Parse statement keys with their table prefix; strings/comments are never declarations.
+  const settings = unmanaged === null ? null : projectTomlSettings(unmanaged);
+  if (settings?.tokenBudget) {
     throw new SetupError(`Codex: ${config} already configures token_budget; Context Engine guidance was not activated`);
   }
-  if (unmanaged !== null && topLevelDeveloperInstructions(unmanaged)) {
+  if (settings?.developerInstructions) {
     throw new SetupError(`Codex: ${config} already sets developer_instructions; Context Engine guidance was not activated`);
   }
   const snap = takeSnapshot({
@@ -221,11 +232,11 @@ export function enableProject(ctx: SetupContext, projectRoot: string): string[] 
   try { setupLines = installedLedger(ctx, 'codex') ? writeCodexProjectFiles(ctx, projectRoot) : ['Codex: adapter not installed (`context-engine-codex install --codex`).']; }
   catch (e) {
     // An inherited/previous opt-in must not leave hooks active after setup fails.
-    setParticipation({ projectRoot, state: 'off' });
+    setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'off' });
     throw e;
   }
-  setParticipation({ projectRoot, state: 'on' });
-  const rec = findRecord({ projectRoot })!;
+  setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'on' });
+  const rec = findRecord({ projectRoot, stateDir: dirname(ctx.setupDir) })!;
   const lines = [`Context Engine enabled for ${rec.project} and its subdirectories (new sessions).`];
   if (killSwitchOn(ctx.env)) lines.push('Note: the kill switch CONTEXT_ENGINE=off is set in this shell, so the adapters stay off where it is set.');
   lines.push(...setupLines);
@@ -233,8 +244,8 @@ export function enableProject(ctx: SetupContext, projectRoot: string): string[] 
 }
 
 export function disableProject(ctx: SetupContext, projectRoot: string): string[] {
-  setParticipation({ projectRoot, state: 'off' });
-  const p = participation({ projectRoot, env: {} });
+  setParticipation({ projectRoot, stateDir: dirname(ctx.setupDir), state: 'off' });
+  const p = participation({ projectRoot, stateDir: dirname(ctx.setupDir), env: {} });
   const lines = [`Context Engine disabled for ${p.project} and its subdirectories (new sessions; a running Codex session stops at its next hook).`];
   const ptr = pointer(ctx, p.project!);
   if (existsSync(ptr)) lines.push(...revertCodexProjectFiles(ctx,ptr));

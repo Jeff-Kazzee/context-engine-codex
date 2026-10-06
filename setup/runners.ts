@@ -24,7 +24,7 @@ export function setupContext(env: NodeJS.ProcessEnv = process.env): SetupContext
   return {
     env,
     checkout: fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, ''),
-    setupDir: join(resolveStateRoot(), 'setup'),
+    setupDir: join(resolveStateRoot(undefined, env), 'setup'),
     claudeHome: env.CLAUDE_CONFIG_DIR || join(home, '.claude'),
     codexHome: env.CODEX_HOME || join(home, '.codex'),
   };

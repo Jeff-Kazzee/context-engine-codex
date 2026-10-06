@@ -38,18 +38,18 @@ export function assertSessionId(id: string): void {
 }
 
 /** State root: explicit option, then $CONTEXT_ENGINE_STATE_DIR, then $XDG_STATE_HOME/context-engine. */
-export function resolveStateRoot(explicit?: string): string {
+export function resolveStateRoot(explicit?: string, environment: NodeJS.ProcessEnv = process.env): string {
   if (explicit) {
     if (!isAbsolute(explicit)) throw new Error('Context Engine state root must be absolute');
     return explicit;
   }
-  const env = process.env.CONTEXT_ENGINE_STATE_DIR;
+  const env = environment.CONTEXT_ENGINE_STATE_DIR;
   if (env) {
     if (!isAbsolute(env)) throw new Error('CONTEXT_ENGINE_STATE_DIR must be absolute');
     return env;
   }
-  const xdg = process.env.XDG_STATE_HOME;
-  return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.local', 'state'), 'context-engine');
+  const xdg = environment.XDG_STATE_HOME;
+  return join(xdg && isAbsolute(xdg) ? xdg : join(environment.HOME || homedir(), '.local', 'state'), 'context-engine');
 }
 
 /** `<basename>-<sha256(realpath)>`: readable, with collision-resistant project isolation. */
@@ -119,7 +119,7 @@ export function openPrivateDirectory(path: string, opts: { create?: boolean; tig
 }
 
 /** Create missing components through verified descriptors, never through linked ancestors. */
-function createConfinedDirectory(path: string): void {
+function createConfinedDirectory(path: string, ownedFrom?: string): void {
   const target = resolve(path);
   const missing: string[] = [];
   let existing = target;
@@ -134,7 +134,12 @@ function createConfinedDirectory(path: string): void {
   catch (e) { throw new Error('linked or unavailable private-directory ancestor; refusing creation', { cause: e }); }
   try {
     if (openedPath(fd) !== existing) throw new Error('linked private-directory ancestor; refusing creation');
+    const checkOwner = () => {
+      if (ownedFrom && isWithin(ownedFrom, existing) && process.getuid && fstatSync(fd).uid !== process.getuid()) throw new Error('managed directory is not owned by this user; refusing creation');
+    };
+    checkOwner();
     for (const name of missing) {
+      checkOwner();
       if (openedPath(fd) !== existing) throw new Error('private-directory ancestor changed; refusing creation');
       const anchored = join(`/proc/self/fd/${fd}`, name);
       try { mkdirSync(anchored, { mode: 0o700 }); }
@@ -143,6 +148,7 @@ function createConfinedDirectory(path: string): void {
       closeSync(fd); fd = next;
       existing = join(existing, name);
       if (openedPath(fd) !== existing) throw new Error('private-directory child changed; refusing creation');
+      checkOwner();
     }
   } finally { closeSync(fd); }
 }
@@ -166,22 +172,26 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
     closeSync(openPrivateDirectory(d, { create: true })!);
   }
   assertWorkingContextDir(l.workingContext);
-  createConfinedDirectory(dirname(l.workingContext));
+  createConfinedDirectory(dirname(l.workingContext), dirname(dirname(l.workingContext)));
   assertWorkingContextDir(l.workingContext);
   // Self-ignoring directory: keeps Working Contexts out of git without editing the project's .gitignore.
-  const ignore = join(dirname(dirname(l.workingContext)), '.gitignore');
+  const managed = dirname(dirname(l.workingContext));
+  const parent = openPrivateDirectory(managed, { tighten: true })!;
+  try {
+  const ignore = join(fdLinkPath(parent), '.gitignore');
   try {
     // O_EXCL does not follow even a dangling symlink at this name.
     writeFileSync(ignore, '# Context Engine Working Contexts are never committed.\n*\n', { flag: 'wx' });
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-    const existing = readWorkingContextFile(ignore);
+    const existing = readWorkingContextFile(join(managed, '.gitignore'));
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
     if (rules.at(-1) !== '*') throw new Error('.context-engine/.gitignore must end with a blanket * rule; fix it before enabling Context Engine');
   }
   for (const dir of [dirname(dirname(l.workingContext)), dirname(l.workingContext)]) closeSync(openPrivateDirectory(dir, { tighten: true })!);
   privateWorkingContextFile(l.workingContext);
+  } finally { closeSync(parent); }
 }
 
 const FRAME_KEY = /^[0-9a-f]{32}$/;
@@ -608,19 +618,30 @@ function truncateTornTailLocked(path: string): number {
  * Working Context (`sharedDirs`) the agent keeps files of its own, so only names of the core's write
  * protocol (CORE_TEMP) are removed. Returns the removed paths.
  */
-export function removeTemps(privateDirs: string[], sharedDirs: string[]): string[] {
+/** Remove selected regular entries through one verified parent, even if its name is replaced. */
+export function removeDirectoryEntries(dir: string, own: (name: string) => boolean): string[] {
+  const parent = openPrivateDirectory(dir);
+  if (parent === undefined) return [];
   const removed: string[] = [];
-  const dirs = [...privateDirs.map((d) => ({ d, own: (f: string) => f.endsWith('.tmp') })), ...sharedDirs.map((d) => ({ d, own: (f: string) => CORE_TEMP.test(f) }))];
-  for (const { d, own } of dirs) {
-    if (!existsSync(d)) continue;
-    for (const f of readdirSync(d)) {
-      if (!own(f)) continue;
-      const p = join(d, f);
-      if (lstatSync(p).isFile()) {
-        unlinkSync(p);
-        removed.push(p);
-      }
+  try {
+    const anchored = fdLinkPath(parent);
+    for (const name of readdirSync(anchored)) {
+      if (!own(name)) continue;
+      const target = join(anchored, name);
+      try {
+        const st = lstatSync(target);
+        if (!st.isFile() || (process.getuid && st.uid !== process.getuid())) continue;
+        unlinkSync(target);
+        removed.push(join(dir, name));
+      } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
     }
-  }
-  return removed;
+    return removed;
+  } finally { closeSync(parent); }
+}
+
+export function removeTemps(privateDirs: string[], sharedDirs: string[]): string[] {
+  return [
+    ...privateDirs.flatMap(dir => removeDirectoryEntries(dir, name => name.endsWith('.tmp'))),
+    ...sharedDirs.flatMap(dir => removeDirectoryEntries(dir, name => CORE_TEMP.test(name))),
+  ];
 }
