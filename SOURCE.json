@@ -30,7 +30,7 @@
     "core/renewed-regressions.test.ts": "b89453eb730b247fa566e077472448e0f0c7397890a5fae38b62322e56d68ce0",
     "core/review-regressions.test.ts": "8c56a053a0353838ee481c388bf2dbf66f2ba7e6dd5ae8f19877e36bd46f988a",
     "core/session.test.ts": "bc85f05e49c0ddc84dc38596bbafe400c9dd0060c1396df2c9177ae1d286d236",
-    "core/session.ts": "41d54bdb16e0b0f5797157af8c7190c2d04efc95976bb7939bdbcf3450641ae3",
+    "core/session.ts": "558ceb372101a444bcf36a715e3a1ecf68e0128c34bcbbaca5e7d77268f2d6d2",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
     "core/store.ts": "f832d453eff3e33e7bb33067925a144288f213721e47f7fb8c05f12fd1836ae5",
@@ -109,7 +109,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "e6f40de2ae3b546b91ec1fce55957d8157d49ac0",
+  "corePatchCommit": "a30ff15e25aabc23f1625dd9eb791c0b2117855e",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
