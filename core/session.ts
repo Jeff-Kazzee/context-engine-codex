@@ -240,6 +240,8 @@ export function inspectSession(opts: { projectRoot: string; sessionId: string; s
 
 // HEAD contains fixed-size hashes and counters; reject corrupt metadata before allocation.
 function readHead(path: string): Buffer | undefined { return readBytes(path, 4096); }
+/** Independent corruption bound; legitimate runner appends can exceed the model edit limit. */
+export const SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024;
 
 function decodeHead(raw: Buffer | undefined): Head | null {
   if(!raw)return null;
@@ -248,7 +250,7 @@ function decodeHead(raw: Buffer | undefined): Head | null {
   return head;
 }
 function readSnapshot(l: Layout,head: Head): string {
-  const bytes=readBytes(join(l.revisions,`${head.rev}.md`));
+  const bytes=readBytes(join(l.revisions,`${head.rev}.md`), SNAPSHOT_MAX_BYTES);
   if(!bytes)throw new Error(`revision ${head.rev} snapshot is missing`);
   const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);
   if(sha(text)!==head.sha)throw new Error(`revision ${head.rev} snapshot checksum mismatch`);
@@ -261,6 +263,8 @@ class Core {
   private unapplied: Pending[] = [];
   private pendingReceipt: Receipt | undefined;
   private closed = false;
+  private unloggedCommit: { head: Head; text: string } | undefined;
+  private recoveryReceiptHead: {rev:number;sha:string} | undefined;
   private readonly l: Layout;
   private readonly hardLimit: number;
   private readonly me: LockHolder;
@@ -287,12 +291,24 @@ class Core {
       sync: () => this.guard(() => this.finishResult(this.sync())),
       record: (events) => this.guard(() => this.finishResult(this.record(events))),
       nativeCompaction: (events) => this.guard(() => this.finishResult(this.record(events, true))),
-      close: () => this.guard(() => this.close()),
+      close: () => this.guard(() => this.close(), false),
     };
   }
 
-  private guard<T>(fn: () => T): T {
+  private guard<T>(fn: () => T, repair = true): T {
     if (this.closed) throw new Error('session is closed');
+    if (repair && this.unloggedCommit) {
+      const { head, text } = this.unloggedCommit;
+      const published = this.head();
+      if (!published || published.rev !== head.rev || published.sha !== head.sha) this.unloggedCommit = undefined;
+      else {
+      const receipt = this.repairRevisionLog(head);
+      if (receipt) this.retainReceipt({revision:head.rev,chars:text.length,workingContextText:text,turns:[],receipt});
+      if (this.budgetTokens !== null) this.memory = budgetMemory(readLog(this.l.events), this.budgetTokens);
+      if (!head.materialized) this.materialize(head, text);
+      this.unloggedCommit = undefined;
+      }
+    }
     const result = fn();
     if (!this.closed) this.saveRecoveryCheckpoint();
     return result;
@@ -311,7 +327,7 @@ class Core {
 
   private loadRecoveryCheckpoint(): boolean {
     try {
-      const raw = readBytes(join(this.l.stateDir, 'recovery.json'));
+      const raw = readBytes(join(this.l.stateDir, 'recovery.json'), 4096);
       if (!raw || raw.length > 4096) return false;
       const c = JSON.parse(raw.toString('utf8'));
       const { checksum, ...payload } = c;
@@ -320,7 +336,7 @@ class Core {
       const log = this.checkpointLog();
       const m = c.memory;
       const nonnegative = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-      if (c.version !== 1 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readHead(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
+      if (c.version !== 2 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readHead(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
       this.lastSeq = c.lastSeq;
       this.memory = { announced: m.announced, growth: [...m.growth], lastTokens: m.lastTokens, loggedBudget: m.loggedBudget };
       return true;
@@ -331,8 +347,8 @@ class Core {
     try {
       const head = this.head();
       const log = this.checkpointLog();
-      if (!log || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
-      const payload = { version: 1, log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
+      if (!log || this.unloggedCommit || this.recoveryReceiptHead || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
+      const payload = { version: 2, log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
       atomicWrite(join(this.l.stateDir, 'recovery.json'), JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) }), 'recovery-checkpoint-tmp');
     } catch { /* A cache failure never changes the session result; next open rebuilds. */ }
   }
@@ -369,6 +385,10 @@ class Core {
   }
 
   private deliver(r: SyncResult): SyncResult {
+    if (this.recoveryReceiptHead) {
+      appendLog(this.l.events, {type:'revision-receipt-delivered',...this.recoveryReceiptHead});
+      this.recoveryReceiptHead = undefined;
+    }
     this.pendingReceipt = undefined;
     return r;
   }
@@ -417,6 +437,7 @@ class Core {
   // ---- writing ----
 
   private commit(text: string, kind: CommitKind, through?: number): Head {
+    if (Buffer.byteLength(text, 'utf8') > SNAPSHOT_MAX_BYTES) throw new Error('revision snapshot exceeds the 64 MiB publication limit');
     const prev = this.head();
     if (prev?.rev === Number.MAX_SAFE_INTEGER) throw new Error('revision counter exhausted; start a new session');
     const rev = (prev?.rev ?? 0) + 1;
@@ -424,8 +445,10 @@ class Core {
     crashPoint('before-head');
     const materialize = kind === 'runner-append' || kind === 'native-compaction';
     const head: Head = { rev, sha: sha(text), parent: prev?.sha ?? null, through: through ?? prev?.through ?? 0, materialized: !materialize, kind };
+    this.unloggedCommit = { head, text };
     atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
     appendLog(this.l.events, { type: 'revision', rev, kind, sha: head.sha, chars: text.length });
+    this.unloggedCommit = undefined;
     if (this.budgetTokens !== null) remember(this.memory, kind, text.length, this.budgetTokens);
     if (materialize) this.materialize(head, text);
     return head;
@@ -457,7 +480,7 @@ class Core {
   sync(): SyncResult {
     const head = this.head();
     // Runner appends may legitimately exceed the edit limit; recognize that existing snapshot.
-    const bound = Math.max(this.hardLimit * 4, head ? statSync(join(this.l.revisions, `${head.rev}.md`)).size : 0);
+    const bound = Math.min(SNAPSHOT_MAX_BYTES, Math.max(this.hardLimit * 4, head ? statSync(join(this.l.revisions, `${head.rev}.md`)).size : 0));
     const read = readWorkingContextFile(this.l.workingContext, bound);
     const bytes = typeof read === 'string' ? undefined : read;
     // The file is the committed revision itself: nothing was edited, so nothing can be rejected
@@ -592,10 +615,40 @@ class Core {
 
   // ---- recovery: the same code paths as normal operation ----
 
+  /** HEAD is already committed: repair missing accounting before checkpoint/budget recovery. */
+  private repairRevisionLog(head: Head | null): Receipt | undefined {
+    let logged = false, recovered = false, acknowledged = false, committed: string | undefined;
+    const snapshot = () => committed ??= this.snapshot(head!.rev);
+    // Scan even without HEAD so cross-record corruption is refused before materialization.
+    for (const entry of readLog(this.l.events)) {
+      if (head && entry.type === 'revision' && entry.rev === head.rev && entry.sha === head.sha) {
+        if (head.kind && (entry.kind !== head.kind || entry.chars !== snapshot().length)) throw new Error('committed revision accounting metadata conflicts with HEAD; refusing recovery');
+        logged = true;
+        recovered ||= entry.recovered === true;
+      }
+      if (head && entry.type === 'revision-receipt-delivered' && entry.rev === head.rev && entry.sha === head.sha) acknowledged = true;
+    }
+    if (!head || !head.kind || (logged && (!recovered || acknowledged))) return;
+    const text = snapshot();
+    let previousChars = 0;
+    if (head.rev > 1) {
+      const previous = readBytes(join(this.l.revisions, `${head.rev - 1}.md`), SNAPSHOT_MAX_BYTES);
+      if (!previous) throw new Error('previous committed snapshot missing during revision-log recovery');
+      const decoded = new TextDecoder('utf-8', {fatal:true,ignoreBOM:true}).decode(previous);
+      if (sha(decoded) !== head.parent) throw new Error('previous committed snapshot checksum mismatch during revision-log recovery');
+      previousChars = decoded.length;
+    }
+    if (!logged) appendLog(this.l.events, {type:'revision',rev:head.rev,kind:head.kind,sha:head.sha,chars:text.length,recovered:true});
+    this.recoveryReceiptHead = {rev:head.rev,sha:head.sha};
+    return {kind:'committed',revision:head.rev,previousChars,chars:text.length,approxTokens:approxTokens(text.length),text:`Context Engine: recovered the Event Log accounting for already committed revision ${head.rev}. ${sizeReadout(text.length)}`};
+  }
+
   recover(tornBytes: number): void {
+    const head = this.head();
+    const cached = this.loadRecoveryCheckpoint();
+    const repairedReceipt = cached ? undefined : this.repairRevisionLog(head);
     const removed = removeTemps([this.l.stateDir, this.l.revisions], [dirname(this.l.workingContext)]);
 
-    const head = this.head();
     removed.push(...removeDirectoryEntries(this.l.revisions, name => {
       const m = /^(\d+)\.md$/.exec(name);
       return !!m && Number(m[1]) > (head?.rev ?? 0);
@@ -603,9 +656,9 @@ class Core {
 
     // A runner append committed HEAD but died before rewriting the Working Context.
     let rematerialized = false;
-    let interruptedReceipt: Receipt | undefined;
+    let interruptedReceipt: Receipt | undefined = repairedReceipt;
     if (head && !head.materialized) {
-      const read = readWorkingContextFile(this.l.workingContext, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size));
+      const read = readWorkingContextFile(this.l.workingContext, Math.min(SNAPSHOT_MAX_BYTES, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size)));
       const current = read && typeof read !== 'string' ? decode(read) : null;
       const currentSha = current === null ? null : sha(current);
       if (currentSha !== head.sha) {
@@ -622,7 +675,6 @@ class Core {
       }
     }
 
-    const cached = this.loadRecoveryCheckpoint();
     const log = cached ? [] : readLog(this.l.events);
     if (!cached && this.budgetTokens !== null) this.memory = budgetMemory(readLog(this.l.events), this.budgetTokens);
     const logged: Pending[] = [];

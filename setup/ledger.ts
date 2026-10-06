@@ -14,7 +14,7 @@
 //    as the edit left them, newly created explicit namespaces are removed; other owned created directories
 //    are removed only when empty, and unowned directories remain.
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { closeSync, constants, fsyncSync, openSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
@@ -64,20 +64,27 @@ export interface FileReport {
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 const readText = (path: string): string | null => safeRead(path)?.toString('utf8') ?? null;
 
-/** Every path under each root, the root included, without following symlinks. */
+/** Complete bounded ownership inventory; refuse rather than accept a partial walk. */
 function list(roots: string[]): string[] {
   const out: string[] = [];
-  const walk = (p: string) => {
+  let pathBytes = 0;
+  const walk = (p: string, depth: number) => {
+    if (depth > 64 || out.length >= 4096 || (pathBytes += Buffer.byteLength(p)) > 1024 * 1024) throw new Error('setup inventory exceeds entry, depth or path-byte limit; ownership was not accepted');
     let st;
     try {
       st = lstatSync(p);
-    } catch {
-      return;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
     }
     out.push(st.isDirectory() ? `${p}/` : p);
-    if (st.isDirectory()) for (const name of readdirSync(p)) walk(join(p, name));
+    if (st.isDirectory()) {
+      const directory = opendirSync(p);
+      try { for (let entry; (entry = directory.readSync()) !== null;) walk(join(p, entry.name), depth + 1); }
+      finally { directory.closeSync(); }
+    }
   };
-  for (const r of roots) walk(r);
+  for (const r of roots) walk(r, 0);
   return out;
 }
 
@@ -229,6 +236,8 @@ export function assess(l: Ledger, rules: Record<string, Rule>): Record<string, b
 
 /** Puts files back (see the module comment) and cleans up what the edit created. */
 export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record<string, boolean>): FileReport[] {
+  // Recheck all current config before any restoration/reverse edit creates a copy.
+  const current = new Map(l.files.map(f => { const bytes = safeRead(f.path); assertBackupSafe(f.path, bytes); return [f.path, bytes] as const; }));
   const reports: FileReport[] = [];
   for (const f of l.files) {
     const before = f.before ? safeRead(f.before) : null;
@@ -243,7 +252,7 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
       }
       continue;
     }
-    const now = readText(f.path);
+    const now = current.get(f.path)?.toString('utf8') ?? null;
     if (now === null) {
       reports.push({ path: f.path, outcome: 'missing', backup: f.before ?? undefined });
       continue;

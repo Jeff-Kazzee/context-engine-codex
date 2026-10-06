@@ -49,7 +49,10 @@ export function resolveStateRoot(explicit?: string, environment: NodeJS.ProcessE
     return env;
   }
   const xdg = environment.XDG_STATE_HOME;
-  return join(xdg && isAbsolute(xdg) ? xdg : join(environment.HOME || homedir(), '.local', 'state'), 'context-engine');
+  if (xdg && isAbsolute(xdg)) return join(xdg, 'context-engine');
+  const home = environment.HOME || homedir();
+  if (!isAbsolute(home)) throw new Error('HOME must be absolute when deriving the Context Engine state root');
+  return join(home, '.local', 'state', 'context-engine');
 }
 
 /** `<basename>-<sha256(realpath)>`: readable, with collision-resistant project isolation. */
@@ -187,14 +190,25 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
   const ignore = join(fdLinkPath(parent), '.gitignore');
   try {
     // O_EXCL does not follow even a dangling symlink at this name.
-    writeFileSync(ignore, '# Context Engine Working Contexts are never committed.\n*\n', { flag: 'wx' });
+    const file = openSync(ignore, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try { writeFileSync(file, '# Context Engine Working Contexts are never committed.\n*\n'); fsyncSync(file); }
+    finally { closeSync(file); }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     const existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
     if (rules.at(-1) !== '*') throw new Error('.context-engine/.gitignore must end with a blanket * rule; fix it before enabling Context Engine');
+    const file = openSync(ignore, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const st = fstatSync(file);
+      if (!st.isFile() || st.nlink !== 1 || openedPath(file) !== join(managed, '.gitignore')) throw new Error('managed ignore file changed before flush');
+      const current = boundedRead(file, st.size, 65536);
+      if (current === 'too-large' || !current.equals(existing)) throw new Error('managed ignore file changed before flush');
+      fsyncSync(file);
+    } finally { closeSync(file); }
   }
+  fsyncSync(parent);
   for (const dir of [dirname(dirname(l.workingContext)), dirname(l.workingContext)]) closeSync(openPrivateDirectory(dir, { tighten: true })!);
   privateWorkingContextFile(l.workingContext);
   } finally { closeSync(parent); }
@@ -544,7 +558,7 @@ export function* readLog(path: string): Generator<Record<string,unknown>> {
   catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
   try {
     const chunk=Buffer.alloc(65536);
-    let parts: Buffer[]=[],bytes=0;
+    let parts: Buffer[]=[],bytes=0,lastSequence=0;
     for(;;){
       const n=readSync(fd,chunk,0,chunk.length,null);if(!n)break;
       const batch=chunk.subarray(0,n);
@@ -557,7 +571,14 @@ export function* readLog(path: string): Generator<Record<string,unknown>> {
         const line=Buffer.concat(parts,bytes).toString('utf8');parts=[];bytes=0;start=end+1;
         let entry: Record<string,unknown>;
         try {entry=JSON.parse(line) as Record<string,unknown>;}catch{continue;}
-        if(validLogEntry(entry))yield entry;
+        if(validLogEntry(entry)) {
+          if (entry.type === 'runner-events') {
+            const events = entry.events as Array<{seq:number}>;
+            if (events.length && events[0]!.seq <= lastSequence) throw new Error('Event Log runner-event sequence regressed across records; refusing recovery');
+            if (events.length) lastSequence = events.at(-1)!.seq;
+          }
+          yield entry;
+        }
       }
     }
     // Preserve the existing protocol: incomplete final lines are not records.

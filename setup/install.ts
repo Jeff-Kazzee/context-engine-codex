@@ -113,7 +113,9 @@ export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
     if (!r.ok) lines.push(`\`${spec.bin} ${cmd.join(' ')}\` failed (${r.output.slice(0, 200)}); Context Engine's entries were removed directly instead`);
   }
   lines.push(...describe(revert(ledger, spec.rules, assess(ledger, spec.rules))));
-  unlinkSync(pointerPath(ctx, spec.id));
+  const parent = openPrivateDirectory(ctx.setupDir)!;
+  try { unlinkSync(join(`/proc/self/fd/${parent}`, `${spec.id}.json`)); fsyncSync(parent); }
+  finally { closeSync(parent); }
   lines.push(`Backups kept: ${ledger.dir}`);
   if (ledger.retainedPaths?.length) lines.push(`Unowned new paths retained: ${ledger.retainedPaths.length}`);
   return lines;

@@ -128,7 +128,13 @@ If a new session has no committed revision and its Working Context is linked, in
 
 Evidence lookups and cold recovery scan the Event Log incrementally. Recall keeps bounded snippets; recovery retains only uncommitted replay candidates. A single very large JSON entry can still consume memory. Citation source reads refuse files above 16 MiB. Optional stale-reference relocation validates line ranges and limits each check to 4,096 candidate windows and 1 MiB of estimated hashing/line work. An exhausted search reports changed rather than claiming a nearest moved span. These limits do not delete stored history.
 
-## Troubleshooting and limits
+## Troubleshooting
+
+Revision snapshots are limited to 64 MiB of UTF-8 bytes on publication and before reading; runner appends within that ceiling may exceed the model-edit limit. Corrupt or oversized private state fails closed. Event sequences must increase across the complete log; preserve refused state for repair rather than deleting its history. Recovery restores missing accounting for an already committed revision and reports that committed result.
+
+Setup inventory streams directory entries and refuses more than 4,096 paths, depth beyond 64, or more than 1 MiB of accumulated path names. It never treats a partial inventory as ownership evidence. Configuration containing recognized credential keys is also refused before rollback or uninstall rewrites it; remove those settings through the runner’s normal configuration process before retrying. Preserve the reported backups on a partial failure.
+
+The managed ignore file and install-pointer deletion are flushed before success. Synthetic fault tests check flush ordering and refusal; they do not prove behavior under real power loss. A relative fallback `HOME` is refused; an explicit absolute state root or absolute `XDG_STATE_HOME` remains valid. and limits
 
 | Symptom | Action |
 |---|---|

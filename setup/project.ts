@@ -82,6 +82,7 @@ function projectTomlSettings(text: string): { developerInstructions: boolean; to
         if (!header) throw new SetupError('Codex: unsupported project TOML table syntax; configuration was left unchanged');
         if (escapedKey(header[1]!)) throw new SetupError('Codex: escaped quoted project TOML table keys are unsupported; configuration was left unchanged');
         table = parts(header[1]!);
+        if (/^\s*\[\[/.test(line) && table[0] === 'features' && table.length === 1) found.tokenBudget = true;
         if (tokenBudget(table)) found.tokenBudget = true;
         inTable = true;
       }
@@ -94,7 +95,7 @@ function projectTomlSettings(text: string): { developerInstructions: boolean; to
       if (assignment) {
         const key = parts(assignment[1]!);
         if (!inTable && key.length === 1 && key[0] === 'developer_instructions') found.developerInstructions = true;
-        if (tokenBudget([...table, ...key]) || (!inTable && key[0] === 'token_budget')) found.tokenBudget = true;
+        if (tokenBudget([...table, ...key]) || (!inTable && key[0] === 'token_budget') || (!inTable && key.length === 1 && key[0] === 'features')) found.tokenBudget = true;
       }
     }
     for (let i = 0; i < line.length; i++) {
