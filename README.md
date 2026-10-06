@@ -153,3 +153,5 @@ Setup operations for this runner are serialized by a private setup lock. If setu
 Staged hooks use the absolute Node executable that ran setup. Keep that executable and the checkout path available; reinstall if either moves. If `install --trust-hooks` fails after installation, the install is retained and reported: approve the hooks through `/hooks`, then check `context-engine-codex status`; do not repeat install over its existing record.
 
 The staged Codex hook verifies the nearest private local participation record before importing its checkout. Never-enabled, explicitly disabled and kill-switch sessions remain native even when the checkout is missing. Only a verified enabled record activates the reset gate: a broken checkout then denies `new_context`. Unverifiable or corrupt activation state logs an error where applicable and stands aside; repair state permissions or reinstall before treating Context Engine as active.
+
+See the [release statechart and validation map](docs/context-engine-statechart.md) ([PDF](docs/Context-Engine-Statechart.pdf)) for the published e5da333/644d02b baseline. It does not validate later local fixes.
