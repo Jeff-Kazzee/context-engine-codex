@@ -118,7 +118,7 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'PreCompact') {
     // Backstop for resets the gate above never sees (the token limit, a manual /compact). Codex
     // only honours `continue:false`; it aborts the turn, and the user sees the stop reason. So it
-    // stops only a reset onto an unusable file (restored, or nothing to restore) and does no size
+    // stops a reset onto an unusable or unreadable file and does no token-budget
     // check: this reset is Codex's own, made because the window is already full, so refusing it for
     // size would abort the user's turn and free nothing; and `context-engine read` pages a file of
     // up to 16 MiB; larger payloads must be offloaded (budget reminders warn earlier).
@@ -151,7 +151,7 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
       return `${notReset} The Context Engine core could not be reached, so your Working Context ${path} could not be checked, and resetting onto a file that cannot be delivered would lose the conversation. Carry on in this window for now.`;
     }
     // Codex's own reset (PreCompact) happens because the window is full; stopping it aborts the
-    // user's turn. Without the core it is stopped only when the file is plainly missing or empty.
+    // user's turn. Without the core, require a safely readable file within the multipart byte bound.
     let text = '';
     try {
       const bytes = lib.readWorkingContextFile(join(input.cwd, path), lib.READ_MAX_FILE_BYTES);
