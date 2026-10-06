@@ -30,14 +30,14 @@
     "core/renewed-regressions.test.ts": "b89453eb730b247fa566e077472448e0f0c7397890a5fae38b62322e56d68ce0",
     "core/review-regressions.test.ts": "8c56a053a0353838ee481c388bf2dbf66f2ba7e6dd5ae8f19877e36bd46f988a",
     "core/session.test.ts": "bc85f05e49c0ddc84dc38596bbafe400c9dd0060c1396df2c9177ae1d286d236",
-    "core/session.ts": "c5a68a245055dce2ec051d2d99b7a88ae13a1b6f5d5f46616a9f3e354111b756",
+    "core/session.ts": "41d54bdb16e0b0f5797157af8c7190c2d04efc95976bb7939bdbcf3450641ae3",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
     "core/store.ts": "f832d453eff3e33e7bb33067925a144288f213721e47f7fb8c05f12fd1836ae5",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
     "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c",
-    "core/wave10-regressions.test.ts": "fd9d93e008c6f1a5808b318cdfd040f58bb365ff95b562ad8b6d36e0cbdc3490",
+    "core/wave10-regressions.test.ts": "1896f2c79303f46eebb39cbfa72de725c52a0da8548d62ed26ca2060f78e5125",
     "core/wave7-regressions.test.ts": "871cd6a907cc3cec553f545afebeb70666a0febe1909437cb9956b6d376256f3",
     "core/wave8-regressions.test.ts": "67f5a78fc0a2e4c2f995d9e735262b5c421d93067c7e1598785055545b7ccdac",
     "core/wave9-regressions.test.ts": "0b67ef7c47ee2b736d643eddc424d6b4ee615718e3d9548fb878714fc1e8f21a"
@@ -109,7 +109,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "c5aa0f8adf77488c6e387667805ba54232908bea",
+  "corePatchCommit": "e6f40de2ae3b546b91ec1fce55957d8157d49ac0",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",

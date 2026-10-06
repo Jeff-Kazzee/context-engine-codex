@@ -29,6 +29,36 @@ test('wave10: a failed append retains the restoration receipt until a successful
   assert.equal(s.sync().receipt, undefined); s.close();
 });
 
+test('wave10: stale reference receipt cannot erase an undelivered restoration', () => {
+  const f = fixture(), source = join(f.projectRoot, 'source.txt'); fs.writeFileSync(source, 'ORIGINAL_SOURCE');
+  const marker = cite(f.projectRoot, 'source.txt');
+  const r = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000, experiments: ['stale-refs'] }); assert.equal(r.status, 'open');
+  const s = r.session; s.record([{ role: 'user', text: marker }]); fs.writeFileSync(s.workingContextPath, '');
+  const native = fs.writeSync;
+  fs.writeSync = ((fd: number, data: any, ...args: any[]) => {
+    if (fs.readlinkSync(`/proc/self/fd/${fd}`).endsWith('/events.jsonl') && String(data).includes('runner-events')) throw new Error('synthetic append failure');
+    return (native as any)(fd, data, ...args);
+  }) as typeof fs.writeSync; syncBuiltinESMExports();
+  try { assert.throws(() => s.record([{ role: 'user', text: 'FAILED' }]), /synthetic append failure/); }
+  finally { fs.writeSync = native; syncBuiltinESMExports(); }
+  fs.writeFileSync(source, 'CHANGED_SOURCE'); const result = s.sync();
+  assert.equal(result.receipt?.kind, 'restored'); assert.equal(result.receipt?.stale?.count, 1);
+  assert.match(result.receipt!.text, /was restored/); assert.match(result.receipt!.text, /stale/); s.close();
+});
+
+test('wave10: direct sync retains restoration after budget accounting fails', () => {
+  const f = fixture(), r = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000, budgetTokens: 1000 }); assert.equal(r.status, 'open');
+  const s = r.session; s.record([{ role: 'user', text: 'x'.repeat(3500) }]); fs.writeFileSync(s.workingContextPath, '');
+  const native = fs.writeSync;
+  fs.writeSync = ((fd: number, data: any, ...args: any[]) => {
+    if (fs.readlinkSync(`/proc/self/fd/${fd}`).endsWith('/events.jsonl') && String(data).includes('budget-reminder')) throw new Error('synthetic accounting failure');
+    return (native as any)(fd, data, ...args);
+  }) as typeof fs.writeSync; syncBuiltinESMExports();
+  try { assert.throws(() => s.sync(), /synthetic accounting failure/); }
+  finally { fs.writeSync = native; syncBuiltinESMExports(); }
+  assert.equal(s.sync().receipt?.kind, 'restored'); s.close();
+});
+
 test('wave10: exhausted event sequence refuses before appending or invalidating HEAD', () => {
   const { f, s } = opened(), state = s.stateDir; s.close();
   appendLog(join(state, 'events.jsonl'), { type: 'runner-events', events: [{ seq: Number.MAX_SAFE_INTEGER, event: { role: 'user', text: 'LAST_VALID_SEQUENCE' } }] });

@@ -281,9 +281,9 @@ class Core {
       workingContextPath: this.l.workingContext,
       stateDir: this.l.stateDir,
       frameKey: sessionFrameKey(this.l.stateDir),
-      sync: () => this.guard(() => this.deliver(this.checkBudget(this.checkRefs(this.sync())))),
-      record: (events) => this.guard(() => this.deliver(this.checkBudget(this.checkRefs(this.record(events))))),
-      nativeCompaction: (events) => this.guard(() => this.deliver(this.checkBudget(this.checkRefs(this.record(events, true))))),
+      sync: () => this.guard(() => this.finishResult(this.sync())),
+      record: (events) => this.guard(() => this.finishResult(this.record(events))),
+      nativeCompaction: (events) => this.guard(() => this.finishResult(this.record(events, true))),
       close: () => this.guard(() => this.close()),
     };
   }
@@ -354,11 +354,24 @@ class Core {
     return r;
   }
 
-  /** Attaches a receipt produced during recovery to the next result, so it is never lost. */
+  /** Latch notices before fallible postchecks; retain recovery notices beside newer receipts. */
+  private retainReceipt(r: SyncResult): SyncResult {
+    const pending = this.pendingReceipt;
+    if (!r.receipt) r.receipt = pending;
+    else if (pending && r.receipt !== pending && !r.receipt.text.includes(pending.text)) {
+      r.receipt = { ...pending, text: `${pending.text}\n${r.receipt.text}`, ...(r.receipt.stale ? { stale: r.receipt.stale } : {}) };
+    }
+    this.pendingReceipt = r.receipt;
+    return r;
+  }
+
   private deliver(r: SyncResult): SyncResult {
-    if (!r.receipt && this.pendingReceipt) r.receipt = this.pendingReceipt;
     this.pendingReceipt = undefined;
     return r;
+  }
+
+  private finishResult(r: SyncResult): SyncResult {
+    return this.deliver(this.checkBudget(this.checkRefs(this.retainReceipt(r))));
   }
 
   /** Stale-refs experiment: adds stale cited references in the committed revision to the receipt. */
@@ -493,8 +506,7 @@ class Core {
     }
     if (replace && events.every((e) => stringField(e, 'text')!.trim() === '')) throw new Error('nativeCompaction() needs the runner result: at least one non-empty event');
     const retained = events.map(retainRunnerEvent);
-    const synced = this.sync();
-    if (synced.receipt) this.pendingReceipt = synced.receipt;
+    const synced = this.retainReceipt(this.sync());
     if (events.length === 0) return synced;
     this.lastSeq = Math.max(this.lastSeq, this.head()?.through ?? 0);
     if (retained.length > Number.MAX_SAFE_INTEGER - this.lastSeq) throw new Error('Event Log sequence exhausted; start a new session');
