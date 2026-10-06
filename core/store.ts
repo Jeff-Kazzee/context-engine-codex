@@ -38,9 +38,15 @@ export function assertSessionId(id: string): void {
 
 /** State root: explicit option, then $CONTEXT_ENGINE_STATE_DIR, then $XDG_STATE_HOME/context-engine. */
 export function resolveStateRoot(explicit?: string): string {
-  if (explicit) return explicit;
+  if (explicit) {
+    if (!isAbsolute(explicit)) throw new Error('Context Engine state root must be absolute');
+    return explicit;
+  }
   const env = process.env.CONTEXT_ENGINE_STATE_DIR;
-  if (env) return env;
+  if (env) {
+    if (!isAbsolute(env)) throw new Error('CONTEXT_ENGINE_STATE_DIR must be absolute');
+    return env;
+  }
   const xdg = process.env.XDG_STATE_HOME;
   return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.local', 'state'), 'context-engine');
 }
@@ -197,6 +203,12 @@ function credentialTargets(): { files: string[]; dirs: string[] } {
  * identity comes from the open descriptor, so nothing can be swapped between this check and the read.
  */
 function isCredential(real: string, st: { dev: number; ino: number }): boolean {
+  // Project-local secret stores are just as sensitive as their home equivalents.
+  // Classify by known location before reading any bytes, never inspect secrets.
+  const parts = real.split(sep), name = parts.at(-1) ?? '';
+  if (parts.some(p => ['.ssh', '.gnupg', '.aws'].includes(p))) return true;
+  if (name === '.env' || name.startsWith('.env.') || ['.npmrc', '.pypirc', '.netrc', '.git-credentials', 'id_rsa', 'id_ed25519'].includes(name) || /\.(?:pem|p12|pfx|key)$/.test(name)) return true;
+  if ((parts.at(-2) === '.codex' && name === 'auth.json') || (parts.at(-2) === '.claude' && name === '.credentials.json') || (parts.at(-2) === '.docker' && name === 'config.json') || (parts.at(-2) === 'gh' && name === 'hosts.yml')) return true;
   const { files, dirs } = credentialTargets();
   for (const f of files) {
     if (realOrResolved(f) === real) return true;

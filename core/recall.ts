@@ -229,6 +229,8 @@ export interface ReadResult {
   text: string;
   part: number;
   parts: number;
+  /** Content cursor required on later parts; a changed file refuses the read. */
+  sha: string;
   accounting?: 'skipped';
 }
 
@@ -260,7 +262,7 @@ function splitParts(text: string, max: number): string[] {
  * are the file byte for byte. Read-only; logged as a `read` entry for eval accounting (skipped
  * where the Event Log is not writable). Throws on a missing file or a part out of range.
  */
-export function readWorkingContext(opts: SessionRef & { part?: number }): ReadResult {
+export function readWorkingContext(opts: SessionRef & { part?: number; sha?: string }): ReadResult {
   const log = eventLog(opts);
   const rel = workingContextRelPath(opts.sessionId);
   const path = join(realpathSync(opts.projectRoot), rel);
@@ -271,10 +273,13 @@ export function readWorkingContext(opts: SessionRef & { part?: number }): ReadRe
   const parts = splitParts(whole, READ_MAX_BYTES - HEADER_BYTES);
   const part = opts.part ?? 1;
   if (!Number.isSafeInteger(part) || part < 1 || part > parts.length) throw new Error(`no part ${part} of ${parts.length}: the Working Context has ${parts.length} part(s)`);
+  const sum = createHash('sha256').update(bytes).digest('hex');
+  if (part > 1 && opts.sha === undefined) throw new Error('later Working Context parts require the --sha digest from part 1; restart with part 1');
+  if (opts.sha !== undefined && !/^[a-f0-9]{64}$/.test(opts.sha)) throw new Error('invalid --sha content digest');
+  if (opts.sha !== undefined && opts.sha !== sum) throw new Error('Working Context changed; restart with part 1 rather than combining different revisions');
   const size = `~${formatInt(approxTokens(whole.length))} tokens in all`;
-  const next = part < parts.length ? `Read every part; next: context-engine read --session ${opts.sessionId} --part ${part + 1}` : 'This is the last part.';
+  const next = part < parts.length ? `Read every part; next: context-engine read --session ${opts.sessionId} --part ${part + 1} --sha ${sum}` : 'This is the last part.';
   const header = `[Context Engine: Working Context ${rel}, part ${part} of ${parts.length} (${size}). ${next}]`;
-  const sum = createHash('sha256').update(whole).digest('hex').slice(0, 16);
   const accounted = account(log, { type: 'read', part, parts: parts.length, sha: sum, chars: whole.length });
-  return { text: `${header}\n${parts[part - 1]}`, part, parts: parts.length, ...(accounted.accounting ? { accounting: accounted.accounting } : {}) };
+  return { text: `${header}\n${parts[part - 1]}`, part, parts: parts.length, sha: sum, ...(accounted.accounting ? { accounting: accounted.accounting } : {}) };
 }

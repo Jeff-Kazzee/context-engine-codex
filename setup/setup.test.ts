@@ -73,7 +73,7 @@ test('Codex: install, trust the hooks, uninstall: CODEX_HOME is byte-identical a
   assert.match(config, /\[plugins\."context-engine@context-engine"\]/);
   assert.ok(config.startsWith(CODEX_CONFIG));
   // The installed hook commands call this checkout's CLI.
-  const hooks = readFileSync(join(w.codexHome, 'plugins', 'cache', 'context-engine', 'context-engine', '0.1.2', 'hooks', 'hooks.json'), 'utf8');
+  const hooks = readFileSync(join(w.codexHome, 'plugins', 'cache', 'context-engine', 'context-engine', '0.1.3', 'hooks', 'hooks.json'), 'utf8');
   assert.match(hooks, /CONTEXT_ENGINE_CLI='[^']*\/core\/cli\.ts' node \\"\$PLUGIN_ROOT\/hooks\/codex-hook\.ts\\"/);
   assert.match(inst.stdout, /\/hooks/, 'tells the user the hooks need trust');
   trustAll(w);

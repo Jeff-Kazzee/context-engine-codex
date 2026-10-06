@@ -9,7 +9,8 @@
 //
 // Records live in the state root (never in the project): participation/<project key>.json.
 import { dirname, join } from 'node:path';
-import { mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { projectKey, readBytes, resolveStateRoot } from './store.ts';
 
 export const KILL_SWITCH_ENV = 'CONTEXT_ENGINE';
@@ -80,7 +81,11 @@ export function participation(ref: ParticipationRef & { env?: NodeJS.ProcessEnv 
 export function setParticipation(ref: ParticipationRef & { state: 'on' | 'off' }): void {
   const path = recordPath(resolveStateRoot(ref.stateDir), realpathSync(ref.projectRoot));
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = join(dirname(path), `.participation-${process.pid}.tmp`);
-  writeFileSync(tmp, `${JSON.stringify({ projectRoot: realpathSync(ref.projectRoot), state: ref.state, at: new Date().toISOString() })}\n`, { mode: 0o600 });
-  renameSync(tmp, path);
+  const tmp = join(dirname(path), `.participation-${process.pid}-${randomBytes(16).toString('hex')}.tmp`);
+  let created = false;
+  try {
+    writeFileSync(tmp, `${JSON.stringify({ projectRoot: realpathSync(ref.projectRoot), state: ref.state, at: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
+    created = true;
+    renameSync(tmp, path);
+  } finally { if (created) try { unlinkSync(tmp); } catch {} }
 }

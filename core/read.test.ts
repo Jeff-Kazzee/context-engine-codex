@@ -50,25 +50,26 @@ test('a large Working Context reads back whole, in parts that each fit the cap a
   assert.ok(first.parts >= 4, `parts: ${first.parts}`);
   let joined = '';
   for (let p = 1; p <= first.parts; p++) {
-    const r = readWorkingContext({ ...f, sessionId: 'S1', part: p });
+    const r = readWorkingContext({ ...f, sessionId: 'S1', part: p, sha: first.sha });
     assert.ok(bytes(`${r.text}\n`) <= READ_MAX_BYTES, `part ${p}: ${bytes(r.text)} bytes`);
-    if (p < r.parts) assert.match(r.text.split('\n')[0]!, new RegExp(`part ${p} of ${r.parts} .*Read every part; next: context-engine read --session S1 --part ${p + 1}\\]$`));
+    if (p < r.parts) assert.match(r.text.split('\n')[0]!, new RegExp(`part ${p} of ${r.parts} .*Read every part; next: context-engine read --session S1 --part ${p + 1} --sha ${first.sha}\\]$`));
     else assert.match(r.text.split('\n')[0]!, /This is the last part\.\]$/);
     joined += body(r.text);
   }
   assert.equal(joined, text, 'the parts put together are the file, byte for byte');
   // Parts break between lines.
-  for (let p = 1; p < first.parts; p++) assert.ok(body(readWorkingContext({ ...f, sessionId: 'S1', part: p }).text).endsWith('\n'));
+  for (let p = 1; p < first.parts; p++) assert.ok(body(readWorkingContext({ ...f, sessionId: 'S1', part: p, sha: first.sha }).text).endsWith('\n'));
 });
 
 test('a single line longer than a part is split without breaking a UTF-8 character', () => {
   const text = `[[CTX_TURN 1 role=tool]]\n${'€'.repeat(30_000)}\n`;
   const f = withText(text);
-  const n = readWorkingContext({ ...f, sessionId: 'S1' }).parts;
+  const first = readWorkingContext({ ...f, sessionId: 'S1' });
+  const n = first.parts;
   assert.ok(n >= 3);
   let joined = '';
   for (let p = 1; p <= n; p++) {
-    const r = readWorkingContext({ ...f, sessionId: 'S1', part: p });
+    const r = readWorkingContext({ ...f, sessionId: 'S1', part: p, sha: first.sha });
     assert.ok(bytes(`${r.text}\n`) <= READ_MAX_BYTES);
     assert.doesNotMatch(r.text, /�/);
     joined += body(r.text);

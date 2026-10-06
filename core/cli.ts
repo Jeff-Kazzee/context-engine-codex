@@ -65,11 +65,13 @@ Session commands (for adapters; one JSON object on stdout):
   show     show --session <id> <event-id>
            One event (e.g. e12, r1) from this session's Event Log, at most
            ${SHOW_MAX_BYTES} bytes; "truncated":true means the text was cut. Takes no lock.
-  read     read --session <id> [--part <n>]
+  read     read --session <id> [--part <n> --sha <digest>]
            Print part n (default 1) of this session's Working Context file
            as plain text, behind a header line naming the part, the total
            and the next command. Each output is at most ${READ_MAX_BYTES} bytes, under
            Codex's tool-output cap, and the parts put together are the file.
+           For later parts, copy the printed next command including --sha.
+           A changed file refuses continuation: restart with part 1.
            Like recall: no --project, no lock; logged for eval accounting.
   cite     Experiment (stale-refs): print a marker citing <path>[#L<from>[-<to>]]
            or commit:<rev>, e.g. ⟦src:core/cli.ts#L10-20@1a2b3c4d⟧. Needs no
@@ -152,6 +154,7 @@ function main(argv: string[]): number {
       'owner-pid': { type: 'string' },
       budget: { type: 'string' },
       part: { type: 'string' },
+      sha: { type: 'string' },
       'if-enabled': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -182,7 +185,7 @@ function main(argv: string[]): number {
     const own = process.env[TEST_PROJECT_ENV] || sessionProjectFrom(process.cwd(), sessionId);
     if (command === 'read') {
       // Plain text for the agent, not JSON: escaping would make every part larger and harder to read.
-      process.stdout.write(readWorkingContext({ projectRoot: own, sessionId, part: values.part ? positiveInt(values.part, '--part') : 1 }).text);
+      process.stdout.write(readWorkingContext({ projectRoot: own, sessionId, part: values.part ? positiveInt(values.part, '--part') : 1, sha: values.sha }).text);
       return 0;
     }
     if (command === 'recall') return print({ ok: true, ...recall({ projectRoot: own, sessionId, query: rest.join(' ') }) });
