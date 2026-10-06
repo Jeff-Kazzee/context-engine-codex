@@ -20,7 +20,7 @@ export interface World {
   project: string;
   env: Record<string, string>;
   /** Runs `context-engine <args>` with the world's env. */
-  ce(args: string[], opts?: { cwd?: string; env?: Record<string, string> }): { status: number | null; stdout: string; stderr: string };
+  ce(args: string[], opts?: { cwd?: string; env?: Record<string, string>; input?: string }): { status: number | null; stdout: string; stderr: string };
 }
 
 export function world(): World {
@@ -54,6 +54,7 @@ export function world(): World {
       const r = spawnSync(process.execPath, [CLI, ...args], {
         cwd: opts.cwd ?? project,
         encoding: 'utf8',
+        input: opts.input,
         env: { ...process.env, ...env, ...opts.env },
       });
       return { status: r.status, stdout: r.stdout, stderr: r.stderr };

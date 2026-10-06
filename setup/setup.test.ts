@@ -3,18 +3,19 @@
 // real `claude plugin` / `codex plugin` commands (setup/testing/). The real binaries are checked
 // on demand by regression/setup/run.ts.
 import { test as nodeTest } from 'node:test';
-const applicable = /^(Codex:|--trust-hooks|enable |a project file|an enable made|uninstall --codex|status: when Codex)/;
-const test: typeof nodeTest = ((name: string, ...args: unknown[]) => applicable.test(name) ? (nodeTest as Function)(name, ...args) : nodeTest(name, { skip: 'Other runtime: tested in the sibling distribution' }, () => {})) as typeof nodeTest;
+const test = nodeTest;
+// Only explicitly marked sibling-runtime cases skip; new/shared tests execute by default.
+const otherRuntimeTest: typeof nodeTest = ((name: string) => nodeTest(name, {skip: 'Claude-only inherited case: covered in its runtime distribution'}, () => {})) as typeof nodeTest;
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { tempDir } from '../core/testing.ts';
-import { tree, world } from './testing/world.ts';
+import { FAKE_CODEX, tree, world } from './testing/world.ts';
 
 const SETTINGS = '{"theme": "dark",\n  "env": {"FOO": "1"}}\n';
 
-test('Claude Code: install adds both plugins; uninstall leaves the config dir byte-identical', () => {
+otherRuntimeTest('Claude Code: install adds both plugins; uninstall leaves the config dir byte-identical', () => {
   const w = world();
   writeFileSync(join(w.claudeHome, 'settings.json'), SETTINGS);
   const before = tree(w.claudeHome);
@@ -38,7 +39,7 @@ test('Claude Code: install adds both plugins; uninstall leaves the config dir by
   assert.match(un.stdout, /restored/i);
 });
 
-test('Claude Code: a settings change made after install is kept; only Context Engine entries are removed, and that is reported', () => {
+otherRuntimeTest('Claude Code: a settings change made after install is kept; only Context Engine entries are removed, and that is reported', () => {
   const w = world();
   writeFileSync(join(w.claudeHome, 'settings.json'), SETTINGS);
   assert.equal(w.ce(['install', '--claude']).status, 0);
@@ -98,7 +99,7 @@ test('Codex: a config change made after install is kept; our tables and hook tru
   assert.match(un.stdout, /config\.toml: changed by something else since install/);
 });
 
-test('a failing runner command rolls the install back to the exact prior bytes', () => {
+otherRuntimeTest('a failing runner command rolls the install back to the exact prior bytes', () => {
   const w = world();
   writeFileSync(join(w.claudeHome, 'settings.json'), SETTINGS);
   const before = tree(w.claudeHome);
@@ -109,7 +110,7 @@ test('a failing runner command rolls the install back to the exact prior bytes',
   assert.equal(w.ce(['install', '--claude']).status, 0, 'and a later install works');
 });
 
-test('install refuses to run twice; uninstall of something not installed says so', () => {
+otherRuntimeTest('install refuses to run twice; uninstall of something not installed says so', () => {
   const w = world();
   assert.equal(w.ce(['install', '--claude']).status, 0);
   const again = w.ce(['install', '--claude']);
@@ -245,51 +246,21 @@ function assertQualified(text: string): void {
 const trustProject = (w: ReturnType<typeof world>) =>
   writeFileSync(join(w.codexHome, 'config.toml'), `${readFileSync(join(w.codexHome, 'config.toml'), 'utf8')}\n[projects.${JSON.stringify(w.project)}]\ntrust_level = "trusted"\n`);
 
-test('status: exact Delivery Mode per runner, enabled or not, kill switch and experiments', () => {
-  const w = world();
-  const none = w.ce(['status']).stdout;
-  assert.match(none, /Claude Code: not installed/);
-  assert.match(none, /Codex: not installed/);
-  assert.match(none, /not enabled \(the pilot is opt-in/);
-  assert.match(none, /Kill switch: off/);
-  assert.match(none, /Experiments: none/);
-
-  assert.equal(w.ce(['install']).status, 0);
-  const inert = w.ce(['status']).stdout;
-  assert.match(inert, /^Codex: installed .*\n  Delivery Mode: inactive here \(not enabled for this project/m);
-  assert.equal(w.ce(['enable']).status, 0);
-  const s = w.ce(['status']).stdout;
-  assert.match(s, /^Claude Code: installed .*\n  Delivery Mode: Full Replacement per user turn; Injection within a turn\n  active here$/m);
-  assert.match(s, /^Codex: installed .*\n  Delivery Mode: inactive here \(Codex does not trust .*\)\n  Per-user-turn path: `context-engine-codex-turns` \(Full Replacement per user turn\); a separate headless command, not started for you$/m);
-  assert.match(s, /context-engine-codex-turns\): Delivery Mode: Full Replacement per user turn$/m);
-  assertQualified(s);
-
-  trustProject(w);
-  assert.match(w.ce(['status']).stdout, /Delivery Mode: inactive here \(only 0\/5 plugin hooks are trusted/);
-  trustAll(w);
-  const trusted = w.ce(['status']).stdout;
-  assert.match(trusted, new RegExp(`^  Delivery Mode: ${reEscape(RESET_LABEL)}, through features\\.token_budget \\(an UnderDevelopment Codex flag\\)\\n  active here \\(Context Engine guidance seen in \`codex debug prompt-input\`\\)$`, 'm'));
-  // A reset Codex makes on its own (token limit) is the runner compacting, and is labelled so.
-  assert.match(trusted, /^  Resets from Codex's own token limit: Compaction-only \(Codex token-limit reset; Working Context read back by the agent\)$/m);
-  assert.equal(JSON.parse(w.ce(['status', '--json']).stdout).codex.tokenLimitResetMode, 'Compaction-only (Codex token-limit reset; Working Context read back by the agent)');
-  assertQualified(trusted);
-
-  const v2 = w.ce(['status'], { env: { CONTEXT_ENGINE_CLAUDE_MODE: 'per-step', CONTEXT_ENGINE_EXPERIMENTS: 'stale-refs' } }).stdout;
-  assert.match(v2, /Delivery Mode: EXPERIMENTAL: Full Replacement per model step \(gaps: hand-written tool schemas, reduced system prompt, no streaming, blind cost ledger\)/);
-  assert.match(v2, /Experiments: stale-refs/);
-  assertQualified(v2);
-
-  const killed = w.ce(['status'], { env: { CONTEXT_ENGINE: 'off' } }).stdout;
-  assert.match(killed, /Kill switch: ON \(CONTEXT_ENGINE=off\)/);
-  assert.match(killed, /inert here: turned off by the kill switch/);
-  assert.match(killed, /Codex: installed .*\n  Delivery Mode: inactive here \(turned off by the kill switch/);
-
-  assert.equal(w.ce(['disable']).status, 0);
-  assert.match(w.ce(['status']).stdout, /: disabled \(/);
-  const json = JSON.parse(w.ce(['status', '--json']).stdout);
-  assert.equal(json.claude.mode, 'Full Replacement per user turn; Injection within a turn');
-  assert.equal(json.codex.mode, 'inactive');
-  assert.equal(json.participation.active, false);
+test('status: codex delivery modes, participation, kill switch and experiments', () => {
+  const w=world();
+  const status=(env: Record<string,string>={}) => {const r=w.ce(['status','--json'],{env});assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
+  const none=status();assert.equal(none.codex,null);assert.equal(none.participation.active,false);assert.equal(none.participation.state,'default');assert.equal(none.killSwitch,false);assert.deepEqual(none.experiments,[]);
+  assert.equal(w.ce(['install']).status,0);assert.equal(status().codex.active,false);
+  assert.equal(w.ce(['enable']).status,0);
+  assert.equal(status().codex.active,false);assert.match(status().codex.problem,/does not trust/);
+  trustProject(w);assert.match(status().codex.problem,/only 0\/5 plugin hooks/);trustAll(w);
+  const active=status();assert.equal(active.codex.active,true);assert.equal(active.codex.mode,RESET_LABEL);assert.equal(active.codex.guidanceSeen,true);assert.equal(active.codex.hookTrustEntries,5);
+  assert.equal(active.codex.tokenLimitResetMode,'Compaction-only (Codex token-limit reset; Working Context read back by the agent)');
+  assert.equal(active.turnLoop.mode,'Full Replacement per user turn');
+  const experiments=status({CONTEXT_ENGINE_EXPERIMENTS:'stale-refs,unknown'});assert.deepEqual(experiments.experiments,['stale-refs']);assert.equal(experiments.codex.mode,RESET_LABEL);
+  const missing=status({FAKE_CODEX_TOKEN_BUDGET_GONE:'1'});assert.equal(missing.codex.active,false);assert.equal(missing.codex.mode,'inactive');assert.equal(missing.codex.guidanceSeen,false);
+  const killed=status({CONTEXT_ENGINE:'off'});assert.equal(killed.killSwitch,true);assert.equal(killed.codex.active,false);assert.equal(killed.participation.active,false);
+  assert.equal(w.ce(['disable']).status,0);const disabled=status();assert.equal(disabled.participation.state,'off');assert.equal(disabled.codex.mode,'inactive');
 });
 
 test('status: when Codex no longer applies the token_budget settings, Codex is reported inactive with the reason, never as the reset mode', () => {
@@ -306,7 +277,38 @@ test('status: when Codex no longer applies the token_budget settings, Codex is r
   assert.deepEqual([json.codex.mode, json.codex.active, json.codex.guidanceSeen], ['inactive', false, false]);
 });
 
-const realCodex = spawnSync('codex', ['--version'], { encoding: 'utf8' }).status === 0;
+/** Stand-in request rendering exercises shipped config; it is not real host delivery evidence. */
+function fakePromptInput(w: ReturnType<typeof world>, cwd: string): unknown {
+  const r=spawnSync(process.execPath,[FAKE_CODEX,'debug','prompt-input','SYNTHETIC_PROMPT'],{cwd,encoding:'utf8',env:{...process.env,...w.env},timeout:5000});
+  assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);
+}
+
+test('offline default-off isolation: installing codex does not activate an unselected project', () => {
+  const w=world(), enabled=tempDir('enabled-project');
+  writeFileSync(join(w.codexHome,'config.toml'),`# synthetic trust\n[projects.${JSON.stringify(w.project)}]\ntrust_level = "trusted"\n[projects.${JSON.stringify(enabled)}]\ntrust_level = "trusted"\n`);
+  const beforePrompt=fakePromptInput(w,w.project);
+  const beforeProject=tree(w.project),beforeState=tree(w.stateDir);
+  const inactive=(env: Record<string,string>={}) => {
+    const r=w.ce(['record','--session','OFF','--runner','codex','--hard-limit','9000','--if-enabled'],{env,input:JSON.stringify([{role:'user',text:'SHOULD_NOT_BE_RECORDED'}])});
+    assert.equal(r.status,0,r.stderr);const value=JSON.parse(r.stdout);assert.equal(value.ok,true);assert.equal(value.active,false);
+  };
+  inactive();assert.deepEqual(tree(w.project),beforeProject);assert.deepEqual(tree(w.stateDir),beforeState);
+  assert.equal(w.ce(['install']).status,0);
+  assert.deepEqual(fakePromptInput(w,w.project),beforePrompt);
+  const installedState=tree(w.stateDir);inactive();assert.deepEqual(tree(w.stateDir),installedState);
+  assert.equal(w.ce(['enable'],{cwd:enabled}).status,0);
+  assert.match(JSON.stringify(fakePromptInput(w,enabled)),/context_window_guidance/);assert.deepEqual(fakePromptInput(w,w.project),beforePrompt);
+  const active=w.ce(['record','--session','ON','--runner','codex','--hard-limit','9000','--if-enabled'],{cwd:enabled,input:JSON.stringify([{role:'user',text:'ENABLED_PROJECT_TASK'}])});
+  assert.equal(active.status,0,active.stdout+active.stderr);assert.ok(JSON.parse(active.stdout).revision>0);assert.match(readFileSync(join(enabled,'.context-engine','ON','context.md'),'utf8'),/ENABLED_PROJECT_TASK/);
+  assert.equal(existsSync(join(enabled,'.context-engine','ON','context.md')),true);
+  assert.equal(w.ce(['close','--session','ON'],{cwd:enabled}).status,0);
+  const enabledState=tree(w.stateDir);inactive();assert.deepEqual(tree(w.project),beforeProject);assert.deepEqual(tree(w.stateDir),enabledState);
+  assert.equal(w.ce(['disable'],{cwd:enabled}).status,0);
+  assert.equal(w.ce(['uninstall']).status,0);assert.deepEqual(fakePromptInput(w,w.project),beforePrompt);inactive();assert.deepEqual(tree(w.project),beforeProject);
+});
+
+const realCodexVersion = process.env.CONTEXT_ENGINE_REAL_CODEX_TESTS === '1' ? spawnSync('codex', ['--version'], { encoding: 'utf8', timeout: 5000 }) : null;
+const realCodex = realCodexVersion?.status === 0 && /\bcodex-cli 0\.160\.0\b/.test(realCodexVersion.stdout);
 
 /** `codex debug prompt-input` in `cwd` (offline), without the per-call ids and timestamps. */
 function realPromptInput(w: ReturnType<typeof world>, cwd: string): unknown {
@@ -317,9 +319,9 @@ function realPromptInput(w: ReturnType<typeof world>, cwd: string): unknown {
   return strip(JSON.parse(r.stdout.slice(r.stdout.indexOf('['))));
 }
 
-test(
+nodeTest(
   'real codex (scratch CODEX_HOME): a project nobody enabled gets the same prompt input with the plugin installed as without, while another project is enabled; uninstall restores config.toml byte for byte',
-  { skip: realCodex ? false : 'codex is not on PATH' },
+  { skip: process.env.CONTEXT_ENGINE_REAL_CODEX_TESTS !== '1' ? 'Real Codex integration not requested: requires an authorized supported-host scratch trial' : realCodex ? false : 'supported codex-cli 0.160.0 is not available on PATH' },
   () => {
     const w = world();
     const enabled = tempDir('enabled-project');
@@ -347,46 +349,30 @@ test(
   },
 );
 
-test('round trip: install, enable, use, disable, uninstall leaves both runner homes and the project as they were; session data is kept', () => {
-  const w = world();
-  writeFileSync(join(w.claudeHome, 'settings.json'), SETTINGS);
-  writeFileSync(join(w.codexHome, 'config.toml'), CODEX_CONFIG);
-  writeFileSync(join(w.project, 'AGENTS.md'), AGENTS);
-  const claudeBefore = tree(w.claudeHome);
-  const codexBefore = tree(w.codexHome);
-  const projectBefore = tree(w.project);
-
-  assert.equal(w.ce(['install']).status, 0);
-  assert.equal(w.ce(['enable']).status, 0);
-  trustAll(w);
-  // Use: an adapter's calls go through while enabled.
-  const opened = JSON.parse(w.ce(['open', '--session', 'S1', '--runner', 'codex', '--hard-limit', '9000', '--if-enabled']).stdout);
-  assert.equal(opened.ok, true);
-  assert.equal(opened.revision, 0);
-  assert.equal(JSON.parse(w.ce(['close', '--session', 'S1']).stdout).closed, true);
-  assert.equal(w.ce(['disable']).status, 0);
-  const un = w.ce(['uninstall']);
-  assert.equal(un.status, 0, un.stdout + un.stderr);
-
-  assert.deepEqual(tree(w.claudeHome), claudeBefore);
-  assert.deepEqual(tree(w.codexHome), codexBefore);
-  const { ['.context-engine/']: wcDir, ...rest } = Object.fromEntries(Object.entries(tree(w.project)).filter(([k]) => !k.startsWith('.context-engine/') || k === '.context-engine/'));
-  assert.equal(wcDir, 'dir', 'the Working Context directory (user data, self-gitignored) is kept');
-  assert.deepEqual(rest, projectBefore);
-  assert.ok(existsSync(join(w.stateDir)), 'Event Logs and Revisions are kept');
+test('round trip: codex install, enable, record, edit, sync, disable and uninstall preserve unrelated bytes', () => {
+  const w=world();writeFileSync(join(w.claudeHome,'settings.json'),SETTINGS);writeFileSync(join(w.codexHome,'config.toml'),CODEX_CONFIG);writeFileSync(join(w.project,'AGENTS.md'),AGENTS);
+  mkdirSync(join(w.project,'.codex'));writeFileSync(join(w.project,'.codex','config.toml'),PROJECT_CODEX);
+  const beforeClaude=tree(w.claudeHome),beforeCodex=tree(w.codexHome),beforeProject=tree(w.project);
+  assert.equal(w.ce(['install']).status,0);assert.equal(w.ce(['enable']).status,0);
+  const record=w.ce(['record','--session','CYCLE','--runner','codex','--hard-limit','9000','--if-enabled'],{input:JSON.stringify([{role:'user',text:'ORIGINAL_CYCLE_TASK'}])});assert.equal(record.status,0,record.stdout+record.stderr);assert.equal(JSON.parse(record.stdout).ok,true);assert.ok(JSON.parse(record.stdout).revision>0);
+  const file=join(w.project,'.context-engine','CYCLE','context.md');assert.match(readFileSync(file,'utf8'),/ORIGINAL_CYCLE_TASK/);writeFileSync(file,'[[CTX_TURN 1 role=user]]\nSYNTHETIC_CYCLE_EDIT\n');
+  const sync=w.ce(['sync','--session','CYCLE','--if-enabled']);assert.equal(sync.status,0,sync.stderr);assert.equal(JSON.parse(sync.stdout).receipt.kind,'committed');
+  const read=w.ce(['read','--session','CYCLE']);assert.equal(read.status,0,read.stderr);assert.match(read.stdout,/SYNTHETIC_CYCLE_EDIT/);
+  assert.equal(w.ce(['close','--session','CYCLE']).status,0);assert.equal(w.ce(['disable']).status,0);assert.equal(w.ce(['uninstall']).status,0);
+  for(const [path,bytes] of Object.entries(beforeClaude))assert.equal(tree(w.claudeHome)[path],bytes,path);
+  for(const [path,bytes] of Object.entries(beforeCodex))assert.equal(tree(w.codexHome)[path],bytes,path);
+  assert.deepEqual(Object.fromEntries(Object.entries(tree(w.project)).filter(([path])=>!path.startsWith('.context-engine/'))),beforeProject);
+  assert.match(readFileSync(file,'utf8'),/SYNTHETIC_CYCLE_EDIT/);assert.ok(Object.keys(tree(w.stateDir)).some(path=>path.endsWith('events.jsonl')),'Event Log retained');
 });
 
-test('the README states every mode with its granularity and covers the limits issue #16 requires', () => {
-  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
-  assertQualified(readme);
-  const limits = readme.slice(readme.indexOf('## Capability limits'));
-  const measured = limits.slice(limits.indexOf('### Measured'), limits.indexOf('### Not measured'));
-  assert.ok(measured.length > 0, 'measured and not-measured limits are separate sections');
-  for (const m of measured.split('\n').filter((l) => l.startsWith('- **'))) assert.match(m, /\]\((regression|adapters)\/[^)]*evidence[^)]*\)|\]\(docs\/eval\/[^)]+\.md\)|prototype\/claude-seam/, `measured item without evidence: ${m.slice(0, 80)}`);
-  assert.match(limits, /Injection within a turn/);
-  assert.match(limits, /UnderDevelopment/);
-  assert.match(limits, /Unverified[\s\S]*TUI/);
-  assert.match(limits, /Deletion doesn't remove text from runner transcripts/);
-  assert.match(limits, /docs\/eval\//);
-  assert.match(readme, /CC BY 4\.0[\s\S]*CC BY-NC 4\.0, and none of it is copied/);
+test('the runtime README states supported modes, setup proof, user control and unverified limits', () => {
+  const readme=readFileSync(new URL('../README.md',import.meta.url),'utf8');assertQualified(readme);
+  for(const label of ["Full Replacement at agent-initiated resets (any model step); history grows between resets", "Compaction-only (Codex token-limit reset; Working Context read back by the agent)", "Compaction-only (Codex manual compaction; Working Context read back by the agent)", "Full Replacement per user turn"])assert.ok(readme.includes(label),label);
+  assert.match(readme,/Give this prompt to your agent to set it up/);assert.match(readme,/off in every project/);
+  assert.match(readme,/fresh disposable test project FIRST/);assert.match(readme,/NEXT REQUEST/);assert.match(readme,/file write is not proof/);
+  assert.match(readme,/exact head/);assert.match(readme,/approval/);assert.match(readme,/unverified/i);assert.match(readme,/Linux[\s\S]*Node \*\*24/);
+  assert.match(readme,/CONTEXT_ENGINE=off/);assert.match(readme,/context-engine-codex disable/);assert.match(readme,/context-engine-codex uninstall/);
+  assert.match(readme,/prior text remains in runner transcripts and the Event Log/);assert.match(readme,/16 MiB/);
+  for(const link of ['SOURCE.json','PROVENANCE.md','GLOSSARY.md','adapters/codex/README.md'])assert.ok(existsSync(new URL('../'+link,import.meta.url)),link);
+  const provenance=readFileSync(new URL('../PROVENANCE.md',import.meta.url),'utf8');assert.match(provenance,/CC BY-NC 4\.0/);assert.match(provenance,/No upstream CLM code or prompt quotations are shipped/);
 });
