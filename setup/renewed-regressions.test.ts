@@ -40,7 +40,7 @@ test('renewed: complete markers with empty bodies do not bypass owned settings r
 
 import { completeLedger,readLedger } from './ledger.ts';
 for(const changed of ['backup','tracked','namespace']) test('renewed: forged ledger '+changed+' paths refuse under caller policy',()=>{
- const w=world(),file=join(w.claudeHome,'synthetic.json'),owned=join(w.claudeHome,'owned');fs.writeFileSync(file,'{}');
+ const w=world(),file=join(w.claudeHome,'synthetic.conf'),owned=join(w.claudeHome,'owned');fs.writeFileSync(file,'{}');
  const backupRoot=join(w.stateDir,'backups'),snapshot=takeSnapshot({backupRoot,kind:'synthetic',files:[file],watch:[],namespaced:[owned]});
  const ledger=completeLedger(snapshot),outside=join(w.home,'outside');fs.writeFileSync(outside,'SYNTHETIC_UNRELATED');
  if(changed==='backup')ledger.files[0]!.before=outside;
@@ -75,8 +75,8 @@ test('renewed6: linked backup root refuses before creating external artifacts',(
  assert.throws(()=>takeSnapshot({backupRoot:root,kind:'synthetic',files:[],watch:[],namespaced:[]}),/linked|verified|ELOOP/);assert.deepEqual(fs.readdirSync(outside),[]);
 });
 test('renewed6: planted backup copy cannot truncate unrelated target',()=>{
- const w=world(),file=join(w.claudeHome,'synthetic.json'),target=join(w.home,'unrelated');fs.writeFileSync(file,'SOURCE');fs.writeFileSync(target,'KEEP');const native=fs.mkdirSync;let planted=false;
- fs.mkdirSync=((path:any,opts:any)=>{const r=native(path,opts);if(!planted&&String(path).endsWith('/before')){planted=true;fs.symlinkSync(target,join(String(path),'0-synthetic.json'));}return r;}) as typeof fs.mkdirSync;syncBuiltinESMExports();
+ const w=world(),file=join(w.claudeHome,'synthetic.conf'),target=join(w.home,'unrelated');fs.writeFileSync(file,'SOURCE');fs.writeFileSync(target,'KEEP');const native=fs.mkdirSync;let planted=false;
+ fs.mkdirSync=((path:any,opts:any)=>{const r=native(path,opts);if(!planted&&String(path).endsWith('/before')){planted=true;fs.symlinkSync(target,join(String(path),'0-synthetic.conf'));}return r;}) as typeof fs.mkdirSync;syncBuiltinESMExports();
  try{assert.throws(()=>takeSnapshot({backupRoot:join(w.stateDir,'backups'),kind:'synthetic',files:[file],watch:[],namespaced:[]}));}finally{fs.mkdirSync=native;syncBuiltinESMExports();}
  assert.equal(planted,true);assert.equal(fs.readFileSync(target,'utf8'),'KEEP');
 });

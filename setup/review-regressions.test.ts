@@ -8,7 +8,7 @@ import { tempDir } from '../core/testing.ts';
 import { safeRead, safeWrite } from './files.ts';
 
 test('overlapping install and uninstall cannot share a setup transaction', () => {
-  const w = world(), config = join(w.claudeHome, 'settings.json'); writeFileSync(config, 'ORIGINAL');
+  const w = world(), config = join(w.claudeHome, 'synthetic-config.conf'); writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
   const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {}, install: [], uninstall: [], prepare() {
     assert.throws(() => install(ctx, spec), /already locked/);
@@ -25,7 +25,7 @@ const managedFixtureRule = { canon: (text: string) => text, strip: (text: string
 
 test('pointer publication failure rolls back and can be retried', () => {
   const w = world();
-  const config = join(w.claudeHome, 'settings.json');
+  const config = join(w.claudeHome, 'synthetic-config.conf');
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
   const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); } };
@@ -66,7 +66,7 @@ test('setup never reads, backs up or overwrites linked configuration targets', (
 
 test('prepare failure rolls back without needing to finalize a ledger', () => {
   const w = world();
-  const config = join(w.claudeHome, 'settings.json');
+  const config = join(w.claudeHome, 'synthetic-config.conf');
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
   const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); throw new Error('prepare failed'); } };
@@ -77,7 +77,7 @@ test('prepare failure rolls back without needing to finalize a ledger', () => {
 
 test('ledger finalization failure restores config and preserves unrelated files', () => {
   const w = world();
-  const config = join(w.claudeHome, 'settings.json');
+  const config = join(w.claudeHome, 'synthetic-config.conf');
   const unrelated = join(w.claudeHome, 'unrelated');
   writeFileSync(config, 'ORIGINAL'); writeFileSync(unrelated, 'KEEP');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
@@ -94,7 +94,7 @@ test('ledger finalization failure restores config and preserves unrelated files'
 
 test('successful install and uninstall preserve an unrelated file created during installation', () => {
   const w = world();
-  const config = join(w.claudeHome, 'settings.json');
+  const config = join(w.claudeHome, 'synthetic-config.conf');
   const concurrent = join(w.claudeHome, 'other-plugin-new-file');
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };

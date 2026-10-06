@@ -482,7 +482,7 @@ export function readBytes(path: string, maxBytes?: number): Buffer | undefined {
   catch(e) {if((e as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw e;}
   try {
     const st=fstatSync(fd),real=openedPath(fd);
-    if(st.nlink!==1)throw Object.assign(new Error('private state file has multiple links; refusing payload'),{code:'CE_STATE_LINK_COUNT'});
+    if(st.nlink!==1)throw Object.assign(new Error('private state file is linked under multiple names; refusing payload'),{code:'CE_STATE_LINK_COUNT'});
     if (!st.isFile() || real!==resolve(path) || isCredential(real,st) || (process.getuid&&st.uid!==process.getuid())) throw new Error('private state file is not verified, unlinked and user-owned');
     if(maxBytes!==undefined){const bytes=boundedRead(fd,st.size,maxBytes);if(bytes==='too-large')throw Object.assign(new Error('private state payload exceeds size limit'),{code:'CE_SIZE_LIMIT'});return bytes;}
     return readFileSync(fd);
