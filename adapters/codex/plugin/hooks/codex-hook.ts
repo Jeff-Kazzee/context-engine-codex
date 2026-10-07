@@ -92,7 +92,6 @@ function recordCompleted<T>(input: HookInput, text: string, fn: () => T): T {
   // Publish independent intent before waiting for the lease. Another operation cannot clear it.
   store.atomicWrite(path, bytes, 'frame-key-tmp');
   return withPromptLease(input, () => {
-    requireRecorded(input, name);
     const result = fn();
     try { store.removeDirectoryEntries(dirname(path), candidate => candidate === name); }
     catch (error) {
@@ -139,6 +138,7 @@ async function main(input: HookInput): Promise<void> {
     // Durable intent precedes the fallible CLI call. Only a fingerprint is retained, never prompt text.
     store.atomicWrite(pending.path,JSON.stringify({hash}), 'frame-key-tmp');
     const recorded = core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }]);
+    requireRecorded(input);
     store.removeDirectoryEntries(dirname(pending.path),name=>name===PENDING_PROMPT);
     return recorded;
     });
@@ -181,7 +181,9 @@ async function main(input: HookInput): Promise<void> {
     const refusal = withPromptLease(input,()=>{
       requireRecorded(input);
     if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: the context window was NOT reset. An earlier user request was not recorded; retry that exact request after repairing storage, or disable Context Engine.');
-      return resetRefusal(input);
+      const refusal = resetRefusal(input);
+      requireRecorded(input);
+      return refusal;
     });
     if (refusal) denyReset(refusal);
   } else if (input.hook_event_name === 'Stop') {
@@ -215,6 +217,7 @@ async function main(input: HookInput): Promise<void> {
         else if(!(e instanceof CoreUnavailable))throw e;
       }
     }
+    requireRecorded(input);
     });
   }
 }

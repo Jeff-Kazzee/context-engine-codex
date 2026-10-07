@@ -106,3 +106,30 @@ test('wave26: a completed hook lease timeout retains independent intent after th
   assert.match(hook(f,{hook_event_name:'PreCompact'}).stdout,/continue.*false/);
  }finally{first.kill();await ended;}
 });
+
+test('wave26: concurrent healthy completed hooks record and clear only their own intents',async()=>{
+ const f=setup();hook(f,{hook_event_name:'UserPromptSubmit',prompt:'BOOTSTRAP'});
+ const pause=join(f.projectRoot,'publish-pause.mjs');fs.writeFileSync(pause,`import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const rename=fs.renameSync;fs.renameSync=function(a,b){const r=rename(a,b);if(/codex-record-pending-/.test(String(b)))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,800);return r;};syncBuiltinESMExports();`);
+ const children=['CONCURRENT_A','CONCURRENT_B'].map(text=>{
+  const child=spawn(process.execPath,[HOOK],{cwd:f.projectRoot,env:{...process.env,CONTEXT_ENGINE_STATE_DIR:f.stateDir,CONTEXT_ENGINE_CLI:CLI,NODE_OPTIONS:'--import='+pause},stdio:['pipe','pipe','pipe']});
+  child.stdout.resume();child.stderr.resume();const done=new Promise<void>((resolve,reject)=>{child.on('error',reject);child.on('exit',()=>resolve());});
+  child.stdin.end(JSON.stringify({cwd:f.projectRoot,session_id:sid,hook_event_name:'Stop',last_assistant_message:text}));return {child,done};
+ });
+ try{await Promise.all(children.map(c=>c.done));const state=layout(f.projectRoot,sid,f.stateDir).stateDir;
+  assert.equal(fs.readdirSync(state).some(n=>n.startsWith('codex-record-pending-')),false);
+  const wc=fs.readFileSync(join(f.projectRoot,'.context-engine',sid,'context.md'),'utf8');assert.match(wc,/CONCURRENT_A/);assert.match(wc,/CONCURRENT_B/);
+  assert.equal(hook(f,{hook_event_name:'PreToolUse',tool_name:'new_context'}).stdout,'');
+ }finally{for(const c of children)c.child.kill();await Promise.all(children.map(c=>c.done));}
+});
+
+for(const kind of ['prompt','reset','compact'])test('wave26: '+kind+' gate rechecks completed intent published during core work',async()=>{
+ const f=setup();hook(f,{hook_event_name:'UserPromptSubmit',prompt:'BOOTSTRAP'});
+ const pause=join(f.projectRoot,'gate-pause.mjs'),ready=join(f.projectRoot,'gate-ready');
+ fs.writeFileSync(pause,`import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const spawn=cp.spawnSync;let paused=false;cp.spawnSync=function(cmd,args,...rest){if(!paused){paused=true;fs.writeFileSync(${JSON.stringify(ready)},'ready');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1800);}return spawn(cmd,args,...rest);};syncBuiltinESMExports();`);
+ const event=kind==='prompt'?{hook_event_name:'UserPromptSubmit',prompt:'GATED_PROMPT'}:kind==='reset'?{hook_event_name:'PreToolUse',tool_name:'new_context'}:{hook_event_name:'PreCompact',trigger:'manual'};
+ const gate=spawn(process.execPath,[HOOK],{cwd:f.projectRoot,env:{...process.env,CONTEXT_ENGINE_STATE_DIR:f.stateDir,CONTEXT_ENGINE_CLI:CLI,NODE_OPTIONS:'--import='+pause},stdio:['pipe','pipe','pipe']});let out='';gate.stdout.on('data',chunk=>out+=chunk);gate.stderr.resume();const ended=new Promise<void>((resolve,reject)=>{gate.on('error',reject);gate.on('exit',()=>resolve());});
+ gate.stdin.end(JSON.stringify({cwd:f.projectRoot,session_id:sid,...event}));
+ try{for(let i=0;i<200&&!fs.existsSync(ready);i++)await delay(10);assert.ok(fs.existsSync(ready));
+  hook(f,{hook_event_name:'Stop',last_assistant_message:'COMPLETED_DURING_GATE'});await ended;assert.match(out,kind==='reset'?/deny/:/continue.*false/);
+ }finally{gate.kill();await ended;}
+});

@@ -13,7 +13,7 @@
     "core/event-safety.ts": "0f7c9c77a2d6a0d75f2f755ce79cb3e321856d5e219e6e4dd5c1f12b58eb4eba",
     "core/faults.ts": "1b8e5615c3e93db552ce05410b1ba246dfed6a5fbff7120dc48cb514b8f4d004",
     "core/hosted-regressions.test.ts": "b18c030d56fe970e799fb7d9596792d5aea934fe0e01e66c683829dd70798c44",
-    "core/index.ts": "10321ec383d92f9097dcee3c70a7396168c449a9c5926ec20e5b838647b8a697",
+    "core/index.ts": "7b6164937d765d104a83f6397aacb0d613fbc111937b7435136cc4ed82111b39",
     "core/isolation.test.ts": "dc100ec58cb6d008c3cd60921e03bbc1ba9f98f756ad84b0e11cbd84acc2447a",
     "core/late-review-regressions.test.ts": "f743f30e053cae79f697412f3171f83ae45524c116623823467275dbb027be8f",
     "core/lock.test.ts": "eed1b01f1d21c33b629adffd7fa1ba8a887fc670ee9389a69e6ed49150ed2d02",
@@ -23,8 +23,8 @@
     "core/participation.ts": "30857407e0b75b0fc7926720e547b606a2d48cdac111ec8cdfd484a0d42bfb7f",
     "core/publication-regressions.test.ts": "ff76c328698a5924d6abd71b82561c62e5c43f0a4f09e27de413887329e28661",
     "core/read.test.ts": "fc4992bf8c39fa37958b14c1d523534dbdb800b27e5d1e7436033586f7ba6b9a",
-    "core/recall.test.ts": "8af07faf6e6e736410428618332c61db0aaf5d36a936523bd66475bfc0990d05",
-    "core/recall.ts": "da69260f6bb3f82c6c7172a1015a37603e74e9b47a20159724b4b95b47d2af57",
+    "core/recall.test.ts": "c81717032041f7e57c85a482e4c6e75785527ed9d4c7fb3796bb1ed25ff6ed99",
+    "core/recall.ts": "ff4015c6367c9cea4b4c8b53d265954196174dcebaf554bdda1eabd4eea2b66e",
     "core/recovery.test.ts": "5047b2ca9410c1d572c244155bd3e9d2f6948555c0402e10b5f48b1c53d360f3",
     "core/refs.ts": "3133705ded7429580212f02ab98ec52e76271bf7d968878b2e33a1bd8702ea3f",
     "core/renewed-regressions.test.ts": "b89453eb730b247fa566e077472448e0f0c7397890a5fae38b62322e56d68ce0",
@@ -113,7 +113,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "b8cc06331409cca06aec7b0c6e9d472f73e59880",
+  "corePatchCommit": "0e9a424617389034cbd6a32d5630754fdf79ef21",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -133,6 +133,7 @@
     "Wave11 confirmed-defect repair: bounded HEAD metadata and oversized show envelopes; parent directory flushes during confined state creation; failed install pointer cleanup, snapshot-local backup references and multiline TOML preservation. Codex publishes opt-out after guidance cleanup and refuses RPC output closure; Claude refuses committed resumes with a foreign keyed frame and no recognized boundary. Linux HOME activation control passes unchanged. Synthetic offline evidence only; no model trial or authentication changes.",
     "Wave13 repairs eleven confirmed historical review claims: bounded snapshot publication/reads, cross-record sequence validation, durable recovery accounting/receipt retry, ignore-file and pointer deletion flushes, absolute fallback HOME, credential-safe reverse edits, bounded setup inventory, incompatible TOML feature namespaces and session-bound delayed Claude compaction. Synthetic offline checks only; prior live evidence does not establish acceptance of these changed heads.",
     "Wave16 finite review repair: integer hard limits; malformed opt-in responses use native fallback; setup verifies runner/config ownership before payload backups, reassesses captured rollback bytes and reserves deletion candidates through a verified parent. Codex explicit hook trust fails on incomplete verification and status accepts equivalent TOML table-key spelling. Optional, default-off stale-refs checks share marker, source-byte, hash-work, Git-probe and time budgets when enabled; exhaustion reports incomplete. Synthetic offline evidence only; no model/provider trial, authentication changes, scanner clearance or merge approval.",
-    "Wave20 repairs nine confirmed review claims: pre-log dense event and rendered byte validation; Event Log parent flush and ambiguous-append recovery; conditional config replacement and confined namespace cleanup; semantic Codex TOML trust, uninstall retirement, durable failed-prompt intent and bounded compaction markers. Synthetic offline checks only; current-head supported-runtime acceptance remains unverified."
+    "Wave20 repairs nine confirmed review claims: pre-log dense event and rendered byte validation; Event Log parent flush and ambiguous-append recovery; conditional config replacement and confined namespace cleanup; semantic Codex TOML trust, uninstall retirement, durable failed-prompt intent and bounded compaction markers. Synthetic offline checks only; current-head supported-runtime acceptance remains unverified.",
+    "Wave26 repairs nine confirmed review claims: recognized Cookie/Set-Cookie backup refusal; confined rollback restore and created-file deletion; pre-command uninstall ownership; temporary publication snapshot cleanup; ambiguous recall-accounting evidence preservation; conditional project-config publication; durable completed-event fingerprints and exclusive in-process turn-loop ownership. Synthetic offline checks only; current-head supported-runtime acceptance remains unverified."
   ]
 }
