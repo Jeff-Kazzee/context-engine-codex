@@ -57,11 +57,11 @@ let store: typeof Store;
 let lock: typeof Lock;
 const PENDING_PROMPT = 'codex-prompt-pending.json';
 const PENDING_RECORD = 'codex-record-pending.json';
-function withPromptLease<T>(input: HookInput, fn:()=>T): T {
+function withPromptLease<T>(input: HookInput, fn:()=>T, timeoutMs = 1000): T {
   const state=store.resolveStateRoot(),l=store.layout(input.cwd,input.session_id,state);
   store.ensureDirs(l,state);
   // Distinct from the CLI operation lease: never recursively acquire that lock.
-  return lock.serialized(join(l.stateDir,'codex-prompt.lock'),fn,{timeoutMs:1000});
+  return lock.serialized(join(l.stateDir,'codex-prompt.lock'),fn,{timeoutMs});
 }
 function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string; hash?: string } {
   try {
@@ -100,7 +100,7 @@ function recordCompleted<T>(input: HookInput, text: string, fn: () => T): T {
       throw error;
     }
     return result;
-  });
+  }, 5000);
 }
 
 /** The agent's own reset (new_context): the one event that fails closed. */

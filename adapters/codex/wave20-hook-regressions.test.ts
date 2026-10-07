@@ -96,13 +96,13 @@ test('wave26: successfully recorded completed events clear only their own intent
 test('wave26: a completed hook lease timeout retains independent intent after the first succeeds',async()=>{
  const f=setup();hook(f,{hook_event_name:'UserPromptSubmit',prompt:'BOOTSTRAP'});
  const pause=join(f.projectRoot,'pause.mjs'),ready=join(f.projectRoot,'first-record-ready');
- fs.writeFileSync(pause,`import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=fs.writeSync;fs.writeSync=function(fd,data,...args){if(String(data).includes('FIRST_COMPLETED')){fs.writeFileSync(${JSON.stringify(ready)},'ready');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1800);}return original(fd,data,...args)};syncBuiltinESMExports();`);
+ fs.writeFileSync(pause,`import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=fs.writeSync;let paused=false;fs.writeSync=function(fd,data,...args){if(!paused&&String(data).includes('FIRST_COMPLETED')){paused=true;fs.writeFileSync(${JSON.stringify(ready)},'ready');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,7000);}return original(fd,data,...args)};syncBuiltinESMExports();`);
  const first=spawn(process.execPath,[HOOK],{cwd:f.projectRoot,env:{...process.env,CONTEXT_ENGINE_STATE_DIR:f.stateDir,CONTEXT_ENGINE_CLI:CLI,NODE_OPTIONS:'--import='+pause},stdio:['pipe','pipe','pipe']});
- first.stdout.resume();first.stderr.resume();const ended=new Promise<void>((resolve,reject)=>{first.on('error',reject);first.on('exit',()=>resolve());});
+ let firstOutput='';first.stdout.on('data',chunk=>firstOutput+=chunk);first.stderr.resume();const ended=new Promise<void>((resolve,reject)=>{first.on('error',reject);first.on('exit',()=>resolve());});
  first.stdin.end(JSON.stringify({cwd:f.projectRoot,session_id:sid,hook_event_name:'Stop',last_assistant_message:'FIRST_COMPLETED'}));
  try{for(let i=0;i<200&&!fs.existsSync(ready);i++)await delay(10);assert.ok(fs.existsSync(ready));
   assert.match(hook(f,{hook_event_name:'Stop',last_assistant_message:'SECOND_COMPLETED'}).stdout,/continue.*false/);
-  await ended;assert.match(hook(f,{hook_event_name:'PreToolUse',tool_name:'new_context'}).stdout,/deny/);
+  await ended;assert.equal(firstOutput,'','first completed event recorded successfully');assert.match(fs.readFileSync(join(f.projectRoot,'.context-engine',sid,'context.md'),'utf8'),/FIRST_COMPLETED/);assert.match(hook(f,{hook_event_name:'PreToolUse',tool_name:'new_context'}).stdout,/deny/);
   assert.match(hook(f,{hook_event_name:'PreCompact'}).stdout,/continue.*false/);
  }finally{first.kill();await ended;}
 });
