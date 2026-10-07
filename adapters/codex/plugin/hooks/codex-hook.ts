@@ -32,7 +32,7 @@ const RUNNER = 'codex';
  */
 const DEFAULT_HARD_LIMIT = (272_000 - 32_000) * 4;
 
-/** The core could not be reached or refused the call. Hooks then fail safe: Codex continues natively. */
+/** The core could not be reached or refused the call. The event's handler selects its refusal/fallback. */
 class CoreUnavailable extends Error {}
 /** Context Engine is not active for this project (not enabled, or the kill switch): stand aside silently. */
 class Inactive extends Error {}
@@ -84,7 +84,8 @@ function denyReset(refusal: string): void {
 /**
  * The event is read before any checkout module is loaded, so a failure to load them (the checkout
  * moved or deleted, a module that throws) is seen with the event in hand: the reset gate then
- * refuses only after cache-local opt-in was verified (see the handler at the bottom), and every other hook stands aside.
+ * refuses only after cache-local opt-in was verified (see the handler at the bottom). Prompt and
+ * compaction failures also stop the request; ordinary tool hooks stand aside.
  */
 async function main(input: HookInput): Promise<void> {
   // Subagents (multi-agent mode) get no Working Context; only the root agent's session is managed.
@@ -366,5 +367,5 @@ try {
       emit({continue:false,stopReason:'Context Engine: this request/compaction was stopped because the user request could not be safely recorded. Retry the original request after repairing storage, or disable Context Engine. No reset acceptance is claimed.'});
     }
   }
-  // Every other failure is fail safe: Codex runs natively. Exit 0 with no stdout has no control effect.
+  // Other failures retain native fallback. Exit 0 with no stdout has no control effect.
 }

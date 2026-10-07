@@ -446,13 +446,14 @@ test('subagent events are ignored: the Working Context belongs to the root agent
   assert.equal(existsSync(wcPath(f)), false);
 });
 
-test('fail safe: if the core is unavailable, record hooks let Codex continue natively and log to stderr', () => {
+test('failed prompt recording stops the request; tool/assistant recording errors retain native fallback', () => {
   const f = enabledFixture();
   const broken = { CONTEXT_ENGINE_CLI: join(f.projectRoot, 'no-such-cli.ts') };
   for (const payload of [prompt('hi'), toolUse('Bash', { command: 'ls' }, ''), { hook_event_name: 'Stop', last_assistant_message: 'x' }]) {
     const r = hook(f, payload, broken);
     assert.equal(r.status, 0);
-    assert.equal(r.stdout, '');
+    if(payload.hook_event_name==='UserPromptSubmit')assert.equal(JSON.parse(r.stdout).continue,false);
+    else assert.equal(r.stdout, '');
     assert.match(r.stderr, /context-engine/);
   }
   const garbage = spawnSync(process.execPath, [HOOK], { input: 'not json', encoding: 'utf8', env: env(f) });
@@ -483,7 +484,7 @@ test('fail safe: if the core is unavailable, the gate still refuses a reset onto
   assert.equal(JSON.parse(hook(f, preCompact, broken).stdout).continue, false);
 });
 
-test('fail closed: if the core cannot even be loaded (the checkout is gone, or its modules throw), new_context is still refused; other hooks stand aside', () => {
+test('missing/throwing core refuses reset, prompt and compaction; ordinary tool hooks stand aside', () => {
   const f = enabledFixture();
   hook(f, prompt('Task: ship it.'));
   // A checkout that has disappeared, and one whose core module throws while loading.
@@ -498,10 +499,11 @@ test('fail closed: if the core cannot even be loaded (the checkout is gone, or i
     assert.match(reason, /context window was NOT reset/);
     assert.match(reason, /could not be (reached|loaded)/);
     assert.match(reason, /call new_context again/);
-    for (const payload of [prompt('hi'), toolUse('Bash', { command: 'ls' }, ''), { ...newContext, tool_name: 'Bash' }]) {
+    for (const payload of [prompt('hi'), preCompact, toolUse('Bash', { command: 'ls' }, ''), { ...newContext, tool_name: 'Bash' }]) {
       const other = hook(f, payload, { CONTEXT_ENGINE_CLI: cli });
       assert.equal(other.status, 0);
-      assert.equal(other.stdout, '', 'any other hook stands aside: Codex continues natively');
+      if(payload.hook_event_name==='UserPromptSubmit'||payload.hook_event_name==='PreCompact')assert.equal(JSON.parse(other.stdout).continue,false);
+      else assert.equal(other.stdout, '', 'ordinary tool hook retains native fallback');
       assert.match(other.stderr, /context-engine codex hook/);
     }
   }
