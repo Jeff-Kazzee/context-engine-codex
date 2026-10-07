@@ -128,6 +128,10 @@ function tomlKey(part: string): string {
   return out;
 }
 export function tomlTableBoolean(text: string, table: string[], key: string): boolean {
+  return tomlTableScalar(text, table, key) === true;
+}
+/** Read a string/boolean scalar with semantic TOML table/key spelling. */
+export function tomlTableScalar(text: string, table: string[], key: string): string | boolean | undefined {
   const lines = text.split('\n'), outside = new Set<number>();
   const headers = tomlHeaders(lines, outside);
   let active = false;
@@ -138,14 +142,14 @@ export function tomlTableBoolean(text: string, table: string[], key: string): bo
       const parts = match?.[1]?.match(/"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+/g)?.map(tomlKey);
       active = !!parts && parts.length === table.length && parts.every((part,n) => part === table[n]);
     } else if (active && outside.has(i)) {
-      const match = /^\s*("(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)\s*=\s*(true|false)\s*(?:#.*)?$/.exec(line);
+      const match = /^\s*("(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)\s*=\s*(true|false|"(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?$/.exec(line);
       if (match) {
         const name = tomlKey(match[1]!);
-        if (name === key) return match[2] === 'true';
+        if (name === key) return match[2] === 'true' ? true : match[2] === 'false' ? false : tomlKey(match[2]!);
       }
     }
   }
-  return false;
+  return undefined;
 }
 
 /**

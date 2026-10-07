@@ -118,7 +118,7 @@ export interface Session {
   /** Commits a model edit as a new revision, or restores HEAD if the file is unusable. */
   sync(): SyncResult;
   /** Syncs, logs the events (write-ahead), renders them as turn blocks and commits. */
-  record(events: RunnerEvent[]): SyncResult;
+  record(events: RunnerEvent[], options?: { maxBytes?: number }): SyncResult;
   /**
    * The runner's own compaction replaced the conversation (the Compaction-only fallback, taken when
    * the Working Context alone is over its budget): syncs, applies the credential-retention policy, logs the runner's result
@@ -264,6 +264,7 @@ class Core {
   private pendingReceipt: Receipt | undefined;
   private closed = false;
   private unloggedCommit: { head: Head; text: string } | undefined;
+  private appendUncertain=false;
   private recoveryReceiptHeads: Array<{rev:number;sha:string}> = [];
   private readonly l: Layout;
   private readonly hardLimit: number;
@@ -289,7 +290,7 @@ class Core {
       stateDir: this.l.stateDir,
       frameKey: sessionFrameKey(this.l.stateDir),
       sync: () => this.guard(() => this.finishResult(this.sync())),
-      record: (events) => this.guard(() => this.finishResult(this.record(events))),
+      record: (events, options) => this.guard(() => this.finishResult(this.record(events, false, options?.maxBytes))),
       nativeCompaction: (events) => this.guard(() => this.finishResult(this.record(events, true))),
       close: () => this.guard(() => this.close(), false),
     };
@@ -297,6 +298,7 @@ class Core {
 
   private guard<T>(fn: () => T, repair = true): T {
     if (this.closed) throw new Error('session is closed');
+    if(repair&&this.appendUncertain)throw new Error('Event Log append may have persisted; close and reopen this session before retrying');
     if (repair && this.unloggedCommit) {
       const { head, text } = this.unloggedCommit;
       const published = this.head();
@@ -344,6 +346,7 @@ class Core {
   }
 
   private saveRecoveryCheckpoint(): void {
+    if(this.appendUncertain)return;
     try {
       const head = this.head();
       const log = this.checkpointLog();
@@ -521,15 +524,21 @@ class Core {
     return this.result(next, receipt);
   }
 
-  record(events: RunnerEvent[], replace = false): SyncResult {
+  record(events: RunnerEvent[], replace = false, maxBytes = SNAPSHOT_MAX_BYTES): SyncResult {
     const stringField = (event: unknown, key: string): string | undefined => {
       if (!event || typeof event !== 'object') return undefined;
       const descriptor = Object.getOwnPropertyDescriptor(event, key);
       return descriptor?.enumerable && 'value' in descriptor && typeof descriptor.value === 'string' ? descriptor.value : undefined;
     };
-    if (!Array.isArray(events) || events.some((e) => stringField(e, 'role') === undefined || stringField(e, 'text') === undefined)) {
+    let dense=Array.isArray(events);
+    if(dense)for(let i=0;i<events.length;i++){
+      const slot=Object.getOwnPropertyDescriptor(events,i);
+      if(!slot||!('value' in slot)||stringField(slot.value,'role')===undefined||stringField(slot.value,'text')===undefined){dense=false;break;}
+    }
+    if (!dense) {
       throw new Error(`${replace ? 'nativeCompaction' : 'record'}() takes an array of { role: string, text: string } events`);
     }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > SNAPSHOT_MAX_BYTES) throw new Error('invalid revision snapshot byte limit');
     if (replace && events.every((e) => stringField(e, 'text')!.trim() === '')) throw new Error('nativeCompaction() needs the runner result: at least one non-empty event');
     const retained = events.map(retainRunnerEvent);
     const synced = this.retainReceipt(this.sync());
@@ -541,7 +550,13 @@ class Core {
     const replacement: Replacement | undefined = replace
       ? { kind: 'native-compaction', reason: 'over-budget', approxTokensBefore: approxTokens(synced.chars), budgetTokens: this.budgetTokens }
       : undefined;
-    appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(replacement ? { replace: replacement } : {}) });
+    const preview=numbered.map(p=>({...p}));
+    if(replacement)preview[0]!.replace=replacement;
+    const previewHead=this.head();
+    const prospective = this.renderPending([...this.unapplied, ...preview].filter(p=>p.seq>(previewHead?.through??0)),previewHead);
+    if (Buffer.byteLength(prospective.text, 'utf8') > maxBytes) throw new Error(`revision snapshot exceeds the ${maxBytes === SNAPSHOT_MAX_BYTES ? '64 MiB' : maxBytes+' byte'} publication limit`);
+    try {appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(replacement ? { replace: replacement } : {}) });}
+    catch(e) {if((e as NodeJS.ErrnoException).code==='CE_LOG_APPEND_AMBIGUOUS')this.appendUncertain=true;throw e;}
     this.lastSeq += numbered.length;
     if (replacement) numbered[0]!.replace = replacement;
     this.unapplied.push(...numbered);
@@ -560,6 +575,14 @@ class Core {
     const head = this.head();
     const fresh = this.unapplied.filter((p) => p.seq > (head?.through ?? 0));
     if (fresh.length === 0) return head;
+    const {text,replaced} = this.renderPending(fresh,head);
+    const next = this.commit(text, replaced ? 'native-compaction' : 'runner-append', fresh.at(-1)!.seq);
+    this.unapplied = [];
+    if (replaced) appendLog(this.l.events, { type: 'delivery', mode: COMPACTION_ONLY_FALLBACK.label, rev: next.rev, ...replaced });
+    return next;
+  }
+
+  private renderPending(fresh: Pending[], head: Head | null): { text: string; replaced?: Replacement } {
     let text = head ? this.snapshot(head.rev).replace(/\s+$/, '') : '';
     let replaced: Replacement | undefined;
     for (let i = 0; i < fresh.length; ) {
@@ -576,10 +599,7 @@ class Core {
       text = text ? `${text}\n\n${blocks}` : blocks;
       i = j;
     }
-    const next = this.commit(text, replaced ? 'native-compaction' : 'runner-append', fresh.at(-1)!.seq);
-    this.unapplied = [];
-    if (replaced) appendLog(this.l.events, { type: 'delivery', mode: COMPACTION_ONLY_FALLBACK.label, rev: next.rev, ...replaced });
-    return next;
+    return {text,replaced};
   }
 
   /** Without a revision, invalid entries are logged and preserved for explicit user repair. */

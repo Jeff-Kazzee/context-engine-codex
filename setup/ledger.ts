@@ -14,11 +14,11 @@
 //    as the edit left them, newly created explicit namespaces are removed; other owned created directories
 //    are removed only when empty, and unowned directories remain.
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { closeSync, constants, fsyncSync, openSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
-import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeWrite } from './files.ts';
+import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeRemoveTree, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
 
 /** How to recognise and remove our entries in one file. */
@@ -240,6 +240,7 @@ function unchangedBytes(f: Ledger['files'][number], rule: Rule | undefined, byte
 
 /** Puts files back (see the module comment) and cleans up what the edit created. */
 export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record<string, boolean>): FileReport[] {
+  for(const n of l.namespaced)checkComponents(n.path);
   // Recheck all current config before any restoration/reverse edit creates a copy.
   const current = new Map(l.files.map(f => { const bytes = safeRead(f.path); assertBackupSafe(f.path, bytes); return [f.path, bytes] as const; }));
   const reports: FileReport[] = [];
@@ -248,7 +249,7 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
     if (unchanged[f.path] && unchangedBytes(f, rules[f.path], current.get(f.path)!)) {
       if (before) {
         mkdirSync(dirname(f.path), { recursive: true });
-        safeWrite(f.path, before);
+        safeWrite(f.path, before,current.get(f.path)!);
         reports.push({ path: f.path, outcome: 'restored' });
       } else {
         safeRemove(f.path, current.get(f.path)!);
@@ -263,10 +264,10 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
     }
     const rule = rules[f.path];
     const stripped = rule ? rule.strip(now, before?.toString('utf8') ?? null) : now;
-    if (stripped !== now) safeWrite(f.path, stripped);
+    if (stripped !== now) safeWrite(f.path, stripped,current.get(f.path)!);
     reports.push({ path: f.path, outcome: 'reverse-edited', backup: f.before ?? undefined });
   }
-  for (const n of l.namespaced) if (!n.existed) rmSync(n.path, { recursive: true, force: true });
+  for (const n of l.namespaced) if (!n.existed) safeRemoveTree(n.path);
   for (const c of l.createdFiles) {
     const bytes = safeRead(c.path);
     if (bytes && sha(bytes) === c.sha) unlinkSync(c.path);

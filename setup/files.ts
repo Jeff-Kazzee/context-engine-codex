@@ -1,7 +1,7 @@
 // Setup operates on tracked runner configuration; backups have a separate key-based gate. Descriptor checks keep reads and replacements
 // anchored to the verified directory even if a project changes a path concurrently. Linux /proc
 // is required, like the core's confined file reads.
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync, readSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, join, parse, resolve, sep } from 'node:path';
@@ -90,7 +90,7 @@ export function safeRead(path: string): Buffer | null {
   } finally { closeSync(fd); }
 }
 
-export function safeWrite(path: string, data: string | Buffer): void {
+export function safeWrite(path: string, data: string | Buffer, expected?: Buffer | null): void {
   checkComponents(path);
   const parent = dirname(resolve(path));
   createParent(parent);
@@ -102,6 +102,7 @@ export function safeWrite(path: string, data: string | Buffer): void {
   }
   const fd = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   let tmp: string | undefined;
+  let candidate: string | undefined, moved = false;
   try {
     assertOwner(fstatSync(fd), parent);
     if (!fstatSync(fd).isDirectory() || realpathSync(`/proc/self/fd/${fd}`) !== parent) throw new Error(`setup cannot verify directory: ${parent}`);
@@ -109,12 +110,73 @@ export function safeWrite(path: string, data: string | Buffer): void {
     tmp = join(anchored, `.context-engine-setup-${randomBytes(8).toString('hex')}.tmp`);
     const file = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try { writeFileSync(file, data); fsyncSync(file); } finally { closeSync(file); }
-    renameSync(tmp, join(anchored, basename(path)));
+    const target=join(anchored,basename(path));
+    if(expected===undefined)renameSync(tmp,target);
+    else {
+      if(expected!==null) {
+        candidate=join(anchored,`.context-engine-replace-${randomBytes(16).toString('hex')}.tmp`);
+        closeSync(openSync(candidate,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600));
+        renameSync(target,candidate);moved=true;fsyncSync(fd);
+        const old=openSync(candidate,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+        try {
+          const st=fstatSync(old);assertOwner(st,path);
+          if(!st.isFile()||st.nlink!==1||st.size!==expected.length||realpathSync(`/proc/self/fd/${old}`)!==join(realpathSync(anchored),basename(candidate)))throw new Error('setup file changed before replacement; retained');
+          const bytes=Buffer.alloc(expected.length+1);let offset=0;
+          for(;;){const n=readSync(old,bytes,offset,bytes.length-offset,offset);if(!n)break;offset+=n;if(offset===bytes.length)break;}
+          if(offset!==expected.length||!bytes.subarray(0,offset).equals(expected))throw new Error('setup file changed before replacement; retained');
+        } finally {closeSync(old);}
+      }
+      // Exclusive publication preserves a file created while the old destination was reserved.
+      linkSync(tmp,target);unlinkSync(tmp);tmp=undefined;
+      if(candidate){unlinkSync(candidate);candidate=undefined;moved=false;}
+    }
     fsyncSync(fd);
+  } catch(error) {
+    if(candidate&&moved) {
+      try {linkSync(candidate,join(`/proc/self/fd/${fd}`,basename(path)));unlinkSync(candidate);candidate=undefined;moved=false;fsyncSync(fd);}
+      catch {throw new Error(`setup replacement refused; a newer destination was retained and the captured candidate remains at ${candidate}`,{cause:error});}
+    }
+    throw error;
   } finally {
     if (tmp) try { unlinkSync(tmp); } catch {}
+    if(candidate&&!moved)try {unlinkSync(candidate);fsyncSync(fd);}catch{}
     closeSync(fd);
   }
+}
+
+/** Remove only a verified owned namespace, through open directories; never follow ancestry changes. */
+export function safeRemoveTree(path: string): void {
+  checkComponents(path);const parent=dirname(resolve(path));
+  let parentFd:number;
+  try {parentFd=openSync(parent,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);}
+  catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
+  const budget={paths:0,bytes:0};
+  const remove=(fd:number,expected:string,depth:number):void=>{
+    assertOwner(fstatSync(fd),expected);
+    if(depth>64||realpathSync(`/proc/self/fd/${fd}`)!==expected)throw new Error('setup namespace changed; retained');
+    const dir=opendirSync(`/proc/self/fd/${fd}`);
+    try {for(let entry;(entry=dir.readSync())!==null;){
+      const absolute=join(expected,entry.name);budget.bytes+=Buffer.byteLength(absolute);if(++budget.paths>4096||budget.bytes>1048576)throw new Error('setup namespace cleanup exceeds inventory limits; retained');
+      if(realpathSync(`/proc/self/fd/${fd}`)!==expected)throw new Error('setup namespace changed; retained');
+      const target=join(`/proc/self/fd/${fd}`,entry.name),st=lstatSync(target);assertOwner(st,absolute);
+      if(st.isDirectory()) {
+        const child=openSync(target,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+        try {remove(child,absolute,depth+1);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace child changed; retained');rmdirSync(target);}
+        finally {closeSync(child);}
+      } else if(st.isFile()&&st.nlink===1)unlinkSync(target);
+      else throw new Error('setup namespace contains an unsafe entry; retained');
+    }} finally {dir.closeSync();}
+    fsyncSync(fd);
+  };
+  try {
+    assertOwner(fstatSync(parentFd),parent);
+    if(realpathSync(`/proc/self/fd/${parentFd}`)!==parent)throw new Error('setup namespace parent changed; retained');
+    const target=join(`/proc/self/fd/${parentFd}`,basename(path));let child:number;
+    try {child=openSync(target,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);}
+    catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
+    try {remove(child,resolve(path),0);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace changed; retained');rmdirSync(target);fsyncSync(parentFd);}
+    finally {closeSync(child);}
+  } finally {closeSync(parentFd);}
 }
 
 /** Delete only through the verified parent, and only while the captured bytes still match. */

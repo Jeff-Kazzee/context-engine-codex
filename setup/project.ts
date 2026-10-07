@@ -24,7 +24,7 @@ import { describe, installedLedger, SetupError } from './install.ts';
 import { assess, completeLedger, readLedger, revert, rollbackSnapshot, takeSnapshot, type Ledger, type Rule } from './ledger.ts';
 import { safeRead, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
-import { appendBlock, blockRule, prependBlock, type Markers } from './rules.ts';
+import { appendBlock, blockRule, prependBlock, tomlTableScalar, type Markers } from './rules.ts';
 import type { SetupContext } from './runners.ts';
 
 export const TOML_MARKERS: Markers = {
@@ -146,8 +146,7 @@ export function codexTrusts(ctx: SetupContext, root: string): boolean {
   if (!existsSync(p)) return false;
   const text = safeRead(p)?.toString('utf8') ?? '';
   for (let dir = root; ; dir = dirname(dir)) {
-    const at = text.indexOf(`[projects.${JSON.stringify(dir)}]`);
-    if (at >= 0 && /^\s*trust_level\s*=\s*"trusted"/m.test(text.slice(at).split(/\n\s*\[/)[0]!)) return true;
+    if (tomlTableScalar(text, ['projects',dir], 'trust_level') === 'trusted') return true;
     if (dirname(dir) === dir) return false;
   }
 }
@@ -214,19 +213,20 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string, disabled = fals
 }
 
 /** Reverts the Codex project files of one project (by pointer file). */
-function revertCodexProjectFiles(ctx: SetupContext, pointerFile: string): string[] {
-  const { dir, projectRoot } = JSON.parse(safeRead(pointerFile)!.toString('utf8')) as { dir: string; projectRoot: string };
+function revertCodexProjectFiles(ctx: SetupContext, pointerFile: string, retire = false): string[] {
+  const { dir, projectRoot, retired } = JSON.parse(safeRead(pointerFile)!.toString('utf8')) as { dir: string; projectRoot: string; retired?: boolean };
   if (typeof projectRoot !== 'string' || recordedPointer(ctx, projectRoot) !== pointerFile) throw new SetupError('project ledger pointer violates confinement policy');
+  if (retired === true) return ['Codex: retired project opt-in remains inactive until enable; backups preserved.'];
   const ledger = readLedger(dir,{backupRoot:join(ctx.setupDir,'backups'),files:[codexConfig(projectRoot)],namespaced:[],alternativeFiles:[[codexConfig(projectRoot),agentsMd(projectRoot)]]});
   try { lstatSync(projectRoot); }
   catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-    unlinkSync(pointerFile);
+    if (retire) safeWrite(pointerFile, JSON.stringify({dir,projectRoot,retired:true})+'\n'); else unlinkSync(pointerFile);
     return ['Codex: recorded project is missing or moved; project files were left untouched and backups preserved. Clean up any relocated project settings manually.'];
   }
   const rules = projectRules(projectRoot);
   const lines = describe(revert(ledger, rules, assess(ledger, rules)));
-  unlinkSync(pointerFile);
+  if (retire) safeWrite(pointerFile, JSON.stringify({dir,projectRoot,retired:true})+'\n'); else unlinkSync(pointerFile);
   return lines;
 }
 
@@ -235,7 +235,7 @@ export function revertAllCodexProjects(ctx: SetupContext): string[] {
   if (!existsSync(projectsDir(ctx))) return [];
   return readdirSync(projectsDir(ctx))
     .filter((f) => f.endsWith('.json'))
-    .flatMap((f) => revertCodexProjectFiles(ctx,join(projectsDir(ctx), f)));
+    .flatMap((f) => revertCodexProjectFiles(ctx,join(projectsDir(ctx), f),true));
 }
 
 export function enableProject(ctx: SetupContext, projectRoot: string): string[] {

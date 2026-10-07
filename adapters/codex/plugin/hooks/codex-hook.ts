@@ -14,6 +14,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { locallyEnabled } from './activation.ts';
 import type * as Core from '../../../../core/index.ts';
 import type * as Guidance from '../../guidance.ts';
+import type * as Store from '../../../../core/store.ts';
+import type * as Lock from '../../../../core/lock.ts';
 
 interface HookInput {
   hook_event_name: string;
@@ -34,6 +36,7 @@ const DEFAULT_HARD_LIMIT = (272_000 - 32_000) * 4;
 class CoreUnavailable extends Error {}
 /** Context Engine is not active for this project (not enabled, or the kill switch): stand aside silently. */
 class Inactive extends Error {}
+class PendingPrompt extends Error {}
 
 /**
  * A checkout module: beside the CLI the hook calls (`<checkout>/core/cli.ts`), or relative to this
@@ -49,6 +52,25 @@ let lib: typeof Core;
 /** The Working Context's budget in tokens (adapters/codex/guidance.ts codexWorkingContextBudget). */
 let budgetTokens: number;
 let confirmedParticipation = false;
+let store: typeof Store;
+let lock: typeof Lock;
+const PENDING_PROMPT = 'codex-prompt-pending.json';
+function withPromptLease<T>(input: HookInput, fn:()=>T): T {
+  const state=store.resolveStateRoot(),l=store.layout(input.cwd,input.session_id,state);
+  store.ensureDirs(l,state);
+  // Distinct from the CLI operation lease: never recursively acquire that lock.
+  return lock.serialized(join(l.stateDir,'codex-prompt.lock'),fn,{timeoutMs:1000});
+}
+function pendingPrompt(input: HookInput): { path: string; hash?: string } {
+  try {
+    const l=store.layout(input.cwd,input.session_id,store.resolveStateRoot());
+    const path=join(l.stateDir,PENDING_PROMPT),bytes=store.readBytes(path,1024);
+    if(!bytes)return {path};
+    const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
+    if(typeof value.hash!=='string'||!/^[0-9a-f]{64}$/.test(value.hash))throw new Error('invalid pending prompt marker');
+    return {path,hash:value.hash};
+  } catch {throw new PendingPrompt('Context Engine: a pending prompt could not be verified. Do not reset; retry the original request after repairing storage, or disable Context Engine.');}
+}
 
 /** The agent's own reset (new_context): the one event that fails closed. */
 const isResetGate = (input: HookInput): boolean => input.hook_event_name === 'PreToolUse' && input.tool_name === 'new_context';
@@ -70,12 +92,22 @@ async function main(input: HookInput): Promise<void> {
   confirmedParticipation = locallyEnabled(input.cwd);
   if (!confirmedParticipation) return;
   lib = await loadFromCheckout<typeof Core>('core/index.ts', '../../../../core/index.ts');
+  store = await loadFromCheckout<typeof Store>('core/store.ts', '../../../../core/store.ts');
+  lock = await loadFromCheckout<typeof Lock>('core/lock.ts', '../../../../core/lock.ts');
   const guidance = await loadFromCheckout<typeof Guidance>('adapters/codex/guidance.ts', '../../guidance.ts');
   budgetTokens = guidance.codexWorkingContextBudget(process.env.CONTEXT_ENGINE_BUDGET_TOKENS);
   // Cache-local opt-in was checked before imports; the core repeats the participation gate.
   if (lib.killSwitchOn()) return;
   if (input.hook_event_name === 'UserPromptSubmit') {
-    const result = core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }]);
+    const result=withPromptLease(input,()=>{
+    const hash=store.sha(String(input.prompt??'')),pending=pendingPrompt(input);
+    if(pending.hash&&pending.hash!==hash)throw new PendingPrompt('Context Engine: an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine; resets remain blocked.');
+    // Durable intent precedes the fallible CLI call. Only a fingerprint is retained, never prompt text.
+    store.atomicWrite(pending.path,JSON.stringify({hash}), 'frame-key-tmp');
+    const recorded = core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }]);
+    store.removeDirectoryEntries(dirname(pending.path),name=>name===PENDING_PROMPT);
+    return recorded;
+    });
     // The per-turn size readout, with any reminder this prompt fired (an episode may make no tool
     // call for many turns). Codex hands additionalContext to the model as a developer message, so
     // only the core's static budget text goes there: numbers and fixed wording, never the prompt or
@@ -109,13 +141,18 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'new_context') {
     // The reset gate: a refusal here reaches the model as the new_context tool result, so it can
     // fix the file and retry. The reset itself only happens after this step's sampling ends.
-    const refusal = resetRefusal(input);
+    const refusal = withPromptLease(input,()=>{
+      if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: the context window was NOT reset. An earlier user request was not recorded; retry that exact request after repairing storage, or disable Context Engine.');
+      return resetRefusal(input);
+    });
     if (refusal) denyReset(refusal);
   } else if (input.hook_event_name === 'Stop') {
     if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) {
       core(input, 'record', [{ role: 'assistant', text: input.last_assistant_message }]);
     }
   } else if (input.hook_event_name === 'PreCompact') {
+    withPromptLease(input,()=>{
+    if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: compaction was stopped because an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine.');
     // Backstop for resets the gate above never sees (the token limit, a manual /compact). Codex
     // only honours `continue:false`; it aborts the turn, and the user sees the stop reason. So it
     // stops a reset onto an unusable or unreadable file and does no token-budget
@@ -130,8 +167,15 @@ async function main(input: HookInput): Promise<void> {
     else if (!lastTurnIsReset) {
       const manual = input.trigger === 'manual';
       const delivery = manual ? lib.CODEX_MANUAL_COMPACTION.label : lib.CODEX_TOKEN_LIMIT_RESET.label;
-      core(input, 'record', [{ role: 'tool', text: backstopMarker(delivery, manual), delivery }]);
+      try {core(input, 'record', [{ role: 'tool', text: backstopMarker(delivery, manual), delivery }],lib.READ_MAX_FILE_BYTES);}
+      catch(e) {
+        // A marker may be omitted; a reset onto an unreadable context may not proceed.
+        const after=resetRefusal(input,{budget:false});
+        if(after)emit({continue:false,stopReason:after});
+        else if(!(e instanceof CoreUnavailable))throw e;
+      }
     }
+    });
   }
 }
 
@@ -248,15 +292,19 @@ interface CoreResult {
  * One core call through the CLI. Codex may run the hooks of parallel tool calls at the same time,
  * all presenting the same owner; the core serializes them per session (core/lock.ts `serialized`).
  */
-function core(input: HookInput, command: 'record' | 'sync', events?: unknown[]): CoreResult {
+function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], maxBytes?: number): CoreResult {
   const cli = process.env.CONTEXT_ENGINE_CLI || 'context-engine';
   const hardLimit = process.env.CONTEXT_ENGINE_HARD_LIMIT || String(DEFAULT_HARD_LIMIT);
   const args = [command, '--session', input.session_id, '--project', input.cwd, '--runner', RUNNER, '--hard-limit', hardLimit, '--owner-pid', String(runnerPid()), '--if-enabled', '--budget', String(budgetTokens)];
+  if(maxBytes!==undefined)args.push('--max-context-bytes',String(maxBytes));
   const [file, argv] = /\.[cm]?[jt]s$/.test(cli) ? [process.execPath, [cli, ...args]] : [cli, args];
   // JSON can escape each character into six bytes, in both text and parsed turns.
   // Size for the supported 16 MiB payload envelope as well as the character hard limit.
   const maxBuffer = Math.max(16 * 1024 * 1024 * 12, Math.ceil((Number(hardLimit) || DEFAULT_HARD_LIMIT) * 12)) + 1024 * 1024;
-  const r = spawnSync(file, argv, { maxBuffer, input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout: 20_000 });
+  // PreCompact can sync, append its marker, then recheck: all three calls plus
+  // the one-second intent wait must leave room under the host's 30-second limit.
+  const timeout=input.hook_event_name==='PreCompact'?5000:20_000;
+  const r = spawnSync(file, argv, { maxBuffer, input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout });
   let out: CoreResult | undefined;
   try {
     out = JSON.parse(r.stdout) as CoreResult;
@@ -313,7 +361,9 @@ try {
     // checkout), nothing can show the Working Context is usable, and refusing costs only a retry.
     // The path is spelled out here because the core that knows it may be what failed to load.
     if (event && isResetGate(event) && !event.agent_id && confirmedParticipation) {
-      denyReset(`${NOT_RESET} The Context Engine core could not be loaded or reached, so your Working Context .context-engine/${event.session_id}/context.md could not be checked, and resetting onto a file that cannot be delivered would lose the conversation. Carry on in this window for now (if this keeps happening, reinstall or uninstall Context Engine).`);
+      denyReset(e instanceof PendingPrompt ? e.message : `${NOT_RESET} The Context Engine core could not be loaded or reached, so your Working Context .context-engine/${event.session_id}/context.md could not be checked, and resetting onto a file that cannot be delivered would lose the conversation. Carry on in this window for now (if this keeps happening, reinstall or uninstall Context Engine).`);
+    } else if(event && !event.agent_id && confirmedParticipation && (event.hook_event_name==='UserPromptSubmit'||event.hook_event_name==='PreCompact')) {
+      emit({continue:false,stopReason:'Context Engine: this request/compaction was stopped because the user request could not be safely recorded. Retry the original request after repairing storage, or disable Context Engine. No reset acceptance is claimed.'});
     }
   }
   // Every other failure is fail safe: Codex runs natively. Exit 0 with no stdout has no control effect.

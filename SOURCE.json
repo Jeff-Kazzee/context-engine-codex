@@ -7,7 +7,7 @@
     "core/budget.test.ts": "cce835bc49dd5002346040d360c83f303b5693fe053c03bc8061e459732297de",
     "core/budget.ts": "3e0d96feea1e26b9609b63a29ebc2f9fbf8557d6e3bb24a92f61a56449fe5135",
     "core/cli.test.ts": "045e68733e42cbfb7ca33ac481e119880633bad7635f78283a659f4bc4936bff",
-    "core/cli.ts": "e2a255e48936d18d9c8ade79b421d6e7813d766a7f994a1d9ce9ffc6cb6a4b19",
+    "core/cli.ts": "5c2830780cc9283541773f39b69760a7fe2069f976931acf2c74855ebb715ce8",
     "core/confinement.test.ts": "e199d261a76cfba48b10bdf285f3f2667edb0bd40b35ec6d8378e6fcebc345a9",
     "core/delivery.ts": "49801096f2c1bd4dcc8cb64fae2215e84ab74c4c5aed51931a27859c92cf8dce",
     "core/event-safety.ts": "0f7c9c77a2d6a0d75f2f755ce79cb3e321856d5e219e6e4dd5c1f12b58eb4eba",
@@ -30,10 +30,10 @@
     "core/renewed-regressions.test.ts": "b89453eb730b247fa566e077472448e0f0c7397890a5fae38b62322e56d68ce0",
     "core/review-regressions.test.ts": "8c56a053a0353838ee481c388bf2dbf66f2ba7e6dd5ae8f19877e36bd46f988a",
     "core/session.test.ts": "bc85f05e49c0ddc84dc38596bbafe400c9dd0060c1396df2c9177ae1d286d236",
-    "core/session.ts": "af222462566ba61c4f92da762d1befd6bffdbfb60b91aa6625a11b5d3e8980b1",
+    "core/session.ts": "959da7c1002c5971dbcd8a4b20273fe13f52d2180618717d65355f9f2c00ead6",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "baab262a2b2c0879f4ea408bc5d5cb0845fd962c0871bdb9f770e370e8d075ec",
+    "core/store.ts": "9f3bfa7057bc0c5c6a8a382b26c2846386914e89f34bd7561cc0fdd87a599c8b",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
     "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c",
@@ -41,6 +41,7 @@
     "core/wave11-regressions.test.ts": "194a523df9bd5bed8b80d2ebaa6c48023b25bfc3cfa41560aba4382f11d76159",
     "core/wave13-regressions.test.ts": "5231618b0c61e464028c427d1ca84e802b70666a339bd046de6fd6c0b5f4753c",
     "core/wave16-regressions.test.ts": "a50761ac981cd8f9e722b6953d977048c62b7cad5c3b6322a66335225cfdaabd",
+    "core/wave20-regressions.test.ts": "179f9523b48a7e240dc73d8a8a23c2659670bc63de7d642796eb6d0fa9276a47",
     "core/wave7-regressions.test.ts": "402201e4eeb86637e522069feeb2f07a6835c18aa73a635c2bfc571ec4cb07e0",
     "core/wave8-regressions.test.ts": "67f5a78fc0a2e4c2f995d9e735262b5c421d93067c7e1598785055545b7ccdac",
     "core/wave9-regressions.test.ts": "6eb960efdd0943d305c4c8426715a2ca22b50f05143c1684339a449a5382ee51"
@@ -112,7 +113,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "9f1ae5ff06e6ec311ad535a2b710aec23fed422b",
+  "corePatchCommit": "ee283f4890d01cad6a8a842f46a4fed27fe0a403",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -131,6 +132,7 @@
     "Wave10 consolidated repair: bounded setup/Git/managed-ignore reads, durable setup publication, retained recovery receipts, safe counter exhaustion, confined materialization, credential-safe recall accounting and concurrent config preservation. Codex activation rollback, inherited-disable override, reset/read detection and headless recording refusal use synthetic regressions; no live model or auth changes.",
     "Wave11 confirmed-defect repair: bounded HEAD metadata and oversized show envelopes; parent directory flushes during confined state creation; failed install pointer cleanup, snapshot-local backup references and multiline TOML preservation. Codex publishes opt-out after guidance cleanup and refuses RPC output closure; Claude refuses committed resumes with a foreign keyed frame and no recognized boundary. Linux HOME activation control passes unchanged. Synthetic offline evidence only; no model trial or authentication changes.",
     "Wave13 repairs eleven confirmed historical review claims: bounded snapshot publication/reads, cross-record sequence validation, durable recovery accounting/receipt retry, ignore-file and pointer deletion flushes, absolute fallback HOME, credential-safe reverse edits, bounded setup inventory, incompatible TOML feature namespaces and session-bound delayed Claude compaction. Synthetic offline checks only; prior live evidence does not establish acceptance of these changed heads.",
-    "Wave16 finite review repair: integer hard limits; malformed opt-in responses use native fallback; setup verifies runner/config ownership before payload backups, reassesses captured rollback bytes and reserves deletion candidates through a verified parent. Codex explicit hook trust fails on incomplete verification and status accepts equivalent TOML table-key spelling. Optional, default-off stale-refs checks share marker, source-byte, hash-work, Git-probe and time budgets when enabled; exhaustion reports incomplete. Synthetic offline evidence only; no model/provider trial, authentication changes, scanner clearance or merge approval."
+    "Wave16 finite review repair: integer hard limits; malformed opt-in responses use native fallback; setup verifies runner/config ownership before payload backups, reassesses captured rollback bytes and reserves deletion candidates through a verified parent. Codex explicit hook trust fails on incomplete verification and status accepts equivalent TOML table-key spelling. Optional, default-off stale-refs checks share marker, source-byte, hash-work, Git-probe and time budgets when enabled; exhaustion reports incomplete. Synthetic offline evidence only; no model/provider trial, authentication changes, scanner clearance or merge approval.",
+    "Wave20 repairs nine confirmed review claims: pre-log dense event and rendered byte validation; Event Log parent flush and ambiguous-append recovery; conditional config replacement and confined namespace cleanup; semantic Codex TOML trust, uninstall retirement, durable failed-prompt intent and bounded compaction markers. Synthetic offline checks only; current-head supported-runtime acceptance remains unverified."
   ]
 }

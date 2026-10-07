@@ -83,6 +83,9 @@ Options:
                       recall/show.
   --runner <name>     Runner label, e.g. claude-code or codex.
   --hard-limit <n>    Runner hard limit in characters (JS string length).
+  --max-context-bytes <n>
+                      record only: refuse before logging if the rendered next
+                      revision exceeds this UTF-8 byte cap (at most 64 MiB).
   --budget <tokens>   open|sync|record|native-compaction: the Working
                       Context's budget. Results then carry "budget": a size
                       readout and any reminder it fired (25/50/75% once
@@ -151,6 +154,7 @@ function main(argv: string[]): number {
       project: { type: 'string' },
       runner: { type: 'string' },
       'hard-limit': { type: 'string' },
+      'max-context-bytes': { type: 'string' },
       'owner-pid': { type: 'string' },
       budget: { type: 'string' },
       part: { type: 'string' },
@@ -164,6 +168,7 @@ function main(argv: string[]): number {
     return values.help ? 0 : 1;
   }
   const [command, ...rest] = positionals;
+  if(values['max-context-bytes']!==undefined&&command!=='record')throw new Usage('--max-context-bytes applies only to record');
   const projectRoot = values.project ?? process.cwd();
   if (command === 'cite') {
     if (rest.length !== 1) throw new Usage('cite takes one argument: <path>[#L<from>[-<to>]] or commit:<rev>');
@@ -219,7 +224,7 @@ function main(argv: string[]): number {
       s.close();
       return print({ ok: true, closed: true });
     }
-    const result: SyncResult = command === 'record' ? s.record(events) : command === 'native-compaction' ? s.nativeCompaction(events) : s.sync();
+    const result: SyncResult = command === 'record' ? s.record(events, values['max-context-bytes'] !== undefined ? {maxBytes:positiveInt(values['max-context-bytes'],'--max-context-bytes')} : undefined) : command === 'native-compaction' ? s.nativeCompaction(events) : s.sync();
     return print({ ok: true, ...result, workingContext: s.workingContextPath, ...(command === 'open' ? { frameKey: s.frameKey } : {}) });
   });
 }
