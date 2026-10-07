@@ -133,3 +133,14 @@ for(const kind of ['prompt','reset','compact'])test('wave26: '+kind+' gate reche
   hook(f,{hook_event_name:'Stop',last_assistant_message:'COMPLETED_DURING_GATE'});await ended;assert.match(out,kind==='reset'?/deny/:/continue.*false/);
  }finally{gate.kill();await ended;}
 });
+
+test('wave26: shell sync and record calls share a bounded host-time allowance',()=>{
+ const f=setup();hook(f,{hook_event_name:'UserPromptSubmit',prompt:'BOOTSTRAP'});
+ const preload=join(f.projectRoot,'two-call-delay.mjs'),calls=join(f.projectRoot,'call-bounds.jsonl');
+ fs.writeFileSync(preload,`import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const native=cp.spawnSync;cp.spawnSync=function(cmd,args,opts){const operation=args.find(x=>x==='sync'||x==='record');fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({operation,timeout:opts.timeout})+'\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20);if(operation==='record')return {status:null,stdout:'',stderr:'',error:Object.assign(new Error('synthetic delayed record timeout'),{code:'ETIMEDOUT'})};return native(cmd,args,opts);};syncBuiltinESMExports();`);
+ const result=hook(f,{hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'ordinary-check'},tool_response:'COMPLETED_SHELL'},{NODE_OPTIONS:'--import='+preload});
+ assert.match(result.stdout,/continue.*false/);
+ const observed=fs.readFileSync(calls,'utf8').trim().split('\n').map(line=>JSON.parse(line));assert.deepEqual(observed,[{operation:'sync',timeout:10000},{operation:'record',timeout:10000}]);
+ assert.ok(5000+observed.reduce((sum,c)=>sum+c.timeout,0)<30000);
+ assert.match(hook(f,{hook_event_name:'PreToolUse',tool_name:'new_context'}).stdout,/deny/);
+});
