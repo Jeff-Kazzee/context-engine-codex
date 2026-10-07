@@ -63,14 +63,5 @@ export function confineStep(step: ConfineStep, path: string): void {
   confineHook?.(step, path);
 }
 
-// Where confined reads ask the kernel what an open descriptor is. Tests point it at a missing
-// directory to prove a system without /proc fails closed.
-let procFdDir = '/proc/self/fd';
-
-export function setProcFdDir(dir: string | null): void {
-  procFdDir = dir ?? '/proc/self/fd';
-}
-
-export function fdLinkPath(fd: number): string {
-  return `${procFdDir}/${fd}`;
-}
+// Preserve the existing missing-descriptor test seam in the Linux backend.
+export { setProcFdDir } from './platform-linux.ts';

@@ -1,9 +1,10 @@
+import { anchor, childTarget, suffix, processStartMarker as hostProcessStartMarker } from './platform.ts';
 // Single-writer session lock. The holder is identified by pid + hostname + process start marker
 // (Linux: start time from /proc/<pid>/stat, so a recycled pid is not mistaken for the holder).
 import { randomBytes } from 'node:crypto';
-import { closeSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, readlinkSync, readdirSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, readlinkSync, readdirSync, unlinkSync, writeSync } from './platform.ts';
 import { hostname } from 'node:os';
-import { fdLinkPath, lockStep } from './faults.ts';
+import { lockStep } from './faults.ts';
 import { atomicWrite, readBytes, readLockPublicationCandidate, openPrivateDirectory } from './store.ts';
 import { dirname, basename, join } from 'node:path';
 
@@ -18,14 +19,7 @@ export interface LockHolder {
 }
 
 export function processStartMarker(pid: number): string | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    // Field 2 (comm) may contain spaces and parens; fields after the last ')' start at field 3.
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    return fields[19] ?? null; // field 22: starttime
-  } catch {
-    return null;
-  }
+  return hostProcessStartMarker(pid);
 }
 
 export function holderFor(pid: number, runner: string, hardLimit: number): LockHolder {
@@ -46,13 +40,13 @@ export function isAlive(h: LockHolder): boolean {
   return !(h.startMarker && marker && marker !== h.startMarker);
 }
 
-const atParent = (path: string, parentFd?: number) => parentFd === undefined ? path : join(fdLinkPath(parentFd), basename(path));
+const atParent = (path: string, parentFd?: number) => parentFd === undefined ? path : childTarget(anchor(parentFd), basename(path));
 
 export function readLock(path: string, parentFd?: number): LockHolder | null | 'unreadable' {
   let bytes: Buffer | undefined;
   const deadline=Date.now()+100;
   for(;;){try{
-    const expected = parentFd === undefined ? undefined : join(readlinkSync(fdLinkPath(parentFd)), basename(path));
+    const expected = parentFd === undefined ? undefined : join(readlinkSync(anchor(parentFd)), basename(path));
     bytes=readBytes(atParent(path,parentFd),16384,expected);break;
   }catch(e){
     // A legitimate link publication briefly has two names. Wait without reading;
@@ -77,11 +71,11 @@ export function readLock(path: string, parentFd?: number): LockHolder | null | '
 function recoverPublication(path: string, parentFd?: number): boolean {
   const parent=parentFd ?? openPrivateDirectory(dirname(path))!;
   try {
-    const real=readlinkSync(fdLinkPath(parent)),target=join(fdLinkPath(parent),basename(path));
-    const names=readdirSync(fdLinkPath(parent));if(names.length>4096)return false;
+    const real=readlinkSync(anchor(parent)),target=childTarget(anchor(parent),basename(path));
+    const names=readdirSync(anchor(parent));if(names.length>4096)return false;
     const candidates=names.filter(name=>name.startsWith(basename(path)+'.') && /^\.[1-9][0-9]*\.[0-9a-f]{8}\.new$/.test(name.slice(basename(path).length)));
     for(const name of candidates){
-      const candidate=join(fdLinkPath(parent),name);
+      const candidate=childTarget(anchor(parent),name);
       try {
         const a=lstatSync(candidate),b=lstatSync(target);
         if(a.dev!==b.dev||a.ino!==b.ino||a.nlink!==2||b.nlink!==2)continue;
@@ -179,10 +173,10 @@ export function serialized<T>(path: string, fn: () => T, opts: { timeoutMs?: num
 
 function tryLink(path: string, me: LockHolder, parentFd?: number): boolean {
   const parent=parentFd ?? openPrivateDirectory(dirname(path))!;
-  const target=join(`/proc/self/fd/${parent}`,basename(path));
-  const candidate = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.new`;
+  const target=childTarget(anchor(parent),basename(path));
+  const candidate = suffix(target, `.${process.pid}.${randomBytes(4).toString('hex')}.new`);
   try {
-  const fd = openSync(candidate, 'wx', 0o600);
+  const fd = openSync(candidate, 'exclusive');
   try {
     const bytes = Buffer.from(JSON.stringify(me));
     try {

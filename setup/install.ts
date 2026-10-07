@@ -1,6 +1,7 @@
+import { anchor, childTarget } from '../core/platform.ts';
 // Install and uninstall one runner's adapter through the runner's own plugin commands, with every
 // config file they touch backed up byte for byte first (ledger.ts).
-import { closeSync, constants, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirPrivateSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '../core/platform.ts';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { assess, completeLedger, type FileReport, type Ledger, preflightOwnership, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
@@ -14,11 +15,11 @@ const pointerPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}
 function removeFailedPointer(ctx: SetupContext, id: string, publication: string): void {
   const parent = openPrivateDirectory(ctx.setupDir)!;
   const name = `.context-engine-install-cleanup-${randomBytes(16).toString('hex')}.tmp`;
-  const anchored = `/proc/self/fd/${parent}`, pointer = join(anchored, `${id}.json`), candidate = join(anchored, name);
+  const anchored = anchor(parent), pointer = childTarget(anchored, `${id}.json`), candidate = childTarget(anchored, name);
   let moved = false, reserved = false;
   try {
     // Reserve our scratch name exclusively; never overwrite a preexisting capture.
-    closeSync(openSync(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)); reserved = true;
+    closeSync(openSync(candidate, 'exclusive-nofollow')); reserved = true;
     try { renameSync(pointer, candidate); moved = true; }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
     if (!moved) return;
@@ -72,7 +73,7 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
       }
     }
     const ledger = completeLedger(snap);
-    mkdirSync(ctx.setupDir, { recursive: true, mode: 0o700 });
+    mkdirPrivateSync(ctx.setupDir, { recursive: true });
     publication = `${JSON.stringify({ dir: ledger.dir })}\n`;
     safeWrite(pointerPath(ctx, spec.id), publication);
     const changed = ledger.files.filter((f) => !sameBytes(f.before, f.after)).map((f) => f.path);
@@ -117,7 +118,7 @@ export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   }
   lines.push(...describe(revert(ledger, spec.rules, assess(ledger, spec.rules))));
   const parent = openPrivateDirectory(ctx.setupDir)!;
-  try { unlinkSync(join(`/proc/self/fd/${parent}`, `${spec.id}.json`)); fsyncSync(parent); }
+  try { unlinkSync(childTarget(anchor(parent), `${spec.id}.json`)); fsyncSync(parent); }
   finally { closeSync(parent); }
   lines.push(`Backups kept: ${ledger.dir}`);
   if (ledger.retainedPaths?.length) lines.push(`Unowned new paths retained: ${ledger.retainedPaths.length}`);

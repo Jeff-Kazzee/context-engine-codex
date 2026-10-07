@@ -483,7 +483,7 @@ class Core {
 
   private writeWorkingContext(text: string): void {
     assertWorkingContextDir(this.l.workingContext);
-    atomicWrite(this.l.workingContext, text, 'wc-tmp', 0o600);
+    atomicWrite(this.l.workingContext, text, 'wc-tmp');
   }
 
   private invalid(bytes: Buffer | undefined | 'not-a-file' | 'too-large'): { reason: RestoreReason; text: string | null } | { text: string } {

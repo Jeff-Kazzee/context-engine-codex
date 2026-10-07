@@ -1,3 +1,4 @@
+import { anchor, childTarget } from '../core/platform.ts';
 // The edit ledger: how setup changes files it doesn't own and puts them back.
 //
 // Before an edit, every file the edit may change gets a byte backup in a timestamped directory,
@@ -14,9 +15,9 @@
 //    as the edit left them, newly created explicit namespaces are removed; other owned created directories
 //    are removed only when empty, and unowned directories remain.
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirPrivateSync, opendirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from '../core/platform.ts';
 import { basename, dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
-import { closeSync, constants, fsyncSync, openSync } from 'node:fs';
+import { closeSync, fsyncSync, openSync } from '../core/platform.ts';
 import { openPrivateDirectory } from '../core/store.ts';
 import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeRemoveEmptyDirectory, safeRemoveTree, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
@@ -117,7 +118,7 @@ export function takeSnapshot(opts: { backupRoot: string; kind: string; files: st
       const name = `${opts.kind}-${timestamp(at)}${n===1?'':'-'+n}`;
       if (name.includes('/') || name.includes('\\') || name === '..') throw new Error('invalid snapshot kind');
       dir = join(opts.backupRoot,name);
-      try { mkdirSync(join(`/proc/self/fd/${parent}`,name),{mode:0o700}); fsyncSync(parent); break; }
+      try { mkdirPrivateSync(childTarget(anchor(parent),name)); fsyncSync(parent); break; }
       catch(e) { if((e as NodeJS.ErrnoException).code!=='EEXIST') throw e; }
     }
   } finally {closeSync(parent);}
@@ -147,7 +148,7 @@ function writeBackup(path: string, bytes: Buffer): void {
   const parent = openPrivateDirectory(dirname(path))!;
   let fd: number | undefined;
   try {
-    fd = openSync(join(`/proc/self/fd/${parent}`,path.split('/').at(-1)!),constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
+    fd = openSync(childTarget(anchor(parent),path.split('/').at(-1)!),'exclusive-nofollow');
     writeFileSync(fd,bytes); fsyncSync(fd); fsyncSync(parent);
   } finally {if(fd!==undefined)closeSync(fd);closeSync(parent);}
 }
@@ -162,9 +163,9 @@ export function discardSnapshot(s: Snapshot): void {
   let directory:number|undefined;
   try {
     directory=openPrivateDirectory(s.dir)!;
-    for(const name of ['before','after'])rmdirSync(join(`/proc/self/fd/${directory}`,name));
+    for(const name of ['before','after'])rmdirSync(childTarget(anchor(directory),name));
     fsyncSync(directory);
-    const target=join(`/proc/self/fd/${parent}`,basename(s.dir)),now=lstatSync(target),opened=lstatSync(`/proc/self/fd/${directory}/.`);
+    const target=childTarget(anchor(parent),basename(s.dir)),now=lstatSync(target),opened=lstatSync(childTarget(anchor(directory), '.'));
     if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('rollback snapshot directory changed; retained');
     rmdirSync(target);fsyncSync(parent);
   }finally{if(directory!==undefined)closeSync(directory);closeSync(parent);}

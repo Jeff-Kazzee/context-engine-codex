@@ -1,16 +1,16 @@
+import { anchor, childTarget, absoluteName, openedPath, sameParent, suffix, targetBasename, requireSupportedPlatform, type FileTarget } from './platform.ts';
 // File primitives and layout for the core. Every write is temp + fsync + rename, so a reader
 // sees the old file or the new one, never a torn one.
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
-  constants,
   existsSync,
   fstatSync,
-  fchmodSync,
+  restrictPrivateAccess,
   fsyncSync,
   linkSync,
   lstatSync,
-  mkdirSync,
+  mkdirPrivateSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -23,10 +23,10 @@ import {
   unlinkSync,
   writeFileSync,
   writeSync,
-} from 'node:fs';
+} from './platform.ts';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { confineStep, crashPoint, fdLinkPath, type CrashPoint } from './faults.ts';
+import { confineStep, crashPoint, type CrashPoint } from './faults.ts';
 import { serialized } from './lock.ts';
 
 export const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
@@ -113,15 +113,16 @@ export function layout(projectRoot: string, sessionId: string, stateRoot: string
 
 /** Opens one verified user-owned private directory. Only managed Working Context directories may be tightened. */
 export function openPrivateDirectory(path: string, opts: { create?: boolean; tighten?: boolean } = {}): number | undefined {
+  requireSupportedPlatform();
   if (opts.create) createConfinedDirectory(path);
   let fd: number;
-  try { fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); }
+  try { fd = openSync(path, 'directory'); }
   catch (e) { if (!opts.create && (e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw new Error(`refusing linked or unavailable private directory: ${path}`, { cause: e }); }
   try {
     const st = fstatSync(fd);
-    if (!st.isDirectory() || openedPath(fd) !== resolve(path) || (process.getuid && st.uid !== process.getuid())) throw new Error(`private directory is not verified or owned by this user: ${path}`);
-    if (opts.tighten) fchmodSync(fd, 0o700);
-    else if ((st.mode & 0o077) !== 0) throw new Error(`state directory must already be private (0700): ${path}`);
+    if (!st.isDirectory() || openedPath(fd) !== resolve(path) || (st.owner !== 'current')) throw new Error(`private directory is not verified or owned by this user: ${path}`);
+    if (opts.tighten) restrictPrivateAccess(fd, 'directory');
+    else if (!st.privateAccess) throw new Error(`state directory must already be private (0700): ${path}`);
     return fd;
   } catch (e) { closeSync(fd); throw e; }
 }
@@ -138,21 +139,21 @@ function createConfinedDirectory(path: string, ownedFrom?: string): void {
     existing = dirname(existing);
   }
   let fd: number;
-  try { fd = openSync(existing, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); }
+  try { fd = openSync(existing, 'directory'); }
   catch (e) { throw new Error('linked or unavailable private-directory ancestor; refusing creation', { cause: e }); }
   try {
     if (openedPath(fd) !== existing) throw new Error('linked private-directory ancestor; refusing creation');
     const checkOwner = () => {
-      if (ownedFrom && isWithin(ownedFrom, existing) && process.getuid && fstatSync(fd).uid !== process.getuid()) throw new Error('managed directory is not owned by this user; refusing creation');
+      if (ownedFrom && isWithin(ownedFrom, existing) && fstatSync(fd).owner !== 'current') throw new Error('managed directory is not owned by this user; refusing creation');
     };
     checkOwner();
     for (const name of missing) {
       checkOwner();
       if (openedPath(fd) !== existing) throw new Error('private-directory ancestor changed; refusing creation');
-      const anchored = join(`/proc/self/fd/${fd}`, name);
-      try { mkdirSync(anchored, { mode: 0o700 }); }
+      const anchored = childTarget(anchor(fd), name);
+      try { mkdirPrivateSync(anchored); }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
-      const next = openSync(anchored, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      const next = openSync(anchored, 'directory');
       try { fsyncSync(fd); } catch (e) { closeSync(next); throw e; }
       closeSync(fd); fd = next;
       existing = join(existing, name);
@@ -164,19 +165,20 @@ function createConfinedDirectory(path: string, ownedFrom?: string): void {
 
 function privateWorkingContextFile(path: string): void {
   let fd: number;
-  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  try { fd = openSync(path, 'read'); }
   catch (e) { if (['ENOENT', 'ELOOP'].includes((e as NodeJS.ErrnoException).code ?? '')) return; throw e; }
   try {
     const st = fstatSync(fd), real = openedPath(fd);
     if (real !== path) throw new Error('Working Context file path changed; refusing permission changes');
     if (!st.isFile() || st.nlink !== 1 || isCredential(real, st)) return;
-    if (process.getuid && st.uid !== process.getuid()) throw new Error('Working Context file is not owned by this user');
-    fchmodSync(fd, 0o600);
+    if (st.owner !== 'current') throw new Error('Working Context file is not owned by this user');
+    restrictPrivateAccess(fd, 'file');
   } finally { closeSync(fd); }
 }
 
 /** Creates the private state directories (mode 0700) and the Working Context directory. */
 export function ensureDirs(l: Layout, stateRoot: string): void {
+  requireSupportedPlatform();
   for (const d of [stateRoot, dirname(l.stateDir), l.stateDir, l.revisions]) {
     closeSync(openPrivateDirectory(d, { create: true })!);
   }
@@ -187,10 +189,10 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
   const managed = dirname(dirname(l.workingContext));
   const parent = openPrivateDirectory(managed, { tighten: true })!;
   try {
-  const ignore = join(fdLinkPath(parent), '.gitignore');
+  const ignore = childTarget(anchor(parent), '.gitignore');
   try {
     // O_EXCL does not follow even a dangling symlink at this name.
-    const file = openSync(ignore, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    const file = openSync(ignore, 'exclusive-nofollow');
     try { writeFileSync(file, '# Context Engine Working Contexts are never committed.\n*\n'); fsyncSync(file); }
     finally { closeSync(file); }
   } catch (e) {
@@ -199,7 +201,7 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
     if (rules.at(-1) !== '*') throw new Error('.context-engine/.gitignore must end with a blanket * rule; fix it before enabling Context Engine');
-    const file = openSync(ignore, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const file = openSync(ignore, 'read');
     try {
       const st = fstatSync(file);
       if (!st.isFile() || st.nlink !== 1 || openedPath(file) !== join(managed, '.gitignore')) throw new Error('managed ignore file changed before flush');
@@ -234,13 +236,13 @@ function storedFrameKey(path: string): string | null {
  */
 export function sessionFrameKey(stateDir: string): string {
   const parent = openPrivateDirectory(stateDir)!;
-  const path = join(stateDir, 'frame-key'), target = join(fdLinkPath(parent),'frame-key');
-  let tmp: string | undefined;
+  const path = join(stateDir, 'frame-key'), target = childTarget(anchor(parent),'frame-key');
+  let tmp: FileTarget | undefined;
   try {
   const existing = storedFrameKey(path);
   if (existing) return existing;
   const key = randomBytes(16).toString('hex');
-  tmp = writeTemp(target, `${key}\n`, 'frame-key-tmp', 0o600);
+  tmp = writeTemp(target, `${key}\n`, 'frame-key-tmp');
   try {
     try {
       linkSync(tmp, target); fsyncSync(parent);
@@ -315,20 +317,6 @@ function isCredential(real: string, st: { dev: number; ino: number }): boolean {
   return dirs.some((d) => isWithin(realOrResolved(d), real));
 }
 
-/**
- * The real path of what `fd` actually is, from the kernel (`/proc/self/fd/<fd>`), not from the
- * name that was opened. PLATFORM ASSUMPTION: Linux with /proc mounted (the core already relies on
- * /proc for lock liveness). Where /proc is unavailable this throws, so every confined read fails
- * closed: nothing is read rather than read unverified.
- */
-function openedPath(fd: number): string {
-  try {
-    return readlinkSync(fdLinkPath(fd));
-  } catch (e) {
-    throw new Error(`cannot verify which file was opened (${fdLinkPath(fd)} is unavailable: ${(e as NodeJS.ErrnoException).code ?? e}); refusing to read it. Confined reads need Linux with /proc mounted.`);
-  }
-}
-
 /** Why a confined read refused: out of the project, a credential, or not one regular file with one name. */
 export type Refusal = 'outside' | 'credential' | 'not-a-file';
 
@@ -342,6 +330,7 @@ export type Refusal = 'outside' | 'credential' | 'not-a-file';
  * (throws) when the opened file cannot be identified.
  */
 export function readConfined(root: string, rel: string, maxBytes = 16 * 1024 * 1024): { bytes: Buffer } | { refused: Refusal } {
+  requireSupportedPlatform();
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > 16 * 1024 * 1024) throw new Error('invalid confined source read bound');
   const realRoot = realpathSync(root);
   const candidate = realpathSync(resolve(realRoot, rel));
@@ -349,7 +338,7 @@ export function readConfined(root: string, rel: string, maxBytes = 16 * 1024 * 1
   confineStep('before-open', candidate);
   let fd: number;
   try {
-    fd = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    fd = openSync(candidate, 'read');
   } catch (e) {
     // The checked name became a symbolic link: whatever it leads to is never followed.
     if ((e as NodeJS.ErrnoException).code === 'ELOOP') return { refused: 'not-a-file' };
@@ -415,11 +404,12 @@ export function assertWorkingContextDir(wc: string): void {
 export function readWorkingContextFile(wc: string): Buffer | undefined | 'not-a-file';
 export function readWorkingContextFile(wc: string, maxBytes: number): Buffer | undefined | 'not-a-file' | 'too-large';
 export function readWorkingContextFile(wc: string, maxBytes?: number): Buffer | undefined | 'not-a-file' | 'too-large' {
+  requireSupportedPlatform();
   assertWorkingContextDir(wc);
   let fd: number;
   confineStep('before-open', wc);
   try {
-    fd = openSync(wc, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    fd = openSync(wc, 'read');
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return undefined;
@@ -457,10 +447,10 @@ export function readWorkingContextFile(wc: string, maxBytes?: number): Buffer | 
 const CORE_TEMP = /\.ce-\d+-[0-9a-f]{8}\.tmp$/;
 
 /** Writes `data` whole to a fresh temp file beside `path` (core naming) and fsyncs it. Returns its path. */
-function writeTemp(path: string, data: string, point: CrashPoint, mode: number): string {
-  const tmp = `${path}.ce-${process.pid}-${randomBytes(4).toString('hex')}.tmp`;
-  // 'wx' (O_EXCL): a fresh file, never something already at that name (a symlink included).
-  const fd = openSync(tmp, 'wx', mode);
+function writeTemp(path: FileTarget, data: string, point: CrashPoint): FileTarget {
+  const tmp = suffix(path, `.ce-${process.pid}-${randomBytes(4).toString('hex')}.tmp`);
+  // 'exclusive' (O_EXCL): a fresh file, never something already at that name (a symlink included).
+  const fd = openSync(tmp, 'exclusive');
   try {
     const bytes = Buffer.from(data);
     for (let offset = 0; offset < bytes.length;) {
@@ -476,14 +466,14 @@ function writeTemp(path: string, data: string, point: CrashPoint, mode: number):
   return tmp;
 }
 
-export function atomicWrite(path: string, data: string, point: CrashPoint, mode = 0o600): void {
+export function atomicWrite(path: string, data: string, point: CrashPoint): void {
   if (point !== 'wc-tmp') {
     const parent = dirname(resolve(path));
     const fd = openPrivateDirectory(parent)!;
-    let tmp: string | undefined;
+    let tmp: FileTarget | undefined;
     try {
-      const target=join(fdLinkPath(fd),basename(path));
-      tmp=writeTemp(target,data,point,mode);
+      const target=childTarget(anchor(fd),basename(path));
+      tmp=writeTemp(target,data,point);
       renameSync(tmp,target);
       fsyncSync(fd);
     } finally { if(tmp)try{unlinkSync(tmp);}catch{} closeSync(fd); }
@@ -493,12 +483,12 @@ export function atomicWrite(path: string, data: string, point: CrashPoint, mode 
   // verified open directory, so a later parent swap cannot redirect a write.
   assertWorkingContextDir(path);
   const parent = dirname(path);
-  const fd = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  let tmp: string | undefined;
+  const fd = openSync(parent, 'directory');
+  let tmp: FileTarget | undefined;
   try {
     if (!fstatSync(fd).isDirectory() || openedPath(fd) !== parent) throw new Error('Working Context parent could not be verified; refusing to write');
-    const target = join(fdLinkPath(fd), basename(path));
-    tmp = writeTemp(target, data, point, mode);
+    const target = childTarget(anchor(fd), basename(path));
+    tmp = writeTemp(target, data, point);
     renameSync(tmp, target);
     fsyncSync(fd);
   } finally {
@@ -507,22 +497,22 @@ export function atomicWrite(path: string, data: string, point: CrashPoint, mode 
   }
 }
 
-export function readBytes(path: string, maxBytes?: number, expectedPath = resolve(path)): Buffer | undefined {
+export function readBytes(path: FileTarget, maxBytes?: number, expectedPath = absoluteName(path)): Buffer | undefined {
   return readPrivateBytes(path,maxBytes,expectedPath,1);
 }
 
 /** Only a lock's exact publication candidate may be inspected with two verified names. */
-export function readLockPublicationCandidate(path: string, target: string, expectedPath: string): Buffer | undefined {
-  const suffix = basename(path).slice(basename(target).length);
-  if (dirname(path) !== dirname(target) || !/^\.[1-9][0-9]*\.[0-9a-f]{8}\.new$/.test(suffix)) throw new Error('invalid lock publication candidate');
+export function readLockPublicationCandidate(path: FileTarget, target: FileTarget, expectedPath: string): Buffer | undefined {
+  const ending = targetBasename(path).slice(targetBasename(target).length);
+  if (!sameParent(path, target) || !/^\.[1-9][0-9]*\.[0-9a-f]{8}\.new$/.test(ending)) throw new Error('invalid lock publication candidate');
   const a=lstatSync(path),b=lstatSync(target);
   if (!a.isFile() || !b.isFile() || a.dev!==b.dev || a.ino!==b.ino || a.nlink!==2 || b.nlink!==2) throw new Error('lock publication names do not match');
   return readPrivateBytes(path,16384,expectedPath,2,{dev:a.dev,ino:a.ino,target});
 }
 
-function readPrivateBytes(path: string, maxBytes: number | undefined, expectedPath: string, links: 1 | 2, publication?: {dev:number;ino:number;target:string}): Buffer | undefined {
+function readPrivateBytes(path: FileTarget, maxBytes: number | undefined, expectedPath: string, links: 1 | 2, publication?: {dev:number;ino:number;target:FileTarget}): Buffer | undefined {
   let fd: number;
-  try { fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK); }
+  try { fd=openSync(path,'read'); }
   catch(e) {if((e as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw e;}
   try {
     const st=fstatSync(fd),real=openedPath(fd);
@@ -532,7 +522,7 @@ function readPrivateBytes(path: string, maxBytes: number | undefined, expectedPa
     }
     if(st.nlink!==links)throw Object.assign(new Error('private state file is linked under multiple names; refusing payload'),{code:'CE_STATE_LINK_COUNT'});
     if(real!==expectedPath)throw Object.assign(new Error('private state file path changed; refusing payload'),{code:'CE_STATE_PATH_CHANGED'});
-    if (!st.isFile() || isCredential(real,st) || (process.getuid&&st.uid!==process.getuid())) throw new Error('private state file is not verified, unlinked and user-owned');
+    if (!st.isFile() || isCredential(real,st) || (st.owner !== 'current')) throw new Error('private state file is not verified, unlinked and user-owned');
     if(maxBytes!==undefined){const bytes=boundedRead(fd,st.size,maxBytes);if(bytes==='too-large')throw Object.assign(new Error('private state payload exceeds size limit'),{code:'CE_SIZE_LIMIT'});return bytes;}
     return readFileSync(fd);
   } finally {closeSync(fd);}
@@ -653,12 +643,12 @@ export function truncateTornTail(path: string): number {
 }
 
 function verifiedLogDescriptor(path: string, append: boolean, readOnly=false, parentFd?: number): number {
-  const target = parentFd === undefined ? path : join(fdLinkPath(parentFd), basename(path));
+  const target = parentFd === undefined ? path : childTarget(anchor(parentFd), basename(path));
   const expected = parentFd === undefined ? resolve(path) : join(openedPath(parentFd), basename(path));
-  const fd = openSync(target, (append ? constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT : readOnly ? constants.O_RDONLY : constants.O_RDWR) | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  const fd = openSync(target, append ? 'append' : readOnly ? 'read' : 'read-write');
   try {
     const st = fstatSync(fd);
-    if (!st.isFile() || st.nlink !== 1 || openedPath(fd) !== expected || (process.getuid && st.uid !== process.getuid())) throw new Error('Event Log is not a verified unlinked owned regular file');
+    if (!st.isFile() || st.nlink !== 1 || openedPath(fd) !== expected || (st.owner !== 'current')) throw new Error('Event Log is not a verified unlinked owned regular file');
     return fd;
   } catch (e) { closeSync(fd); throw e; }
 }
@@ -701,13 +691,13 @@ export function removeDirectoryEntries(dir: string, own: (name: string) => boole
   if (parent === undefined) return [];
   const removed: string[] = [];
   try {
-    const anchored = fdLinkPath(parent);
+    const anchored = anchor(parent);
     for (const name of readdirSync(anchored)) {
       if (!own(name)) continue;
-      const target = join(anchored, name);
+      const target = childTarget(anchored, name);
       try {
         const st = lstatSync(target);
-        if (!st.isFile() || (process.getuid && st.uid !== process.getuid())) continue;
+        if (!st.isFile() || (st.owner !== 'current')) continue;
         unlinkSync(target);
         removed.push(join(dir, name));
       } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
