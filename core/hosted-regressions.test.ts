@@ -28,16 +28,18 @@ test('zero-progress lock writes never publish or leave candidates', () => {
   assert.deepEqual(fs.readdirSync(root), []);
 });
 
-test('a failed partial log append does not commit and cannot swallow the next successful entry', () => {
+test('a failed partial log append requires reopening and cannot swallow the next successful entry', () => {
   const f = fixture(), opened = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }); assert.equal(opened.status, 'open'); const s = opened.session;
   s.record([{ role: 'user', text: 'BASELINE' }]); const before = s.sync().revision, log = join(s.stateDir, 'events.jsonl'), native = fs.writeSync; let partial = false;
   fs.writeSync = ((fd: number, bytes: Uint8Array, offset: number, length: number) => {
     if (fs.realpathSync(`/proc/self/fd/${fd}`) === log) { if (partial) return 0; partial = true; return native(fd, bytes, offset, 3); }
     return native(fd, bytes, offset, length);
   }) as typeof fs.writeSync; syncBuiltinESMExports();
-  try { assert.throws(() => s.record([{ role: 'tool', text: 'FAILED_APPEND' }]), /incomplete Event Log/); assert.equal(s.sync().revision, before); }
+  try { assert.throws(() => s.record([{ role: 'tool', text: 'FAILED_APPEND' }]), /incomplete Event Log/); assert.throws(()=>s.sync(),/close and reopen/); }
   finally { fs.writeSync = native; syncBuiltinESMExports(); }
-  s.record([{ role: 'tool', text: 'SUCCESS_AFTER_FAILURE' }]); s.close();
+  assert.throws(()=>s.record([{role:'tool',text:'SUCCESS_AFTER_FAILURE'}]),/close and reopen/);s.close();
+  const reopened=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(reopened.status,'open');assert.equal(reopened.session.sync().revision,before);
+  reopened.session.record([{ role: 'tool', text: 'SUCCESS_AFTER_FAILURE' }]); reopened.session.close();
   assert.equal(recall({ ...f, sessionId: 'S1', query: 'SUCCESS_AFTER_FAILURE' }).total, 1);
   assert.equal(recall({ ...f, sessionId: 'S1', query: 'FAILED_APPEND' }).total, 0);
 });
