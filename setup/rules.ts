@@ -79,11 +79,12 @@ export function jsonRule(paths: string[][]): Rule {
 const header = (line: string) => /^\s*\[/.test(line);
 
 /** Header positions outside basic/literal strings and comments, including multiline strings. */
-function tomlHeaders(lines: string[]): Set<number> {
+function tomlHeaders(lines: string[], outsideStrings?: Set<number>): Set<number> {
   const headers = new Set<number>();
   let quote = '', multiline = false;
   for (let row = 0; row < lines.length; row++) {
     const line = lines[row]!;
+    if (!quote) outsideStrings?.add(row);
     if (!quote && header(line)) headers.add(row);
     for (let i = 0; i < line.length; i++) {
       const c = line[i]!;
@@ -106,6 +107,45 @@ function tomlHeaders(lines: string[]): Set<number> {
   }
   if (quote) throw new Error('unterminated TOML multiline string; refusing table stripping');
   return headers;
+}
+
+/** Read a boolean in a named table using TOML key spelling, outside strings/comments. */
+function tomlKey(part: string): string {
+  if (part.startsWith("'")) return part.slice(1,-1);
+  if (!part.startsWith('"')) return part;
+  const text = part.slice(1,-1), escapes: Record<string,string> = { b:'\b',t:'\t',n:'\n',f:'\f',r:'\r',e:'\u001b','"':'"','\\':'\\' };
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!;
+    if (char !== '\\') { out += char; continue; }
+    const escape = text[++i]!;
+    if (escape in escapes) { out += escapes[escape]; continue; }
+    const digits = escape === 'u' ? 4 : escape === 'U' ? 8 : 0, hex = text.slice(i+1,i+1+digits);
+    const point = Number.parseInt(hex,16);
+    if (!digits || hex.length !== digits || !/^[0-9a-f]+$/i.test(hex) || point > 0x10ffff || point >= 0xd800 && point <= 0xdfff) throw new Error('invalid TOML key escape');
+    out += String.fromCodePoint(point); i += digits;
+  }
+  return out;
+}
+export function tomlTableBoolean(text: string, table: string[], key: string): boolean {
+  const lines = text.split('\n'), outside = new Set<number>();
+  const headers = tomlHeaders(lines, outside);
+  let active = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (headers.has(i)) {
+      const match = /^\s*\[\s*((?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)(?:\s*\.\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+))*)\s*\]\s*(?:#.*)?$/.exec(line);
+      const parts = match?.[1]?.match(/"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+/g)?.map(tomlKey);
+      active = !!parts && parts.length === table.length && parts.every((part,n) => part === table[n]);
+    } else if (active && outside.has(i)) {
+      const match = /^\s*("(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)\s*=\s*(true|false)\s*(?:#.*)?$/.exec(line);
+      if (match) {
+        const name = tomlKey(match[1]!);
+        if (name === key) return match[2] === 'true';
+      }
+    }
+  }
+  return false;
 }
 
 /**

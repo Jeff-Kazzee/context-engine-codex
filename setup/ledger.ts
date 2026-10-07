@@ -18,7 +18,7 @@ import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmdirSync,
 import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { closeSync, constants, fsyncSync, openSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
-import { checkComponents, safeRead, safeWrite } from './files.ts';
+import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
 
 /** How to recognise and remove our entries in one file. */
@@ -98,8 +98,10 @@ export function takeSnapshot(opts: { backupRoot: string; kind: string; files: st
     checkComponents(path);
     try { if (!lstatSync(path).isDirectory()) throw new Error(`setup watched root is not a directory: ${path}`); }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    checkOwnedDirectory(path);
   }
   for (const path of opts.namespaced) checkComponents(path);
+  for (const path of opts.files) checkOwnedFile(path);
   const before=opts.files.map(path=>{const bytes=safeRead(path);assertBackupSafe(path,bytes);return bytes;});
   const at = new Date();
   checkComponents(opts.backupRoot);
@@ -213,15 +215,19 @@ export function rollbackSnapshot(s: Snapshot, rules: Record<string, Rule>): stri
 export function assess(l: Ledger, rules: Record<string, Rule>): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   for (const f of l.files) {
-    const rule = rules[f.path];
+    out[f.path] = unchangedBytes(f, rules[f.path], safeRead(f.path));
+  }
+  return out;
+}
+
+function unchangedBytes(f: Ledger['files'][number], rule: Rule | undefined, bytes: Buffer | null): boolean {
     if (!rule) {
-      const after = f.after ? safeRead(f.after) : null, now = safeRead(f.path);
-      out[f.path] = after === null ? now === null : now !== null && after.equals(now);
-      continue;
+      const after = f.after ? safeRead(f.after) : null;
+      return after === null ? bytes === null : bytes !== null && after.equals(bytes);
     }
     const before = f.before ? readText(f.before) : null;
     const after = f.after ? readText(f.after) : null;
-    const now = readText(f.path);
+    const now = bytes?.toString('utf8') ?? null;
     const form = (t: string | null) => {
       if (t === null) return '\u0000absent';
       const stripped = rule.strip(t, before);
@@ -229,9 +235,7 @@ export function assess(l: Ledger, rules: Record<string, Rule>): Record<string, b
     };
     // A concurrent edit during installation is already present in `after`.
     // Byte restoration is safe only when unmanaged content also matches the original.
-    out[f.path] = form(now) === form(after) && form(after) === form(before);
-  }
-  return out;
+    return form(now) === form(after) && form(after) === form(before);
 }
 
 /** Puts files back (see the module comment) and cleans up what the edit created. */
@@ -241,13 +245,13 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
   const reports: FileReport[] = [];
   for (const f of l.files) {
     const before = f.before ? safeRead(f.before) : null;
-    if (unchanged[f.path]) {
+    if (unchanged[f.path] && unchangedBytes(f, rules[f.path], current.get(f.path)!)) {
       if (before) {
         mkdirSync(dirname(f.path), { recursive: true });
         safeWrite(f.path, before);
         reports.push({ path: f.path, outcome: 'restored' });
       } else {
-        if (existsSync(f.path)) unlinkSync(f.path);
+        safeRemove(f.path, current.get(f.path)!);
         reports.push({ path: f.path, outcome: 'deleted' });
       }
       continue;

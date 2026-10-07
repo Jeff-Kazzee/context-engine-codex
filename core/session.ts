@@ -174,7 +174,7 @@ const RESTORE_WORDS: Record<RestoreReason, string> = {
 };
 
 export function openSession(opts: OpenOptions): OpenResult {
-  if (!Number.isFinite(opts.hardLimit) || opts.hardLimit <= 0) throw new Error('hardLimit must be a positive number of characters');
+  if (!Number.isSafeInteger(opts.hardLimit) || opts.hardLimit <= 0) throw new Error('hardLimit must be a positive safe integer of characters');
   if (opts.budgetTokens !== undefined && (!Number.isFinite(opts.budgetTokens) || opts.budgetTokens <= 0)) throw new Error('budgetTokens must be a positive number of tokens');
   const stateRoot = resolveStateRoot(opts.stateDir);
   const l = layout(opts.projectRoot, opts.sessionId, stateRoot);

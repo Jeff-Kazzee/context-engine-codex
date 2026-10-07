@@ -58,13 +58,13 @@ test('wave7: cleanup removes ordinary orphan and leaves unrelated entries', () =
   assert.deepEqual(fs.readdirSync(dir), ['1.md', 'keep.txt']);
 });
 
-test('wave7: relocation work exhaustion reports changed without partial nearest claim', () => {
+test('wave7: relocation work exhaustion reports incomplete without partial nearest claim', () => {
   const project = tempDir('refs'), path = join(project, 'large.txt');
   const lines = Array.from({ length: 32 }, (_, i) => `${i}:` + 'x'.repeat(8192));
   fs.writeFileSync(path, lines.join('\n'));
   const marker = cite(project, 'large.txt#L1-16');
   fs.writeFileSync(path, ['inserted', ...lines].join('\n'));
-  assert.equal(checkRefs(project, marker)?.refs[0]?.reason, 'changed');
+  assert.deepEqual(checkRefs(project, marker), { count: 0, refs: [], incomplete: true });
 });
 
 test('wave7: reversed marker range reports changed on tiny input', () => {
@@ -89,7 +89,7 @@ test('wave7: relocation candidate exhaustion cannot claim a partially searched m
   const project = tempDir('refs'), path = join(project, 'small.txt'); fs.writeFileSync(path, 'needle');
   const marker = cite(project, 'small.txt#L1');
   fs.writeFileSync(path, ['shift', 'needle', ...Array(4200).fill('x')].join('\n'));
-  assert.equal(checkRefs(project, marker)?.refs[0]?.reason, 'changed');
+  assert.deepEqual(checkRefs(project, marker), { count: 0, refs: [], incomplete: true });
 });
 
 test('wave7: lock turnover retries without reading an unlinked descriptor', () => {

@@ -15,6 +15,7 @@ import { MODE as TURN_LOOP_MODE } from '../adapters/codex/turn-loop/turn-loop.ts
 import { openPrivateDirectory } from '../core/store.ts';
 import { installedLedger } from './install.ts';
 import { safeRead } from './files.ts';
+import { tomlTableBoolean } from './rules.ts';
 import { currentCodexTrust } from './codex-trust.ts';
 import { codexProjectSettings, codexTrusts } from './project.ts';
 import { CODEX_HOOK_COUNT, CODEX_PLUGIN_ID, codexSpec, runBinary, type SetupContext } from './runners.ts';
@@ -35,12 +36,11 @@ function codexTrustEntries(ctx: SetupContext): number {
 }
 
 /** Whether ~/.codex/config.toml enables the Context Engine plugin. */
-function codexPluginEnabled(ctx: SetupContext): boolean {
+export function codexPluginEnabled(ctx: SetupContext): boolean {
   const p = join(ctx.codexHome, 'config.toml');
   if (!existsSync(p)) return false;
   const text = safeRead(p)?.toString('utf8') ?? '';
-  const at = text.indexOf(`[plugins.${JSON.stringify(CODEX_PLUGIN_ID)}]`);
-  return at >= 0 && /^\s*enabled\s*=\s*true/m.test(text.slice(at).split(/\n\s*\[/)[0]!);
+  return tomlTableBoolean(text, ['plugins', CODEX_PLUGIN_ID], 'enabled');
 }
 
 /**

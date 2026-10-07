@@ -10,7 +10,7 @@ import { safeRead, safeWrite } from './files.ts';
 test('overlapping install and uninstall cannot share a setup transaction', () => {
   const w = world(), config = join(w.claudeHome, 'synthetic-config.conf'); writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
-  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {}, install: [], uninstall: [], prepare() {
+  const spec: any = { id: 'fake', home: w.claudeHome, title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {}, install: [], uninstall: [], prepare() {
     assert.throws(() => install(ctx, spec), /already locked/);
     assert.throws(() => uninstall(ctx, spec), /already locked/);
     writeFileSync(config, 'INSTALLED');
@@ -28,7 +28,7 @@ test('pointer publication failure rolls back and can be retried', () => {
   const config = join(w.claudeHome, 'synthetic-config.conf');
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
-  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); } };
+  const spec: any = { id: 'fake', home: w.claudeHome, title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); } };
   const nativeRename = fs.renameSync;
   fs.renameSync = ((from: any, to: any) => {
     if (basename(String(to)) === 'fake.json' && fs.realpathSync(dirname(String(to))) === ctx.setupDir) throw Object.assign(new Error('synthetic pointer denied'), { code: 'EACCES' });
@@ -69,7 +69,7 @@ test('prepare failure rolls back without needing to finalize a ledger', () => {
   const config = join(w.claudeHome, 'synthetic-config.conf');
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
-  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); throw new Error('prepare failed'); } };
+  const spec: any = { id: 'fake', home: w.claudeHome, title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); throw new Error('prepare failed'); } };
   assert.throws(() => install(ctx, spec), /prepare failed/);
   assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
   assert.equal(installedLedger(ctx, 'fake', spec), null);
@@ -84,7 +84,7 @@ test('ledger finalization failure restores config and preserves unrelated files'
   const owned = join(w.claudeHome, 'context-engine-owned-fixture');
   const bad = join(owned, 'unreadable-created');
   const concurrent = join(w.claudeHome, 'unrelated-new-file');
-  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [owned], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); writeFileSync(concurrent, 'NEW KEEP'); mkdirSync(owned); symlinkSync('/nonexistent-created-target', bad); } };
+  const spec: any = { id: 'fake', home: w.claudeHome, title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [owned], rules: {[config]: managedFixtureRule}, install: [], prepare() { writeFileSync(config, 'CHANGED'); writeFileSync(concurrent, 'NEW KEEP'); mkdirSync(owned); symlinkSync('/nonexistent-created-target', bad); } };
   assert.throws(() => install(ctx, spec));
   assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
   assert.equal(readFileSync(unrelated, 'utf8'), 'KEEP');
@@ -98,7 +98,7 @@ test('successful install and uninstall preserve an unrelated file created during
   const concurrent = join(w.claudeHome, 'other-plugin-new-file');
   writeFileSync(config, 'ORIGINAL');
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
-  const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {}, install: [], uninstall: [], prepare() { writeFileSync(config, 'CHANGED'); writeFileSync(concurrent, 'UNRELATED NEW'); } };
+  const spec: any = { id: 'fake', home: w.claudeHome, title: 'Fake', bin: process.execPath, files: [config], watch: [w.claudeHome], namespaced: [], rules: {}, install: [], uninstall: [], prepare() { writeFileSync(config, 'CHANGED'); writeFileSync(concurrent, 'UNRELATED NEW'); } };
   install(ctx, spec);
   uninstall(ctx, spec);
   assert.equal(readFileSync(config, 'utf8'), 'ORIGINAL');
@@ -108,6 +108,6 @@ test('successful install and uninstall preserve an unrelated file created during
 test('linked plugin namespace refuses before runner commands or external writes', () => {
   const w = world(), external = tempDir('namespace-external'), linked = join(w.claudeHome, 'namespace'); symlinkSync(external, linked);
   const ctx: any = { setupDir: join(w.stateDir, 'setup'), env: w.env };
-  let ran = false; const spec: any = { id: 'fake', title: 'Fake', bin: process.execPath, files: [], watch: [], namespaced: [join(linked, 'plugin')], rules: {}, install: [], prepare() { ran = true; } };
+  let ran = false; const spec: any = { id: 'fake', home: w.claudeHome, title: 'Fake', bin: process.execPath, files: [], watch: [], namespaced: [join(linked, 'plugin')], rules: {}, install: [], prepare() { ran = true; } };
   assert.throws(() => install(ctx, spec), /linked path/); assert.equal(ran, false); assert.deepEqual(fs.readdirSync(external), []);
 });

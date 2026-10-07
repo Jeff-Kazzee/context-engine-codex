@@ -341,7 +341,8 @@ export type Refusal = 'outside' | 'credential' | 'not-a-file';
  * cannot change what is read. Throws ENOENT when the target does not exist, and fails closed
  * (throws) when the opened file cannot be identified.
  */
-export function readConfined(root: string, rel: string): { bytes: Buffer } | { refused: Refusal } {
+export function readConfined(root: string, rel: string, maxBytes = 16 * 1024 * 1024): { bytes: Buffer } | { refused: Refusal } {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > 16 * 1024 * 1024) throw new Error('invalid confined source read bound');
   const realRoot = realpathSync(root);
   const candidate = realpathSync(resolve(realRoot, rel));
   if (!isWithin(realRoot, candidate)) return { refused: 'outside' };
@@ -360,8 +361,8 @@ export function readConfined(root: string, rel: string): { bytes: Buffer } | { r
     if (isCredential(real, st)) return { refused: 'credential' };
     if (!isWithin(realRoot, real)) return { refused: 'outside' };
     if (!st.isFile() || st.nlink !== 1) return { refused: 'not-a-file' };
-    const bytes = boundedRead(fd, st.size, 16 * 1024 * 1024);
-    if (bytes === 'too-large') throw new Error('cited source exceeds the 16 MiB size limit');
+    const bytes = boundedRead(fd, st.size, maxBytes);
+    if (bytes === 'too-large') throw Object.assign(new Error('cited source exceeds the read size limit'), { code: 'CE_SOURCE_SIZE_LIMIT' });
     return { bytes };
   } finally {
     closeSync(fd);

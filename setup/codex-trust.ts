@@ -38,10 +38,17 @@ export async function trustCodexHooks(ctx: SetupContext, spec: RunnerSpec): Prom
       return (r.data[0]?.hooks ?? []).filter((h) => h.pluginId === CODEX_PLUGIN_ID);
     };
     const ours = await list();
-    if (ours.length !== CODEX_HOOK_COUNT) return [`Hooks: Codex lists ${ours.length} Context Engine hooks, expected ${CODEX_HOOK_COUNT}; none trusted. Check them with /hooks in Codex.`];
+    if (ours.length !== CODEX_HOOK_COUNT || new Set(ours.map(h => h.key)).size !== CODEX_HOOK_COUNT || ours.some(h => typeof h.key !== 'string' || !h.key || typeof h.currentHash !== 'string' || !h.currentHash)) {
+      throw new Error(`Hooks: expected ${CODEX_HOOK_COUNT} distinct Context Engine hooks with current hashes; none trusted. Check /hooks in Codex. Installed files are retained.`);
+    }
     const edits = ours.map((h) => ({ keyPath: `hooks.state.${JSON.stringify(h.key)}.trusted_hash`, value: h.currentHash, mergeStrategy: 'replace' }));
     await rpc.request('config/batchWrite', { edits });
-    const trusted = (await list()).filter((h) => h.trustStatus === 'trusted').length;
+    const after = await list();
+    const expected = new Map(ours.map(h => [h.key, h.currentHash]));
+    if (after.length !== CODEX_HOOK_COUNT || new Set(after.map(h => h.key)).size !== CODEX_HOOK_COUNT || after.some(h => h.trustStatus !== 'trusted' || expected.get(h.key) !== h.currentHash)) {
+      throw new Error('Hooks: trust verification failed; installed files are retained. Check the current hashes with /hooks in Codex.');
+    }
+    const trusted = after.length;
     return [`Hooks: ${trusted}/${CODEX_HOOK_COUNT} trusted through Codex's app-server (--trust-hooks)`];
   } finally {
     await rpc.close();

@@ -26,21 +26,22 @@
     "core/recall.test.ts": "8af07faf6e6e736410428618332c61db0aaf5d36a936523bd66475bfc0990d05",
     "core/recall.ts": "da69260f6bb3f82c6c7172a1015a37603e74e9b47a20159724b4b95b47d2af57",
     "core/recovery.test.ts": "5047b2ca9410c1d572c244155bd3e9d2f6948555c0402e10b5f48b1c53d360f3",
-    "core/refs.ts": "a6baba1d8b2aeb79319a4227f266d7328247dafeb5dc8ee874a97acbc236fb66",
+    "core/refs.ts": "3133705ded7429580212f02ab98ec52e76271bf7d968878b2e33a1bd8702ea3f",
     "core/renewed-regressions.test.ts": "b89453eb730b247fa566e077472448e0f0c7397890a5fae38b62322e56d68ce0",
     "core/review-regressions.test.ts": "8c56a053a0353838ee481c388bf2dbf66f2ba7e6dd5ae8f19877e36bd46f988a",
     "core/session.test.ts": "bc85f05e49c0ddc84dc38596bbafe400c9dd0060c1396df2c9177ae1d286d236",
-    "core/session.ts": "aade842ded7f1908087fa2e2a1d984695a26f6070b6f7ac5b3d265eeee4e0788",
+    "core/session.ts": "af222462566ba61c4f92da762d1befd6bffdbfb60b91aa6625a11b5d3e8980b1",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "29d6f85a95fe34bb4f6da915b8c0add4b02c49cae507246ac5afe93bd33847f8",
+    "core/store.ts": "baab262a2b2c0879f4ea408bc5d5cb0845fd962c0871bdb9f770e370e8d075ec",
     "core/testing.ts": "1b08e6d18a707aa5c9b63fadaf39a5df7a83d1a305097e66866247421e4a1111",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
     "core/turns.ts": "537144248bf8df62eb36567d60d5bce045e466741a8daae95bea8368fecc2c0c",
     "core/wave10-regressions.test.ts": "4cfc90db8fc02ce11588ae216048a3aee18aeff59f93922957397d4164d96b07",
     "core/wave11-regressions.test.ts": "194a523df9bd5bed8b80d2ebaa6c48023b25bfc3cfa41560aba4382f11d76159",
     "core/wave13-regressions.test.ts": "5231618b0c61e464028c427d1ca84e802b70666a339bd046de6fd6c0b5f4753c",
-    "core/wave7-regressions.test.ts": "871cd6a907cc3cec553f545afebeb70666a0febe1909437cb9956b6d376256f3",
+    "core/wave16-regressions.test.ts": "a50761ac981cd8f9e722b6953d977048c62b7cad5c3b6322a66335225cfdaabd",
+    "core/wave7-regressions.test.ts": "402201e4eeb86637e522069feeb2f07a6835c18aa73a635c2bfc571ec4cb07e0",
     "core/wave8-regressions.test.ts": "67f5a78fc0a2e4c2f995d9e735262b5c421d93067c7e1598785055545b7ccdac",
     "core/wave9-regressions.test.ts": "6eb960efdd0943d305c4c8426715a2ca22b50f05143c1684339a449a5382ee51"
   },
@@ -111,7 +112,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "bd9c96a1a8ba2fcaf7be6f9762e0d64d2f7aed8d",
+  "corePatchCommit": "9f1ae5ff06e6ec311ad535a2b710aec23fed422b",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -129,6 +130,7 @@
     "Wave9 local source correction: participation records are flushed before rename and their directory/root afterward; Event Log operations retain one verified parent descriptor through lease acquisition, recursive stale cleanup, mutation and release. Codex missing/moved-project uninstall validates pointers and ledgers, preserves backups, skips project writes and reports manual cleanup. Synthetic-only validation; no model calls or publication.",
     "Wave10 consolidated repair: bounded setup/Git/managed-ignore reads, durable setup publication, retained recovery receipts, safe counter exhaustion, confined materialization, credential-safe recall accounting and concurrent config preservation. Codex activation rollback, inherited-disable override, reset/read detection and headless recording refusal use synthetic regressions; no live model or auth changes.",
     "Wave11 confirmed-defect repair: bounded HEAD metadata and oversized show envelopes; parent directory flushes during confined state creation; failed install pointer cleanup, snapshot-local backup references and multiline TOML preservation. Codex publishes opt-out after guidance cleanup and refuses RPC output closure; Claude refuses committed resumes with a foreign keyed frame and no recognized boundary. Linux HOME activation control passes unchanged. Synthetic offline evidence only; no model trial or authentication changes.",
-    "Wave13 repairs eleven confirmed historical review claims: bounded snapshot publication/reads, cross-record sequence validation, durable recovery accounting/receipt retry, ignore-file and pointer deletion flushes, absolute fallback HOME, credential-safe reverse edits, bounded setup inventory, incompatible TOML feature namespaces and session-bound delayed Claude compaction. Synthetic offline checks only; prior live evidence does not establish acceptance of these changed heads."
+    "Wave13 repairs eleven confirmed historical review claims: bounded snapshot publication/reads, cross-record sequence validation, durable recovery accounting/receipt retry, ignore-file and pointer deletion flushes, absolute fallback HOME, credential-safe reverse edits, bounded setup inventory, incompatible TOML feature namespaces and session-bound delayed Claude compaction. Synthetic offline checks only; prior live evidence does not establish acceptance of these changed heads.",
+    "Wave16 finite review repair: integer hard limits; malformed opt-in responses use native fallback; setup verifies runner/config ownership before payload backups, reassesses captured rollback bytes and reserves deletion candidates through a verified parent. Codex explicit hook trust fails on incomplete verification and status accepts equivalent TOML table-key spelling. Disabled stale-refs checks share marker, source-byte, hash-work, Git-probe and time budgets; exhaustion reports incomplete. Synthetic offline evidence only; no model/provider trial, authentication changes, scanner clearance or merge approval."
   ]
 }

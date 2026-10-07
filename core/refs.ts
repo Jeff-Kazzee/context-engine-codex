@@ -32,6 +32,8 @@ export interface StaleReport {
   count: number;
   /** At most MAX_STALE_LISTED of them, in order of first appearance. */
   refs: StaleRef[];
+  /** A shared check budget expired; remaining references were not checked. */
+  incomplete?: true;
 }
 
 export const MAX_STALE_LISTED = 5;
@@ -57,7 +59,7 @@ function span(text: string, a: number, b: number): string | null {
 const validRange = (a: number, b: number) => Number.isSafeInteger(a) && Number.isSafeInteger(b) && a >= 1 && b >= a;
 
 interface RelocationBudget { candidates: number; work: number }
-// Per check: bound window hashes and their UTF-8/line work; exhausted searches are changed.
+// Per check: bound window hashes and their UTF-8/line work; exhausted searches are incomplete.
 const relocationBudget = (): RelocationBudget => ({ candidates: 4096, work: 1024 * 1024 });
 
 const lineRange = (a: number, b: number) => `L${a}${b === a ? '' : `-${b}`}`;
@@ -99,46 +101,76 @@ export function cite(projectRoot: string, ref: string): string {
 
 const MARKER = /⟦(?:src:([\w./+-]+)(?:#L(\d+)(?:-(\d+))?)?@([0-9a-f]{8})|commit:([0-9a-f]{7,40}))⟧/g;
 
+class CheckIncomplete extends Error {}
+interface CheckBudget { markers: number; bytes: number; work: number; probes: number; deadline: number; sources: Map<string, string | Omit<StaleRef, 'marker'> | null> }
+const checkTime = (budget: CheckBudget) => { if (performance.now() >= budget.deadline) throw new CheckIncomplete(); };
+function boundedGit(root: string, budget: CheckBudget, ...args: string[]) {
+  checkTime(budget);
+  if (budget.probes-- <= 0) throw new CheckIncomplete();
+  const result = runGit(root, Math.max(1, Math.min(500, Math.ceil(budget.deadline - performance.now()))), args);
+  checkTime(budget);
+  if (result.error || result.status === null) throw new CheckIncomplete();
+  return result;
+}
+
 /** Checks every marker in `text` against the project. Returns undefined when nothing is stale. */
 export function checkRefs(projectRoot: string, text: string): StaleReport | undefined {
   const stale: StaleRef[] = [];
   const seen = new Set<string>();
   const budget = relocationBudget();
+  const total: CheckBudget = { markers: 64, bytes: 4 * 1024 * 1024, work: 4 * 1024 * 1024, probes: 8, deadline: performance.now() + 4000, sources: new Map() };
+  let incomplete = false;
   let inRepo: boolean | undefined;
+  try {
   for (const m of text.matchAll(MARKER)) {
+    checkTime(total);
+    if (total.markers-- <= 0) throw new CheckIncomplete();
     const marker = m[0];
     if (seen.has(marker)) continue;
     seen.add(marker);
     const [, path, a, b, hash, commit] = m;
     let found: Omit<StaleRef, 'marker'> | null;
     if (commit !== undefined) {
-      inRepo ??= git(projectRoot, 'rev-parse', '--is-inside-work-tree').status === 0;
-      found = inRepo ? checkCommit(projectRoot, commit) : null;
+      inRepo ??= boundedGit(projectRoot, total, 'rev-parse', '--is-inside-work-tree').status === 0;
+      found = inRepo ? checkCommit(projectRoot, commit, total) : null;
     } else {
       const rel = insideProject(projectRoot, path!);
       if (rel === null) continue;
       const lines: [number, number] | null = a === undefined ? null : [Number(a), Number(b ?? a)];
-      found = lines && !validRange(...lines) ? { reason: 'changed' } : checkSource(projectRoot, rel, lines, hash!, budget);
+      found = lines && !validRange(...lines) ? { reason: 'changed' } : checkSource(projectRoot, rel, lines, hash!, budget, total);
     }
     if (found) stale.push({ marker, ...found });
   }
-  if (stale.length === 0) return undefined;
-  return { count: stale.length, refs: stale.slice(0, MAX_STALE_LISTED) };
+  } catch(e) { if (!(e instanceof CheckIncomplete)) throw e; incomplete = true; }
+  if (stale.length === 0 && !incomplete) return undefined;
+  return { count: stale.length, refs: stale.slice(0, MAX_STALE_LISTED), ...(incomplete ? { incomplete: true as const } : {}) };
 }
 
-function checkSource(projectRoot: string, rel: string, lines: [number, number] | null, hash: string, budget: RelocationBudget): Omit<StaleRef, 'marker'> | null {
+function checkSource(projectRoot: string, rel: string, lines: [number, number] | null, hash: string, budget: RelocationBudget, total: CheckBudget): Omit<StaleRef, 'marker'> | null {
   let content: string;
+  const cached = total.sources.get(rel);
+  if (total.sources.has(rel) && typeof cached !== 'string') return cached ?? null;
+  if (typeof cached === 'string') content = cached;
+  else {
   try {
-    const target = readConfined(projectRoot, rel);
+    const target = readConfined(projectRoot, rel, total.bytes);
     // A marker that leads out of the project, to a credential file, or to anything but one regular
     // file is never followed or reported.
-    if ('refused' in target) return null;
+    if ('refused' in target) { total.sources.set(rel, null); return null; }
+    total.bytes -= target.bytes.length;
     try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(target.bytes); }
-    catch { return { reason: 'changed' }; }
+    catch { const result = { reason: 'changed' as const }; total.sources.set(rel, result); return result; }
+    total.sources.set(rel, content);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
-    return code === 'ENOENT' || code === 'ENOTDIR' ? { reason: 'missing' } : null;
+    if (code === 'CE_SOURCE_SIZE_LIMIT') throw new CheckIncomplete();
+    const result = code === 'ENOENT' || code === 'ENOTDIR' ? { reason: 'missing' as const } : null;
+    total.sources.set(rel, result); return result;
   }
+  }
+  checkTime(total);
+  if (content.length * 3 > total.work) throw new CheckIncomplete();
+  total.work -= content.length * 3;
   if (lines === null) return hash8(content) === hash ? null : { reason: 'changed' };
   const [from, to] = lines;
   const target = span(content, from, to);
@@ -155,7 +187,7 @@ function relocate(content: string, size: number, hash: string, near: number, bud
   for (let n = 0; n < size; n++) work += all[n]!.length * 3;
   let best: number | null = null;
   for (let i = 0; i + size <= all.length; i++) {
-    if (budget.candidates <= 0 || work > budget.work) return null;
+    if (budget.candidates <= 0 || work > budget.work) throw new CheckIncomplete();
     budget.candidates--; budget.work -= work;
     if (hash8(all.slice(i, i + size).join('\n')) === hash && (best === null || Math.abs(i + 1 - near) < Math.abs(best - near))) best = i + 1;
     if (i + size < all.length) work += (all[i + size]!.length - all[i]!.length) * 3;
@@ -163,21 +195,26 @@ function relocate(content: string, size: number, hash: string, near: number, bud
   return best;
 }
 
-function checkCommit(projectRoot: string, commit: string): Omit<StaleRef, 'marker'> | null {
-  if (git(projectRoot, 'cat-file', '-e', `${commit}^{commit}`).status !== 0) return { reason: 'missing' };
-  const refs = git(projectRoot, 'for-each-ref', '--count=1', '--format=x', '--contains', commit);
+function checkCommit(projectRoot: string, commit: string, budget: CheckBudget): Omit<StaleRef, 'marker'> | null {
+  if (boundedGit(projectRoot, budget, 'cat-file', '-e', `${commit}^{commit}`).status !== 0) return { reason: 'missing' };
+  const refs = boundedGit(projectRoot, budget, 'for-each-ref', '--count=1', '--format=x', '--contains', commit);
   if (refs.status === 0 && refs.stdout.trim()) return null;
-  return git(projectRoot, 'merge-base', '--is-ancestor', commit, 'HEAD').status === 0 ? null : { reason: 'rewritten' };
+  return boundedGit(projectRoot, budget, 'merge-base', '--is-ancestor', commit, 'HEAD').status === 0 ? null : { reason: 'rewritten' };
 }
 
 function git(cwd: string, ...args: string[]) {
-  return spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 1000, maxBuffer: 65536,
+  return runGit(cwd, 1000, args);
+}
+function runGit(cwd: string, timeout: number, args: string[]) {
+  return spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout, maxBuffer: 65536,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0' } });
 }
 
 export function staleText(report: StaleReport): string {
+  const incomplete = report.incomplete ? ' Reference checks incomplete: the shared work budget expired; remaining references were not checked.' : '';
+  if (report.count === 0) return `Context Engine:${incomplete}`;
   const listed = report.refs.map((r) => `${r.marker} (${r.reason}${r.to ? ` to ${r.to}` : ''})`).join(', ');
   const more = report.count > report.refs.length ? `, and ${report.count - report.refs.length} more` : '';
   const noun = report.count === 1 ? 'cited reference is' : 'cited references are';
-  return `Context Engine: ${report.count} ${noun} stale: ${listed}${more}. Re-read and re-cite, or drop them.`;
+  return `Context Engine: ${report.count} ${noun} stale: ${listed}${more}. Re-read and re-cite, or drop them.${incomplete}`;
 }

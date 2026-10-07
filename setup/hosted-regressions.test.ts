@@ -55,7 +55,7 @@ test('uninstall preserves unrelated configuration changed during runner removal'
   const ctx={...setupContext(w.env),setupDir:join(w.stateDir,'setup')};
   const rule=jsonRule([['owned']]);
   const script="const fs=require('node:fs'); const p=process.argv[1]; const x=JSON.parse(fs.readFileSync(p,'utf8')); x.theme='concurrent'; delete x.owned; fs.writeFileSync(p,JSON.stringify(x));";
-  const spec:any={id:runtime,title:'Synthetic',bin:process.execPath,files:[config],watch:[],namespaced:[],rules:{[config]:rule},install:[],uninstall:[['-e',script,config]],prepare(){writeFileSync(config,JSON.stringify({theme:'before',owned:true}));}};
+  const spec:any={id:runtime,home:w.claudeHome,title:'Synthetic',bin:process.execPath,files:[config],watch:[],namespaced:[],rules:{[config]:rule},install:[],uninstall:[['-e',script,config]],prepare(){writeFileSync(config,JSON.stringify({theme:'before',owned:true}));}};
   install(ctx,spec); uninstall(ctx,spec);
   assert.deepEqual(JSON.parse(readFileSync(config,'utf8')), {theme:'concurrent',owned:false});
 });
@@ -111,7 +111,7 @@ test('setup refuses an existing nonprivate state root before changing runner hom
 test('failed install rollback preserves concurrent unmanaged JSON settings', () => {
   const w=world(),config=join(w.claudeHome,'synthetic-config.json');writeFileSync(config,JSON.stringify({theme:'before',owned:false}));
   const ctx={...setupContext(w.env),setupDir:join(w.stateDir,'setup')};
-  const spec:any={id:runtime,title:'Synthetic',bin:process.execPath,files:[config],watch:[],namespaced:[],rules:{[config]:jsonRule([['owned']])},install:[],prepare(){writeFileSync(config,JSON.stringify({theme:'concurrent',owned:true}));throw new Error('synthetic installation failure');}};
+  const spec:any={id:runtime,home:w.claudeHome,title:'Synthetic',bin:process.execPath,files:[config],watch:[],namespaced:[],rules:{[config]:jsonRule([['owned']])},install:[],prepare(){writeFileSync(config,JSON.stringify({theme:'concurrent',owned:true}));throw new Error('synthetic installation failure');}};
   assert.throws(()=>install(ctx,spec),/synthetic installation failure/);
   assert.deepEqual(JSON.parse(readFileSync(config,'utf8')),{theme:'concurrent',owned:false});
 });

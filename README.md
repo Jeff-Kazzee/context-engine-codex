@@ -132,6 +132,8 @@ Evidence lookups and cold recovery scan the Event Log incrementally. Recall keep
 
 Revision snapshots are limited to 64 MiB of UTF-8 bytes on publication and before reading; runner appends within that ceiling may exceed the model-edit limit. Corrupt or oversized private state fails closed. Event sequences must increase across the complete log; preserve refused state for repair rather than deleting its history. Recovery restores missing accounting for an already committed revision and reports that committed result.
 
+Setup refuses existing runner homes, watched roots and tracked configuration files owned by another user before backing up configuration or invoking runner install commands. Do not bypass an ownership refusal; use your own runner home. Rollback reassesses the captured current configuration and retains late unmanaged edits. If a deletion target changes, setup refuses the deletion and reports any retained candidate for manual recovery.
+
 Setup inventory streams directory entries and refuses more than 4,096 paths, depth beyond 64, or more than 1 MiB of accumulated path names. It never treats a partial inventory as ownership evidence. Configuration containing recognized credential keys is also refused before Context Engine rollback or reverse-edit rewrites it; remove those settings through the runner’s normal configuration process before retrying. Preserve the reported backups on a partial failure.
 
 The managed ignore file and install-pointer deletion are flushed before success. Synthetic fault tests check flush ordering and refusal; they do not prove behavior under real power loss. A relative fallback `HOME` is refused; an explicit absolute state root or absolute `XDG_STATE_HOME` remains valid.

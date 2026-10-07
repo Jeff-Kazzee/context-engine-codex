@@ -4,7 +4,7 @@ import { closeSync, constants, existsSync, fsyncSync, linkSync, mkdirSync, openS
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { assess, completeLedger, type FileReport, type Ledger, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
-import { safeRead, safeWrite, withSetupLock } from './files.ts';
+import { checkOwnedDirectory, safeRead, safeWrite, withSetupLock } from './files.ts';
 import { openPrivateDirectory } from '../core/store.ts';
 import { codexSpec, runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
 
@@ -57,6 +57,7 @@ export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
 }
 
 export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
+  checkOwnedDirectory(spec.home);
   const prior = installedLedger(ctx, spec.id, spec);
   if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine-${spec.id} uninstall\` first`);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
