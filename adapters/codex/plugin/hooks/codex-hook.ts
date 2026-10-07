@@ -63,14 +63,14 @@ function withPromptLease<T>(input: HookInput, fn:()=>T, timeoutMs = 1000): T {
   // Distinct from the CLI operation lease: never recursively acquire that lock.
   return lock.serialized(join(l.stateDir,'codex-prompt.lock'),fn,{timeoutMs});
 }
-function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string; hash?: string } {
+function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string; hash?: string; recorded?: boolean } {
   try {
     const l=store.layout(input.cwd,input.session_id,store.resolveStateRoot());
     const path=join(l.stateDir,name),bytes=store.readBytes(path,1024);
     if(!bytes)return {path};
     const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
-    if(typeof value.hash!=='string'||!/^[0-9a-f]{64}$/.test(value.hash))throw new Error('invalid pending prompt marker');
-    return {path,hash:value.hash};
+    if(typeof value.hash!=='string'||!/^[0-9a-f]{64}$/.test(value.hash)||(value.recorded!==undefined&&typeof value.recorded!=='boolean'))throw new Error('invalid pending prompt marker');
+    return {path,hash:value.hash,recorded:value.recorded===true};
   } catch {throw new PendingPrompt('Context Engine: a pending prompt could not be verified. Do not reset; retry the original request after repairing storage, or disable Context Engine.');}
 }
 
@@ -136,10 +136,14 @@ async function main(input: HookInput): Promise<void> {
     const hash=store.sha(String(input.prompt??'')),pending=pendingPrompt(input);
     if(pending.hash&&pending.hash!==hash)throw new PendingPrompt('Context Engine: an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine; resets remain blocked.');
     // Durable intent precedes the fallible CLI call. Only a fingerprint is retained, never prompt text.
-    store.atomicWrite(pending.path,JSON.stringify({hash}), 'frame-key-tmp');
-    const recorded = core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }]);
+    if (!pending.recorded) store.atomicWrite(pending.path,JSON.stringify({hash}), 'frame-key-tmp');
+    const recorded = pending.recorded ? core(input, 'sync') : core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }]);
+    // This request committed even if a newly published completed-event intent blocks return.
+    const marker=JSON.stringify({hash,recorded:true});
+    store.atomicWrite(pending.path,marker, 'frame-key-tmp');
     requireRecorded(input);
-    store.removeDirectoryEntries(dirname(pending.path),name=>name===PENDING_PROMPT);
+    try {store.removeDirectoryEntries(dirname(pending.path),name=>name===PENDING_PROMPT);}
+    catch(error){try{store.atomicWrite(pending.path,marker,'frame-key-tmp');}catch{}throw error;}
     return recorded;
     });
     // The per-turn size readout, with any reminder this prompt fired (an episode may make no tool

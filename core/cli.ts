@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {writeSync} from 'node:fs';
 // context-engine CLI: a thin shell over the core library. Prints one JSON object on stdout.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -20,6 +21,8 @@ import {
   type SyncResult,
   withSessionSerialized,
 } from './index.ts';
+
+let resultOutputStarted=false, resultOutputCompleted=false;
 
 const HELP = `context-engine: model-controlled Working Context for coding agents (shared core).
 
@@ -225,7 +228,18 @@ function main(argv: string[]): number {
       return print({ ok: true, closed: true });
     }
     const result: SyncResult = command === 'record' ? s.record(events, values['max-context-bytes'] !== undefined ? {maxBytes:positiveInt(values['max-context-bytes'],'--max-context-bytes')} : undefined) : command === 'native-compaction' ? s.nativeCompaction(events) : s.sync();
-    return print({ ok: true, ...result, workingContext: s.workingContextPath, ...(command === 'open' ? { frameKey: s.frameKey } : {}) });
+    const bytes=Buffer.from(`${JSON.stringify({ ok: true, ...result, workingContext: s.workingContextPath, ...(command === 'open' ? { frameKey: s.frameKey } : {}) })}\n`);
+    resultOutputStarted=true;
+    const outputDeadline=Date.now()+5000;
+    for(let offset=0;offset<bytes.length;){
+      try {const n=writeSync(1,bytes,offset,bytes.length-offset);if(n<=0)throw new Error('result output made no progress');offset+=n;}
+      catch(error){if(!['EAGAIN','EWOULDBLOCK'].includes((error as NodeJS.ErrnoException).code??'')||Date.now()>=outputDeadline)throw error;Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1);}
+    }
+    resultOutputCompleted=true;
+    // Written to the CLI output transport; this does not prove a model received it.
+    try { s.confirmReceiptReturn(); }
+    catch { process.stderr.write('Context Engine: recovery receipt acknowledgement unverified; a later call may repeat the notice.\n'); }
+    return 0;
   });
 }
 
@@ -273,7 +287,13 @@ if (isSetupCommand(argv)) {
   try {
     process.exitCode = main(argv);
   } catch (e) {
-    print({ ok: false, error: e instanceof Error ? e.message : String(e) });
-    process.exitCode = 1;
+    if(resultOutputStarted){
+      // Never corrupt an already written result with a second JSON object.
+      process.stderr.write(resultOutputCompleted ? 'Context Engine: result output completed; post-output cleanup failed.\n' : 'Context Engine: result output incomplete; retry after repairing the output transport.\n');
+      process.exitCode=resultOutputCompleted?0:1;
+    }else{
+      print({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      process.exitCode = 1;
+    }
   }
 }

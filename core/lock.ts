@@ -1,10 +1,10 @@
 // Single-writer session lock. The holder is identified by pid + hostname + process start marker
 // (Linux: start time from /proc/<pid>/stat, so a recycled pid is not mistaken for the holder).
 import { randomBytes } from 'node:crypto';
-import { closeSync, linkSync, openSync, readFileSync, readlinkSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, readlinkSync, readdirSync, unlinkSync, writeSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { fdLinkPath, lockStep } from './faults.ts';
-import { atomicWrite, readBytes, openPrivateDirectory } from './store.ts';
+import { atomicWrite, readBytes, readLockPublicationCandidate, openPrivateDirectory } from './store.ts';
 import { dirname, basename, join } from 'node:path';
 
 export interface LockHolder {
@@ -58,6 +58,7 @@ export function readLock(path: string, parentFd?: number): LockHolder | null | '
     // A legitimate link publication briefly has two names. Wait without reading;
     // Lock release/replacement can also invalidate an opened descriptor before verification.
     // Never read it; persistent unsafe names throw and cannot become dead-lock takeovers.
+    if ((e as NodeJS.ErrnoException).code === 'CE_STATE_LINK_COUNT' && Date.now()>=deadline && recoverPublication(path,parentFd)) continue;
     if(!['CE_STATE_LINK_COUNT','CE_STATE_PATH_CHANGED'].includes((e as NodeJS.ErrnoException).code??'') || Date.now()>=deadline)throw e;
     sleepSync(1);
   }}
@@ -69,6 +70,34 @@ export function readLock(path: string, parentFd?: number): LockHolder | null | '
   } catch {
     return 'unreadable';
   }
+}
+
+
+/** Recover only the matching candidate of a known-dead publisher, never arbitrary hard links. */
+function recoverPublication(path: string, parentFd?: number): boolean {
+  const parent=parentFd ?? openPrivateDirectory(dirname(path))!;
+  try {
+    const real=readlinkSync(fdLinkPath(parent)),target=join(fdLinkPath(parent),basename(path));
+    const names=readdirSync(fdLinkPath(parent));if(names.length>4096)return false;
+    const candidates=names.filter(name=>name.startsWith(basename(path)+'.') && /^\.[1-9][0-9]*\.[0-9a-f]{8}\.new$/.test(name.slice(basename(path).length)));
+    for(const name of candidates){
+      const candidate=join(fdLinkPath(parent),name);
+      try {
+        const a=lstatSync(candidate),b=lstatSync(target);
+        if(a.dev!==b.dev||a.ino!==b.ino||a.nlink!==2||b.nlink!==2)continue;
+        const publisher=Number(name.slice(basename(path).length+1).split('.')[0]);
+        // Check process liveness before allowing even this exceptional bounded read.
+        try {process.kill(publisher,0);continue;}catch(e){if((e as NodeJS.ErrnoException).code!=='ESRCH')continue;}
+        const bytes=readLockPublicationCandidate(candidate,target,join(real,name));if(!bytes)continue;
+        const holder=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as LockHolder;
+        if(!holder || !Number.isSafeInteger(holder.pid) || holder.pid<=0 || holder.hostname!==hostname() || !(holder.startMarker===null||typeof holder.startMarker==='string') || typeof holder.runner!=='string' || !Number.isFinite(holder.hardLimit) || holder.hardLimit<0 || typeof holder.acquiredAt!=='string')continue;
+        const now=lstatSync(candidate),current=lstatSync(target);
+        if(now.dev!==a.dev||now.ino!==a.ino||current.dev!==a.dev||current.ino!==a.ino||now.nlink!==2||current.nlink!==2)continue;
+        unlinkSync(candidate);fsyncSync(parent);return true;
+      }catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return true;throw e;}
+    }
+    return false;
+  } finally {if(parentFd===undefined)closeSync(parent);}
 }
 
 export type Acquired =

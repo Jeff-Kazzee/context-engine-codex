@@ -239,7 +239,7 @@ export function acquireSetupLock(path: string): () => void {
       if (lock !== undefined) {
         try {
           const own = fstatSync(lock), now = lstatSync(anchored);
-          if (own.dev === now.dev && own.ino === now.ino) unlinkSync(anchored);
+          if (own.dev === now.dev && own.ino === now.ino) { unlinkSync(anchored); fsyncSync(dir); }
         } finally { closeSync(lock); }
       }
     } finally { closeSync(dir); }
@@ -259,4 +259,19 @@ export function acquireSetupLock(path: string): () => void {
 export function withSetupLock<T>(path: string, action: () => T): T {
   const release = acquireSetupLock(path);
   try { return action(); } finally { release(); }
+}
+
+/** Empty-directory cleanup stays anchored even if an ancestor moves after verification. */
+export function safeRemoveEmptyDirectory(path: string): void {
+  checkComponents(path);
+  const parent = dirname(resolve(path));
+  const dir = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const st = fstatSync(dir); assertOwner(st, parent);
+    if (!st.isDirectory() || realpathSync(`/proc/self/fd/${dir}`) !== parent) throw new Error('setup directory changed before removal');
+    const anchored = join(`/proc/self/fd/${dir}`, basename(path));
+    const target = lstatSync(anchored); assertOwner(target, path);
+    if (!target.isDirectory() || target.isSymbolicLink()) throw new Error('setup refuses linked or non-directory cleanup');
+    rmdirSync(anchored); fsyncSync(dir);
+  } finally { closeSync(dir); }
 }

@@ -12,6 +12,14 @@ const HOOK=fileURLToPath(new URL('./plugin/hooks/codex-hook.ts',import.meta.url)
 function setup(){const f=fixture();setParticipation({...f,state:'on'});return f;}
 function hook(f:ReturnType<typeof fixture>,event:any,extra:NodeJS.ProcessEnv={}){return spawnSync(process.execPath,[HOOK],{cwd:f.projectRoot,input:JSON.stringify({cwd:f.projectRoot,session_id:sid,...event}),encoding:'utf8',env:{...process.env,CONTEXT_ENGINE_STATE_DIR:f.stateDir,CONTEXT_ENGINE_CLI:CLI,CONTEXT_ENGINE:'',...extra}});}
 
+test('wave29: completed intent after prompt commit does not duplicate an exact retry',()=>{
+ const f=setup(),state=layout(f.projectRoot,sid,f.stateDir).stateDir,marker=join(state,'codex-record-pending-00000000-0000-0000-0000-000000000001.json'),preload=join(f.projectRoot,'after-record-intent.mjs');
+ fs.writeFileSync(preload,`import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const native=cp.spawnSync;cp.spawnSync=function(cmd,args,...rest){const result=native(cmd,args,...rest);if(args.includes('record')&&result.status===0)fs.writeFileSync(${JSON.stringify(marker)},'{}');return result;};syncBuiltinESMExports();`);
+ const first=hook(f,{hook_event_name:'UserPromptSubmit',prompt:'EXACT_RETRY_SENTINEL'},{NODE_OPTIONS:'--import='+preload});assert.match(first.stdout,/continue.*false/);assert.equal(fs.existsSync(marker),true);
+ fs.unlinkSync(marker);const retry=hook(f,{hook_event_name:'UserPromptSubmit',prompt:'EXACT_RETRY_SENTINEL'});assert.equal(retry.status,0,retry.stderr);assert.doesNotMatch(retry.stdout,/continue.*false/);
+ const context=fs.readFileSync(join(f.projectRoot,'.context-engine',sid,'context.md'),'utf8');assert.equal(context.match(/EXACT_RETRY_SENTINEL/g)?.length,1);
+});
+
 for(const kind of ['tool','assistant'])test('wave26: failed '+kind+' record remains reset-blocking after later successful hooks',()=>{
  const f=setup();assert.equal(hook(f,{hook_event_name:'UserPromptSubmit',prompt:'BOOTSTRAP'}).status,0);
  const event=kind==='tool'?{hook_event_name:'PostToolUse',tool_name:'Read',tool_input:{file_path:'ordinary.txt'},tool_response:'COMPLETED_TOOL_EVIDENCE'}:{hook_event_name:'Stop',last_assistant_message:'COMPLETED_ASSISTANT_EVIDENCE'};

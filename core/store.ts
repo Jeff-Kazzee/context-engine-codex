@@ -508,12 +508,29 @@ export function atomicWrite(path: string, data: string, point: CrashPoint, mode 
 }
 
 export function readBytes(path: string, maxBytes?: number, expectedPath = resolve(path)): Buffer | undefined {
+  return readPrivateBytes(path,maxBytes,expectedPath,1);
+}
+
+/** Only a lock's exact publication candidate may be inspected with two verified names. */
+export function readLockPublicationCandidate(path: string, target: string, expectedPath: string): Buffer | undefined {
+  const suffix = basename(path).slice(basename(target).length);
+  if (dirname(path) !== dirname(target) || !/^\.[1-9][0-9]*\.[0-9a-f]{8}\.new$/.test(suffix)) throw new Error('invalid lock publication candidate');
+  const a=lstatSync(path),b=lstatSync(target);
+  if (!a.isFile() || !b.isFile() || a.dev!==b.dev || a.ino!==b.ino || a.nlink!==2 || b.nlink!==2) throw new Error('lock publication names do not match');
+  return readPrivateBytes(path,16384,expectedPath,2,{dev:a.dev,ino:a.ino,target});
+}
+
+function readPrivateBytes(path: string, maxBytes: number | undefined, expectedPath: string, links: 1 | 2, publication?: {dev:number;ino:number;target:string}): Buffer | undefined {
   let fd: number;
   try { fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK); }
   catch(e) {if((e as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw e;}
   try {
     const st=fstatSync(fd),real=openedPath(fd);
-    if(st.nlink!==1)throw Object.assign(new Error('private state file is linked under multiple names; refusing payload'),{code:'CE_STATE_LINK_COUNT'});
+    if (publication) {
+      const target=lstatSync(publication.target);
+      if (st.dev!==publication.dev || st.ino!==publication.ino || target.dev!==st.dev || target.ino!==st.ino || target.nlink!==2) throw new Error('lock publication identity changed before payload read');
+    }
+    if(st.nlink!==links)throw Object.assign(new Error('private state file is linked under multiple names; refusing payload'),{code:'CE_STATE_LINK_COUNT'});
     if(real!==expectedPath)throw Object.assign(new Error('private state file path changed; refusing payload'),{code:'CE_STATE_PATH_CHANGED'});
     if (!st.isFile() || isCredential(real,st) || (process.getuid&&st.uid!==process.getuid())) throw new Error('private state file is not verified, unlinked and user-owned');
     if(maxBytes!==undefined){const bytes=boundedRead(fd,st.size,maxBytes);if(bytes==='too-large')throw Object.assign(new Error('private state payload exceeds size limit'),{code:'CE_SIZE_LIMIT'});return bytes;}

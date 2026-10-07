@@ -220,10 +220,11 @@ export function blockRule(m: Markers): Rule {
   return {
     strip(text) {
       const start = text.indexOf(`${m.begin}\n`);
-      const stop = text.indexOf(`${m.end}\n`, start);
+      let stop = text.indexOf(`${m.end}\n`, start);
+      if (stop < 0 && text.endsWith(m.end)) stop = text.length - m.end.length;
       if (start < 0 || stop < 0) return text;
       let from = start;
-      let to = stop + m.end.length + 1;
+      let to = stop + m.end.length + (text[stop + m.end.length] === "\n" ? 1 : 0);
       // The blank line prependBlock put after a block at the start of the file.
       if (start === 0 && text[to] === '\n') to++;
       // The blank line appendBlock put before the block.

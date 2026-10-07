@@ -117,6 +117,8 @@ export interface Session {
   readonly frameKey: string;
   /** Commits a model edit as a new revision, or restores HEAD if the file is unusable. */
   sync(): SyncResult;
+  /** Confirm a returned recovery notice after a transport has completed its output write. */
+  confirmReceiptReturn(): void;
   /** Syncs, logs the events (write-ahead), renders them as turn blocks and commits. */
   record(events: RunnerEvent[], options?: { maxBytes?: number }): SyncResult;
   /**
@@ -266,6 +268,8 @@ class Core {
   private unloggedCommit: { head: Head; text: string } | undefined;
   private appendUncertain=false;
   private recoveryReceiptHeads: Array<{rev:number;sha:string}> = [];
+  // Acknowledgements are confirmed only on a later call, after the result returned.
+  private returnedReceiptHeads: Array<{rev:number;sha:string}> = [];
   private readonly l: Layout;
   private readonly hardLimit: number;
   private readonly me: LockHolder;
@@ -290,6 +294,7 @@ class Core {
       stateDir: this.l.stateDir,
       frameKey: sessionFrameKey(this.l.stateDir),
       sync: () => this.guard(() => this.finishResult(this.sync())),
+      confirmReceiptReturn: () => { if(this.closed)throw new Error('session is closed'); this.confirmReturnedReceipts(); this.saveRecoveryCheckpoint(); },
       record: (events, options) => this.guard(() => this.finishResult(this.record(events, false, options?.maxBytes))),
       nativeCompaction: (events) => this.guard(() => this.finishResult(this.record(events, true))),
       close: () => this.guard(() => this.close(), false),
@@ -298,6 +303,7 @@ class Core {
 
   private guard<T>(fn: () => T, repair = true): T {
     if (this.closed) throw new Error('session is closed');
+    this.confirmReturnedReceipts();
     if(repair&&this.appendUncertain)throw new Error('Event Log append may have persisted; close and reopen this session before retrying');
     if (repair && this.unloggedCommit) {
       const { head, text } = this.unloggedCommit;
@@ -350,7 +356,7 @@ class Core {
     try {
       const head = this.head();
       const log = this.checkpointLog();
-      if (!log || this.unloggedCommit || this.recoveryReceiptHeads.length || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
+      if (!log || this.unloggedCommit || this.recoveryReceiptHeads.length || this.returnedReceiptHeads.length || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
       const payload = { version: 2, log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
       atomicWrite(join(this.l.stateDir, 'recovery.json'), JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) }), 'recovery-checkpoint-tmp');
     } catch { /* A cache failure never changes the session result; next open rebuilds. */ }
@@ -387,11 +393,22 @@ class Core {
     return r;
   }
 
-  private deliver(r: SyncResult): SyncResult {
-    while (this.recoveryReceiptHeads.length) {
-      appendLog(this.l.events, {type:'revision-receipt-delivered',...this.recoveryReceiptHeads[0]});
-      this.recoveryReceiptHeads.shift();
+  private confirmReturnedReceipts(): void {
+    while (this.returnedReceiptHeads.length) {
+      appendLog(this.l.events, {type:'revision-receipt-return-confirmed',...this.returnedReceiptHeads[0]});
+      this.returnedReceiptHeads.shift();
     }
+  }
+
+  private deliver(r: SyncResult): SyncResult {
+    const batch=[...this.recoveryReceiptHeads];
+    for (const head of batch) {
+      appendLog(this.l.events, {type:'revision-receipt-delivery-intent',...head});
+      appendLog(this.l.events, {type:'revision-receipt-delivered',...head});
+      }
+    // No notice is confirmable if any acknowledgement in the result batch failed.
+    this.returnedReceiptHeads.push(...batch);
+    this.recoveryReceiptHeads=[];
     this.pendingReceipt = undefined;
     return r;
   }
@@ -639,6 +656,7 @@ class Core {
   private repairRevisionLog(head: Head | null): Receipt | undefined {
     let logged = false, committed: string | undefined;
     const pending = new Map<string, {rev:number;sha:string;kind:CommitKind;chars:number}>();
+    const attempted = new Set<string>();
     const snapshot = () => committed ??= this.snapshot(head!.rev);
     // Scan even without HEAD so cross-record corruption is refused before materialization.
     for (const entry of readLog(this.l.events)) {
@@ -650,7 +668,10 @@ class Core {
         if (!head || !Number.isSafeInteger(entry.rev) || Number(entry.rev) < 1 || Number(entry.rev) > head.rev || typeof entry.sha !== 'string' || !/^[a-f0-9]{64}$/.test(entry.sha) || !['init','model-edit','runner-append','native-compaction'].includes(String(entry.kind)) || !Number.isSafeInteger(entry.chars) || Number(entry.chars) < 0) throw new Error('invalid recovered revision accounting; refusing recovery');
         pending.set(`${entry.rev}:${entry.sha}`, {rev:Number(entry.rev),sha:entry.sha,kind:entry.kind as CommitKind,chars:Number(entry.chars)});
       }
-      if (entry.type === 'revision-receipt-delivered') pending.delete(`${entry.rev}:${entry.sha}`);
+      const key = `${entry.rev}:${entry.sha}`;
+      if (entry.type === 'revision-receipt-delivery-intent') attempted.add(key);
+      // Legacy acknowledgements retain their meaning; new attempts require a later confirmation.
+      if (entry.type === 'revision-receipt-return-confirmed' || (entry.type === 'revision-receipt-delivered' && !attempted.has(key))) pending.delete(key);
     }
     if (head?.kind && !logged) {
       const text = snapshot();

@@ -18,7 +18,7 @@ import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmdirSync,
 import { basename, dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { closeSync, constants, fsyncSync, openSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
-import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeRemoveTree, safeWrite } from './files.ts';
+import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeRemoveEmptyDirectory, safeRemoveTree, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
 
 /** How to recognise and remove our entries in one file. */
@@ -227,7 +227,7 @@ export function rollbackSnapshot(s: Snapshot, rules: Record<string, Rule>): stri
   revert(l, rules, unchanged);
   const owned = (path: string) => s.namespaced.some(n => path === n.path || path.startsWith(`${n.path}/`));
   for (const path of list(s.watch).filter(p => !before.has(p) && p.endsWith('/') && owned(p)).sort((a, b) => b.length - a.length)) {
-    try { rmdirSync(path.slice(0, -1)); } catch { /* Retain nonempty/unavailable paths. */ }
+    try { safeRemoveEmptyDirectory(path.slice(0, -1)); } catch { /* Retain nonempty/unavailable paths. */ }
   }
   // Only tracked config and newly created namespaced artifacts are provably ours. Other paths
   // may belong to a concurrent plugin install or backup, so retain them without reading them.
@@ -296,7 +296,7 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
   }
   for (const d of [...l.createdDirs].sort((a, b) => b.length - a.length)) {
     try {
-      rmdirSync(d);
+      safeRemoveEmptyDirectory(d);
     } catch {
       // Not empty (someone else uses it now) or already gone: leave it.
     }

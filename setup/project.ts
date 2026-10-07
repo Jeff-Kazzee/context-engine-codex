@@ -191,7 +191,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string, disabled = fals
         if (unmanaged === null) return { ...f, before: null };
         const previous = old.files.find(o => o.path === f.path)?.before ?? null;
         const previousText = previous ? safeRead(previous)!.toString('utf8') : '';
-        if (unmanaged === previousText && previous === null) return { ...f, before: null };
+        if (unmanaged === previousText && previous === null && existing !== "") return { ...f, before: null };
         const repairBefore = join(ledger.dir, 'before', `repair-unmanaged-${i}`);
         assertBackupSafe(config,Buffer.from(unmanaged));
         safeWrite(repairBefore, unmanaged ?? '');
