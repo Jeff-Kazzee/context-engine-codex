@@ -63,14 +63,15 @@ function withPromptLease<T>(input: HookInput, fn:()=>T, timeoutMs = 1000): T {
   // Distinct from the CLI operation lease: never recursively acquire that lock.
   return lock.serialized(join(l.stateDir,'codex-prompt.lock'),fn,{timeoutMs});
 }
-function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string; hash?: string; recorded?: boolean } {
+function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string; hash?: string; recorded?: boolean; operationId?: string } {
   try {
     const l=store.layout(input.cwd,input.session_id,store.resolveStateRoot());
     const path=join(l.stateDir,name),bytes=store.readBytes(path,1024);
     if(!bytes)return {path};
     const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
     if(typeof value.hash!=='string'||!/^[0-9a-f]{64}$/.test(value.hash)||(value.recorded!==undefined&&typeof value.recorded!=='boolean'))throw new Error('invalid pending prompt marker');
-    return {path,hash:value.hash,recorded:value.recorded===true};
+    if(value.operationId!==undefined&&(typeof value.operationId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.operationId)))throw new Error('invalid prompt operation identifier');
+    return {path,hash:value.hash,recorded:value.recorded===true,operationId:value.operationId};
   } catch {throw new PendingPrompt('Context Engine: a pending prompt could not be verified. Do not reset; retry the original request after repairing storage, or disable Context Engine.');}
 }
 
@@ -136,10 +137,12 @@ async function main(input: HookInput): Promise<void> {
     const hash=store.sha(String(input.prompt??'')),pending=pendingPrompt(input);
     if(pending.hash&&pending.hash!==hash)throw new PendingPrompt('Context Engine: an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine; resets remain blocked.');
     // Durable intent precedes the fallible CLI call. Only a fingerprint is retained, never prompt text.
-    if (!pending.recorded) store.atomicWrite(pending.path,JSON.stringify({hash}), 'frame-key-tmp');
-    const recorded = pending.recorded ? core(input, 'sync') : core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }]);
+    if (pending.hash && !pending.operationId && !pending.recorded) throw new PendingPrompt('Context Engine: the pending request has no operation identifier, so its committed status is ambiguous. Preserve the session and disable Context Engine before continuing in the native conversation.');
+    const operationId = pending.operationId ?? randomUUID();
+    if (!pending.hash) store.atomicWrite(pending.path,JSON.stringify({hash,operationId}), 'frame-key-tmp');
+    const recorded = pending.recorded ? core(input, 'sync') : core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }], undefined, operationId);
     // This request committed even if a newly published completed-event intent blocks return.
-    const marker=JSON.stringify({hash,recorded:true});
+    const marker=JSON.stringify({hash,recorded:true,operationId});
     store.atomicWrite(pending.path,marker, 'frame-key-tmp');
     requireRecorded(input);
     try {store.removeDirectoryEntries(dirname(pending.path),name=>name===PENDING_PROMPT);}
@@ -339,11 +342,12 @@ interface CoreResult {
  * One core call through the CLI. Codex may run the hooks of parallel tool calls at the same time,
  * all presenting the same owner; the core serializes them per session (core/lock.ts `serialized`).
  */
-function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], maxBytes?: number): CoreResult {
+function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], maxBytes?: number, operationId?: string): CoreResult {
   const cli = process.env.CONTEXT_ENGINE_CLI || 'context-engine';
   const hardLimit = process.env.CONTEXT_ENGINE_HARD_LIMIT || String(DEFAULT_HARD_LIMIT);
   const args = [command, '--session', input.session_id, '--project', input.cwd, '--runner', RUNNER, '--hard-limit', hardLimit, '--owner-pid', String(runnerPid()), '--if-enabled', '--budget', String(budgetTokens)];
   if(maxBytes!==undefined)args.push('--max-context-bytes',String(maxBytes));
+  if(operationId!==undefined)args.push('--operation-id',operationId);
   const [file, argv] = /\.[cm]?[jt]s$/.test(cli) ? [process.execPath, [cli, ...args]] : [cli, args];
   // JSON can escape each character into six bytes, in both text and parsed turns.
   // Size for the supported 16 MiB payload envelope as well as the character hard limit.

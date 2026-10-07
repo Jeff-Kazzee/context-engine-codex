@@ -119,8 +119,8 @@ export interface Session {
   sync(): SyncResult;
   /** Confirm a returned recovery notice after a transport has completed its output write. */
   confirmReceiptReturn(): void;
-  /** Syncs, logs the events (write-ahead), renders them as turn blocks and commits. */
-  record(events: RunnerEvent[], options?: { maxBytes?: number }): SyncResult;
+  /** Syncs and commits events. An optional UUID deduplicates retries of the same retained events. */
+  record(events: RunnerEvent[], options?: { maxBytes?: number; operationId?: string }): SyncResult;
   /**
    * The runner's own compaction replaced the conversation (the Compaction-only fallback, taken when
    * the Working Context alone is over its budget): syncs, applies the credential-retention policy, logs the runner's result
@@ -295,9 +295,9 @@ class Core {
       frameKey: sessionFrameKey(this.l.stateDir),
       sync: () => this.guard(() => this.finishResult(this.sync())),
       confirmReceiptReturn: () => { if(this.closed)throw new Error('session is closed'); this.confirmReturnedReceipts(); this.saveRecoveryCheckpoint(); },
-      record: (events, options) => this.guard(() => this.finishResult(this.record(events, false, options?.maxBytes))),
+      record: (events, options) => this.guard(() => this.finishResult(this.record(events, false, options?.maxBytes, options?.operationId))),
       nativeCompaction: (events) => this.guard(() => this.finishResult(this.record(events, true))),
-      close: () => this.guard(() => this.close(), false),
+      close: () => this.close(),
     };
   }
 
@@ -541,7 +541,7 @@ class Core {
     return this.result(next, receipt);
   }
 
-  record(events: RunnerEvent[], replace = false, maxBytes = SNAPSHOT_MAX_BYTES): SyncResult {
+  record(events: RunnerEvent[], replace = false, maxBytes = SNAPSHOT_MAX_BYTES, operationId?: string): SyncResult {
     const stringField = (event: unknown, key: string): string | undefined => {
       if (!event || typeof event !== 'object') return undefined;
       const descriptor = Object.getOwnPropertyDescriptor(event, key);
@@ -557,8 +557,20 @@ class Core {
     }
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > SNAPSHOT_MAX_BYTES) throw new Error('invalid revision snapshot byte limit');
     if (replace && events.every((e) => stringField(e, 'text')!.trim() === '')) throw new Error('nativeCompaction() needs the runner result: at least one non-empty event');
+    if (operationId !== undefined && (typeof operationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(operationId))) throw new Error('invalid record operation identifier');
     const retained = events.map(retainRunnerEvent);
+    const operation = operationId === undefined ? undefined : { id: operationId, sha: sha(JSON.stringify(retained)) };
     const synced = this.retainReceipt(this.sync());
+    if (operation) {
+      // Identity and events share one durable row, including during replay after a failed return.
+      for (const entry of readLog(this.l.events)) {
+        if (entry.type !== 'runner-events' || !entry.operation || typeof entry.operation !== 'object') continue;
+        const recorded = entry.operation as { id?: unknown; sha?: unknown };
+        if (recorded.id !== operation.id) continue;
+        if (recorded.sha !== operation.sha) throw new Error('record operation identifier was used for different input');
+        return this.result(this.apply(), synced.receipt);
+      }
+    }
     if (events.length === 0) return synced;
     this.lastSeq = Math.max(this.lastSeq, this.head()?.through ?? 0);
     if (retained.length > Number.MAX_SAFE_INTEGER - this.lastSeq) throw new Error('Event Log sequence exhausted; start a new session');
@@ -572,7 +584,7 @@ class Core {
     const previewHead=this.head();
     const prospective = this.renderPending([...this.unapplied, ...preview].filter(p=>p.seq>(previewHead?.through??0)),previewHead);
     if (Buffer.byteLength(prospective.text, 'utf8') > maxBytes) throw new Error(`revision snapshot exceeds the ${maxBytes === SNAPSHOT_MAX_BYTES ? '64 MiB' : maxBytes+' byte'} publication limit`);
-    try {appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(replacement ? { replace: replacement } : {}) });}
+    try {appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(operation ? { operation } : {}), ...(replacement ? { replace: replacement } : {}) });}
     catch(e) {if((e as NodeJS.ErrnoException).code==='CE_LOG_APPEND_AMBIGUOUS')this.appendUncertain=true;throw e;}
     this.lastSeq += numbered.length;
     if (replacement) numbered[0]!.replace = replacement;
@@ -641,11 +653,18 @@ class Core {
   }
 
   close(): void {
+    if (this.closed) throw new Error('session is closed');
+    let failed = false;
     try {
+      this.confirmReturnedReceipts();
       appendLog(this.l.events, { type: 'closed', pid: this.me.pid });
       this.saveRecoveryCheckpoint();
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
       try { releaseLock(this.l.lock, this.me); }
+      catch (error) { if (!failed) throw error; }
       finally { this.closed = true; }
     }
   }

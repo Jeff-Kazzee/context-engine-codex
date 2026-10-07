@@ -635,6 +635,10 @@ function validLogEntry(entry: unknown): entry is Record<string,unknown> {
     if(!event || typeof event!=='object' || Array.isArray(event) || typeof event.role!=='string' || typeof event.text!=='string')return false;
     previous=pending.seq;
   }
+  if (row.operation !== undefined) {
+    const operation = row.operation as Record<string, unknown>;
+    if (!operation || typeof operation !== 'object' || typeof operation.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(operation.id) || typeof operation.sha !== 'string' || operation.sha !== sha(JSON.stringify(row.events.map(pending => pending.event))) || row.events.length === 0 || row.replace !== undefined) throw new Error('invalid record operation metadata, refusing recovery');
+  }
   if(row.replace!==undefined){const r=row.replace as Record<string,unknown>;if(!r || typeof r!=='object' || r.kind!=='native-compaction' || r.reason!=='over-budget' || typeof r.approxTokensBefore!=='number' || !Number.isFinite(r.approxTokensBefore) || r.approxTokensBefore<0 || (r.budgetTokens!==null && (typeof r.budgetTokens!=='number' || !Number.isFinite(r.budgetTokens) || r.budgetTokens<=0)))return false;}
   return true;
 }

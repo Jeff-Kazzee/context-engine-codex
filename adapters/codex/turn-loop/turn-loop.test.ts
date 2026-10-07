@@ -367,3 +367,24 @@ test('wave26: uncertain server shutdown retains cross-process and in-process own
   await assert.rejects(actual(t.opts),/already.*loop/);
  }finally{owned.close();}
 });
+
+
+test('wave31: confirmed shutdown releases registry after receipt acknowledgement fails', async()=>{
+  const {stripTypeScriptTypes}=await import('node:module');
+  const coreModule=await import('../../../core/index.ts'),fsModule=await import('node:fs'),pathModule=await import('node:path'),itemsModule=await import('./items.ts');
+  const {appendLog}=await import('../../../core/store.ts');
+  const t=setup({turns:[]}), seed=coreModule.openSession({...t.opts,runner:'codex',hardLimit:400000});assert.equal(seed.status,'open');
+  seed.session.record([{role:'user',text:'RECOVERY_FOR_CLOSE'}]);const log=join(seed.session.stateDir,'events.jsonl');seed.session.close();
+  const row=readFileSync(log,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)).find(row=>row.type==='revision');appendLog(log,{...row,recovered:true});
+  const source=readFileSync(new URL('./turn-loop.ts',import.meta.url),'utf8');
+  const erased=stripTypeScriptTypes(source).replace(/^import[\s\S]*?from ['"][^'"]+['"];\s*/gm,'').replace(/^export (?=(?:const|async function|function|class))/gm,'');
+  let shutdowns=0;
+  const openSession=(opts:any)=>{const r=coreModule.openSession(opts);if(r.status==='open')r.session.sync();return r;};
+  const rpcModule={spawnJsonRpc:()=>({request:async()=>({}),notify:()=>{},close:async()=>{shutdowns++;}})};
+  const load=new Function('coreModule','fsModule','pathModule','itemsModule','rpcModule','openSession',`const {${Object.keys(coreModule).filter(k=>k!=='openSession').join(',')}}=coreModule;const {closeSync,openSync,realpathSync}=fsModule;const {basename,dirname,join,resolve}=pathModule;const {workingContextItems}=itemsModule;const {spawnJsonRpc}=rpcModule;${erased};return startTurnLoop;`);
+  const actual=load(coreModule,fsModule,pathModule,itemsModule,rpcModule,openSession),loop=await actual(t.opts),write=fs.writeSync;
+  fs.writeSync=((fd:number,data:any,...args:any[])=>{if(String(data).includes('"type":"revision-receipt-return-confirmed"'))throw new Error('SYNTHETIC_CONFIRMATION_FAILURE');return (write as any)(fd,data,...args);}) as typeof fs.writeSync;syncBuiltinESMExports();
+  try{await assert.rejects(loop.close(),/SYNTHETIC_CONFIRMATION_FAILURE/);}finally{fs.writeSync=write;syncBuiltinESMExports();}
+  assert.equal(shutdowns,1);assert.equal(inspectSession({...t.opts}).lock,null);
+  const resumed=await actual(t.opts);await resumed.close();assert.equal(shutdowns,2);
+});

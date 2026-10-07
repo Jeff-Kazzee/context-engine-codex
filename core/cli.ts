@@ -89,6 +89,9 @@ Options:
   --max-context-bytes <n>
                       record only: refuse before logging if the rendered next
                       revision exceeds this UTF-8 byte cap (at most 64 MiB).
+  --operation-id <uuid>
+                      record only: reuse this ID for retries of one event batch.
+                      New batches need new IDs, even when their text matches.
   --budget <tokens>   open|sync|record|native-compaction: the Working
                       Context's budget. Results then carry "budget": a size
                       readout and any reminder it fired (25/50/75% once
@@ -158,6 +161,7 @@ function main(argv: string[]): number {
       runner: { type: 'string' },
       'hard-limit': { type: 'string' },
       'max-context-bytes': { type: 'string' },
+      'operation-id': { type: 'string' },
       'owner-pid': { type: 'string' },
       budget: { type: 'string' },
       part: { type: 'string' },
@@ -172,6 +176,7 @@ function main(argv: string[]): number {
   }
   const [command, ...rest] = positionals;
   if(values['max-context-bytes']!==undefined&&command!=='record')throw new Usage('--max-context-bytes applies only to record');
+  if(values['operation-id']!==undefined&&command!=='record')throw new Usage('--operation-id applies only to record');
   const projectRoot = values.project ?? process.cwd();
   if (command === 'cite') {
     if (rest.length !== 1) throw new Usage('cite takes one argument: <path>[#L<from>[-<to>]] or commit:<rev>');
@@ -227,7 +232,7 @@ function main(argv: string[]): number {
       s.close();
       return print({ ok: true, closed: true });
     }
-    const result: SyncResult = command === 'record' ? s.record(events, values['max-context-bytes'] !== undefined ? {maxBytes:positiveInt(values['max-context-bytes'],'--max-context-bytes')} : undefined) : command === 'native-compaction' ? s.nativeCompaction(events) : s.sync();
+    const result: SyncResult = command === 'record' ? s.record(events, {maxBytes: values['max-context-bytes'] !== undefined ? positiveInt(values['max-context-bytes'],'--max-context-bytes') : undefined, operationId: values['operation-id']}) : command === 'native-compaction' ? s.nativeCompaction(events) : s.sync();
     const bytes=Buffer.from(`${JSON.stringify({ ok: true, ...result, workingContext: s.workingContextPath, ...(command === 'open' ? { frameKey: s.frameKey } : {}) })}\n`);
     resultOutputStarted=true;
     const outputDeadline=Date.now()+5000;

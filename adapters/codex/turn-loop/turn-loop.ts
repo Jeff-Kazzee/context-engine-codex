@@ -162,8 +162,8 @@ export async function startTurnLoop(opts: TurnLoopOptions): Promise<CodexTurnLoo
     rpc.notify('initialized');
   } catch (e) {
     await rpc?.close();
-    session.close();
-    activeLoops.delete(key);
+    try { session.close(); }
+    finally { activeLoops.delete(key); }
     throw e;
   } finally {
     if (stderrFd !== undefined) closeSync(stderrFd);
@@ -380,8 +380,8 @@ class TurnLoop {
       // Keep both ownership guards if shutdown fails: another process must not acquire the session.
       await this.rpc.close();
       await active?.then(() => {}, () => {});
-      this.session.close();
-      this.release();
+      try { this.session.close(); }
+      finally { this.release(); }
     })();
     return this.closing;
   }
