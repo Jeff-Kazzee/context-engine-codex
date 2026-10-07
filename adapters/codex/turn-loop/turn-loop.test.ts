@@ -12,6 +12,16 @@ import { syncBuiltinESMExports } from 'node:module';
 
 type Entry = Record<string, any>;
 
+test('wave26: duplicate in-process session loop is refused without releasing the first owner',async()=>{
+ const t=setup({turns:[]}),first=await startCodexTurnLoop(t.opts);
+ let duplicate:CodexTurnLoop|undefined;
+ try{
+  await assert.rejects(async()=>{duplicate=await start({...t.opts,projectRoot:relative(process.cwd(),t.opts.projectRoot)});},/already.*loop|loop.*already|duplicate/);
+  assert.ok(inspectSession({...t.opts}).lock,'original loop retains its session lock');assert.equal(t.methods().filter(m=>m==='initialize').length,1);
+ }finally{await duplicate?.close();await first.close();}
+ const resumed=await startCodexTurnLoop(t.opts);await resumed.close();assert.equal(inspectSession({...t.opts}).lock,null);
+});
+
 test('wave10: failure to record a completed turn stops the server and refuses reuse', async () => {
   const t = setup({ turns: [{ reply: 'COMPLETED_RECORD_FAILURE' }] });
   const loop = await startCodexTurnLoop(t.opts), native = fs.writeSync;
@@ -300,6 +310,7 @@ test('actual turn loop uses the validated revision when its workspace path is re
   const { stripTypeScriptTypes } = await import('node:module');
   const coreModule = await import('../../../core/index.ts');
   const fsModule = await import('node:fs');
+  const pathModule = await import('node:path');
   const itemsModule = await import('./items.ts');
   const rpcModule = await import('./jsonrpc.ts');
   const source = readFileSync(new URL('./turn-loop.ts', import.meta.url), 'utf8');
@@ -316,8 +327,8 @@ test('actual turn loop uses the validated revision when its workspace path is re
     } });
     return { ...opened, session };
   };
-  const load = new Function('coreModule', 'fsModule', 'itemsModule', 'rpcModule', 'openSession', `const {${Object.keys(coreModule).filter(k => k !== 'openSession').join(',')}} = coreModule; const {closeSync,openSync,realpathSync} = fsModule; const {workingContextItems} = itemsModule; const {spawnJsonRpc} = rpcModule; ${erased}; return startTurnLoop;`);
-  const actualStart = load(coreModule, fsModule, itemsModule, rpcModule, openSession);
+  const load = new Function('coreModule', 'fsModule', 'pathModule', 'itemsModule', 'rpcModule', 'openSession', `const {${Object.keys(coreModule).filter(k => k !== 'openSession').join(',')}} = coreModule; const {closeSync,openSync,realpathSync} = fsModule; const {basename,dirname,join,resolve} = pathModule; const {workingContextItems} = itemsModule; const {spawnJsonRpc} = rpcModule; ${erased}; return startTurnLoop;`);
+  const actualStart = load(coreModule, fsModule, pathModule, itemsModule, rpcModule, openSession);
   const loop = await actualStart(t.opts); open.push(loop);
   await loop.runTurn('VALIDATED_SENTINEL'); replace = true;
   const result = await loop.runTurn('next request'); assert.equal(result.status, 'completed');
@@ -337,4 +348,22 @@ test('renewed: refused injection unsubscribes the newly allocated thread',async(
  const loop=await startCodexTurnLoop(t.opts);await loop.runTurn('baseline');
  const result=await loop.runTurn('refuse');assert.equal(result.status,'refused');
  assert.deepEqual(t.sent('thread/unsubscribe'),[{threadId:t.sent('thread/start').length===2?'thread-2':'unexpected'}]);
+});
+
+test('wave26: uncertain server shutdown retains cross-process and in-process ownership', async()=>{
+ const {stripTypeScriptTypes}=await import('node:module');
+ const coreModule=await import('../../../core/index.ts'),fsModule=await import('node:fs'),pathModule=await import('node:path'),itemsModule=await import('./items.ts');
+ const source=readFileSync(new URL('./turn-loop.ts',import.meta.url),'utf8');
+ const erased=stripTypeScriptTypes(source).replace(/^import[\s\S]*?from ['"][^'"]+['"];\s*/gm,'').replace(/^export (?=(?:const|async function|function|class))/gm,'');
+ const t=setup({turns:[]});let owned: any;
+ const openSession=(opts:any)=>{const r=coreModule.openSession(opts);if(r.status==='open')owned=r.session;return r;};
+ const rpcModule={spawnJsonRpc:()=>({request:async()=>({}),notify:()=>{},close:async()=>{throw new Error('synthetic uncertain shutdown');}})};
+ const load=new Function('coreModule','fsModule','pathModule','itemsModule','rpcModule','openSession',`const {${Object.keys(coreModule).filter(k=>k!=='openSession').join(',')}}=coreModule;const {closeSync,openSync,realpathSync}=fsModule;const {basename,dirname,join,resolve}=pathModule;const {workingContextItems}=itemsModule;const {spawnJsonRpc}=rpcModule;${erased};return startTurnLoop;`);
+ const actual=load(coreModule,fsModule,pathModule,itemsModule,rpcModule,openSession),loop=await actual(t.opts);
+ try{
+  await assert.rejects(loop.close(),/uncertain shutdown/);
+  assert.ok(inspectSession(t.opts).lock);
+  assert.equal(coreModule.openSession({...t.opts,runner:'codex',hardLimit:400000,ownerPid:2147483646}).status,'refused');
+  await assert.rejects(actual(t.opts),/already.*loop/);
+ }finally{owned.close();}
 });

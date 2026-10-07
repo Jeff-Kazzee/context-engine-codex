@@ -8,7 +8,8 @@
 // checkout itself (tests, the regression), the core is found relative to this file. Session work
 // goes through the `context-engine` CLI, which also serializes concurrent hooks of one session.
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { closeSync, readFileSync, readdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { locallyEnabled } from './activation.ts';
@@ -55,21 +56,52 @@ let confirmedParticipation = false;
 let store: typeof Store;
 let lock: typeof Lock;
 const PENDING_PROMPT = 'codex-prompt-pending.json';
+const PENDING_RECORD = 'codex-record-pending.json';
 function withPromptLease<T>(input: HookInput, fn:()=>T): T {
   const state=store.resolveStateRoot(),l=store.layout(input.cwd,input.session_id,state);
   store.ensureDirs(l,state);
   // Distinct from the CLI operation lease: never recursively acquire that lock.
   return lock.serialized(join(l.stateDir,'codex-prompt.lock'),fn,{timeoutMs:1000});
 }
-function pendingPrompt(input: HookInput): { path: string; hash?: string } {
+function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string; hash?: string } {
   try {
     const l=store.layout(input.cwd,input.session_id,store.resolveStateRoot());
-    const path=join(l.stateDir,PENDING_PROMPT),bytes=store.readBytes(path,1024);
+    const path=join(l.stateDir,name),bytes=store.readBytes(path,1024);
     if(!bytes)return {path};
     const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
     if(typeof value.hash!=='string'||!/^[0-9a-f]{64}$/.test(value.hash))throw new Error('invalid pending prompt marker');
     return {path,hash:value.hash};
   } catch {throw new PendingPrompt('Context Engine: a pending prompt could not be verified. Do not reset; retry the original request after repairing storage, or disable Context Engine.');}
+}
+
+const RECORD_REFUSAL = 'Context Engine: an earlier completed tool or assistant event could not be safely recorded. Keep the native conversation; repair storage or disable Context Engine before continuing. Resets remain blocked.';
+function requireRecorded(input: HookInput, own?: string): void {
+  const l = store.layout(input.cwd, input.session_id, store.resolveStateRoot());
+  const parent = store.openPrivateDirectory(l.stateDir);
+  if (parent === undefined) return;
+  try {
+    // Names alone establish unresolved debt; malformed or unreadable marker payloads cannot clear it.
+    if (readdirSync(`/proc/self/fd/${parent}`).some(name => name !== own && (name === PENDING_RECORD || /^codex-record-pending-[0-9a-f-]+\.json$/.test(name)))) throw new PendingPrompt(RECORD_REFUSAL);
+  } finally { closeSync(parent); }
+}
+function recordCompleted<T>(input: HookInput, text: string, fn: () => T): T {
+  const state = store.resolveStateRoot(), l = store.layout(input.cwd, input.session_id, state);
+  store.ensureDirs(l, state);
+  const name = `codex-record-pending-${randomUUID()}.json`, path = join(l.stateDir, name);
+  const bytes = JSON.stringify({ hash: store.sha(text) });
+  // Publish independent intent before waiting for the lease. Another operation cannot clear it.
+  store.atomicWrite(path, bytes, 'frame-key-tmp');
+  return withPromptLease(input, () => {
+    requireRecorded(input, name);
+    const result = fn();
+    try { store.removeDirectoryEntries(dirname(path), candidate => candidate === name); }
+    catch (error) {
+      // An unlink followed by a failed directory flush is ambiguous: restore this operation's marker.
+      try { store.atomicWrite(path, bytes, 'frame-key-tmp'); } catch {}
+      throw error;
+    }
+    return result;
+  });
 }
 
 /** The agent's own reset (new_context): the one event that fails closed. */
@@ -84,8 +116,8 @@ function denyReset(refusal: string): void {
 /**
  * The event is read before any checkout module is loaded, so a failure to load them (the checkout
  * moved or deleted, a module that throws) is seen with the event in hand: the reset gate then
- * refuses only after cache-local opt-in was verified (see the handler at the bottom). Prompt and
- * compaction failures also stop the request; ordinary tool hooks stand aside.
+ * refuses only after cache-local opt-in was verified (see the handler at the bottom). Prompt, completed-event and
+ * compaction failures also report refusal for a verified active project.
  */
 async function main(input: HookInput): Promise<void> {
   // Subagents (multi-agent mode) get no Working Context; only the root agent's session is managed.
@@ -101,6 +133,7 @@ async function main(input: HookInput): Promise<void> {
   if (lib.killSwitchOn()) return;
   if (input.hook_event_name === 'UserPromptSubmit') {
     const result=withPromptLease(input,()=>{
+    requireRecorded(input);
     const hash=store.sha(String(input.prompt??'')),pending=pendingPrompt(input);
     if(pending.hash&&pending.hash!==hash)throw new PendingPrompt('Context Engine: an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine; resets remain blocked.');
     // Durable intent precedes the fallible CLI call. Only a fingerprint is retained, never prompt text.
@@ -118,12 +151,15 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
     // echoing it back would duplicate the file into itself, or re-add what the agent offloaded.
-    let ownFile = touchesWorkingContext(input);
+    let ownFile = false;
+    const result = recordCompleted(input, renderToolCall(input), () => {
+    ownFile = touchesWorkingContext(input);
     const shell = typeof (input.tool_input as Record<string, unknown> | undefined)?.command === 'string';
     const observed = ownFile || shell ? core(input, 'sync') : undefined;
     // Actual file effects, not arbitrary command syntax, decide whether shell text could resurrect edits.
     if (shell && (observed?.receipt?.kind === 'committed' || observed?.receipt?.kind === 'restored')) ownFile = true;
-    const result = ownFile ? observed! : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }]);
+    return ownFile ? observed! : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }]);
+    });
     // A restore (always) and stale citations (stale-refs experiment, Working Context calls only) go
     // out as `block`, which replaces the tool result the model sees, the original output kept below
     // the notice: the agent must see them before it touches the file again. A budget reminder (a tier
@@ -143,16 +179,19 @@ async function main(input: HookInput): Promise<void> {
     // The reset gate: a refusal here reaches the model as the new_context tool result, so it can
     // fix the file and retry. The reset itself only happens after this step's sampling ends.
     const refusal = withPromptLease(input,()=>{
-      if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: the context window was NOT reset. An earlier user request was not recorded; retry that exact request after repairing storage, or disable Context Engine.');
+      requireRecorded(input);
+    if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: the context window was NOT reset. An earlier user request was not recorded; retry that exact request after repairing storage, or disable Context Engine.');
       return resetRefusal(input);
     });
     if (refusal) denyReset(refusal);
   } else if (input.hook_event_name === 'Stop') {
     if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) {
-      core(input, 'record', [{ role: 'assistant', text: input.last_assistant_message }]);
+      const text = input.last_assistant_message;
+      recordCompleted(input, text, () => core(input, 'record', [{ role: 'assistant', text }]));
     }
   } else if (input.hook_event_name === 'PreCompact') {
     withPromptLease(input,()=>{
+    requireRecorded(input);
     if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: compaction was stopped because an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine.');
     // Backstop for resets the gate above never sees (the token limit, a manual /compact). Codex
     // only honours `continue:false`; it aborts the turn, and the user sees the stop reason. So it
@@ -363,8 +402,8 @@ try {
     // The path is spelled out here because the core that knows it may be what failed to load.
     if (event && isResetGate(event) && !event.agent_id && confirmedParticipation) {
       denyReset(e instanceof PendingPrompt ? e.message : `${NOT_RESET} The Context Engine core could not be loaded or reached, so your Working Context .context-engine/${event.session_id}/context.md could not be checked, and resetting onto a file that cannot be delivered would lose the conversation. Carry on in this window for now (if this keeps happening, reinstall or uninstall Context Engine).`);
-    } else if(event && !event.agent_id && confirmedParticipation && (event.hook_event_name==='UserPromptSubmit'||event.hook_event_name==='PreCompact')) {
-      emit({continue:false,stopReason:'Context Engine: this request/compaction was stopped because the user request could not be safely recorded. Retry the original request after repairing storage, or disable Context Engine. No reset acceptance is claimed.'});
+    } else if(event && !event.agent_id && confirmedParticipation && (event.hook_event_name==='UserPromptSubmit'||event.hook_event_name==='PreCompact'||event.hook_event_name==='PostToolUse'||event.hook_event_name==='Stop')) {
+      emit({continue:false,stopReason:e instanceof PendingPrompt ? e.message : (event.hook_event_name==='PostToolUse'||event.hook_event_name==='Stop') ? RECORD_REFUSAL : 'Context Engine: this request/compaction was stopped because the user request could not be safely recorded. Retry the original request after repairing storage, or disable Context Engine. No reset acceptance is claimed.'});
     }
   }
   // Other failures retain native fallback. Exit 0 with no stdout has no control effect.

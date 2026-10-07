@@ -32,7 +32,8 @@
 // mode, the file's path, how it is delivered). It never carries model-authored text; the Working
 // Context itself only ever travels as the one injected user message.
 import { closeSync, openSync, realpathSync } from 'node:fs';
-import { KILL_SWITCH_ENV, killSwitchOn, openSession, renderTurns, type Receipt, type RunnerEvent, type Session } from '../../../core/index.ts';
+import { basename, dirname, join, resolve } from 'node:path';
+import { KILL_SWITCH_ENV, resolveStateRoot, killSwitchOn, openSession, renderTurns, type Receipt, type RunnerEvent, type Session } from '../../../core/index.ts';
 import { workingContextItems, type WorkingContextRejectReason } from './items.ts';
 import { spawnJsonRpc, type JsonRpcConnection, type Notification } from './jsonrpc.ts';
 
@@ -109,6 +110,15 @@ export interface CodexTurnLoop {
 
 const DEFAULT_HARD_LIMIT = 400_000;
 const VERSION = '0.1.0';
+const activeLoops = new Set<string>();
+function canonicalState(path: string): string {
+  path = resolve(path);
+  try { return realpathSync(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return join(canonicalState(dirname(path)), basename(path));
+  }
+}
 
 export function guidance(path: string): string {
   return [
@@ -126,8 +136,14 @@ export async function startTurnLoop(opts: TurnLoopOptions): Promise<CodexTurnLoo
   if (killSwitchOn(env)) throw new Error(`Context Engine is turned off (${KILL_SWITCH_ENV}=${env[KILL_SWITCH_ENV]}); the turn loop did not start`);
   opts = { ...opts, projectRoot: realpathSync(opts.projectRoot) };
   const hardLimit = opts.hardLimit ?? DEFAULT_HARD_LIMIT;
-  const opened = openSession({ projectRoot: opts.projectRoot, sessionId: opts.sessionId, runner: 'codex', hardLimit, stateDir: opts.stateDir });
+  const key = JSON.stringify([opts.projectRoot, canonicalState(resolveStateRoot(opts.stateDir)), opts.sessionId]);
+  if (activeLoops.has(key)) throw new Error(`session ${opts.sessionId} already has an active turn loop in this process`);
+  activeLoops.add(key);
+  let opened: ReturnType<typeof openSession>;
+  try { opened = openSession({ projectRoot: opts.projectRoot, sessionId: opts.sessionId, runner: 'codex', hardLimit, stateDir: opts.stateDir }); }
+  catch (error) { activeLoops.delete(key); throw error; }
   if (opened.status === 'refused') {
+    activeLoops.delete(key);
     throw new Error(`session ${opts.sessionId} is held by pid ${opened.holder.pid} on ${opened.holder.hostname}`);
   }
   const session = opened.session;
@@ -147,11 +163,12 @@ export async function startTurnLoop(opts: TurnLoopOptions): Promise<CodexTurnLoo
   } catch (e) {
     await rpc?.close();
     session.close();
+    activeLoops.delete(key);
     throw e;
   } finally {
     if (stderrFd !== undefined) closeSync(stderrFd);
   }
-  return new TurnLoop(opts, hardLimit, session, rpc).facade();
+  return new TurnLoop(opts, hardLimit, session, rpc, () => activeLoops.delete(key)).facade();
 }
 
 class TurnLoop {
@@ -167,12 +184,14 @@ class TurnLoop {
   private readonly hardLimit: number;
   private readonly session: Session;
   private readonly rpc: JsonRpcConnection;
+  private readonly release: () => void;
 
-  constructor(opts: TurnLoopOptions, hardLimit: number, session: Session, rpc: JsonRpcConnection) {
+  constructor(opts: TurnLoopOptions, hardLimit: number, session: Session, rpc: JsonRpcConnection, release: () => void) {
     this.opts = opts;
     this.hardLimit = hardLimit;
     this.session = session;
     this.rpc = rpc;
+    this.release = release;
   }
 
   facade(): CodexTurnLoop {
@@ -358,11 +377,11 @@ class TurnLoop {
     this.closed = true;
     const active = this.active;
     this.closing = (async () => {
-      try {
-        await this.rpc.close();
-        // Recording belongs to the in-flight turn; keep its lock until it settles.
-        await active?.then(() => {}, () => {});
-      } finally { this.session.close(); }
+      // Keep both ownership guards if shutdown fails: another process must not acquire the session.
+      await this.rpc.close();
+      await active?.then(() => {}, () => {});
+      this.session.close();
+      this.release();
     })();
     return this.closing;
   }

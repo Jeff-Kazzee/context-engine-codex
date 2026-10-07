@@ -9,6 +9,17 @@ import { fixture, tempDir } from './testing.ts';
 
 type Fixture = ReturnType<typeof fixture>;
 
+for(const flush of ['file','directory'])test('wave26: ambiguous '+flush+' accounting flush preserves recall/show/read evidence',()=>{
+ const f=fixture(),session=open(f);session.record([{role:'tool',text:'ACCOUNTING_EVIDENCE'}]);session.close();
+ const log=join(inspectSession({...f,sessionId:'S1'}).stateDir,'events.jsonl'),native=fs.fsyncSync;
+ fs.fsyncSync=((fd:number)=>{const path=fs.realpathSync(`/proc/self/fd/${fd}`);if(path===(flush==='file'?log:dirname(log)))throw Object.assign(new Error('synthetic post-write flush failure'),{code:'ENOSPC'});native(fd);}) as typeof fs.fsyncSync;syncBuiltinESMExports();
+ try{
+  const r=recall({...f,sessionId:'S1',query:'ACCOUNTING_EVIDENCE'});assert.equal(r.accounting,'skipped');assert.match(r.note!,/could not be confirmed/);assert.equal(r.hits[0]!.id,'e1');
+  const sh=show({...f,sessionId:'S1',id:'e1'});assert.equal(sh.accounting,'skipped');assert.match(sh.note!,/could not be confirmed/);assert.match(sh.text,/ACCOUNTING_EVIDENCE/);
+  const rd=readWorkingContext({...f,sessionId:'S1'});assert.equal(rd.accounting,'skipped');assert.match(rd.text,/ACCOUNTING_EVIDENCE/);
+ }finally{fs.fsyncSync=native;syncBuiltinESMExports();}
+});
+
 function open(f: Fixture, sessionId = 'S1'): Session {
   const r = openSession({ ...f, sessionId, runner: 'test', hardLimit: 100_000 });
   assert.equal(r.status, 'open');

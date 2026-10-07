@@ -8,7 +8,7 @@ export function assertBackupSafe(path: string, bytes: Buffer | null): void {
   let text:string;try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{refuse();return;}
   const sensitive=(key:string)=>{
     const n=key.toLowerCase().replace(/[^a-z0-9]/g,'');
-    return /(apikey|accesskey|secretkey|clientsecret|secret|password|privatekey|authorization|credentials?)$/.test(n) || n.endsWith('token') || n==='tokens' || n==='auth' || n==='bearer';
+    return /(apikey|accesskey|secretkey|clientsecret|secret|password|privatekey|authorization|credentials?)$/.test(n) || n.endsWith('token') || n==='tokens' || n==='auth' || n==='bearer' || n==='cookie' || n==='setcookie';
   };
   if(format==='.json'){
     let value:unknown;try{value=JSON.parse(text);}catch{refuse();return;}

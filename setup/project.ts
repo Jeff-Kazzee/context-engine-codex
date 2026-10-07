@@ -21,7 +21,7 @@ import { experimentOn, findRecord, killSwitchOn, participation, setParticipation
 import { projectKey, projectKeyForCanonicalPath } from '../core/store.ts';
 import { projectCodexToml } from '../adapters/codex/guidance.ts';
 import { describe, installedLedger, SetupError } from './install.ts';
-import { assess, completeLedger, readLedger, revert, rollbackSnapshot, takeSnapshot, type Ledger, type Rule } from './ledger.ts';
+import { assess, completeLedger, discardSnapshot, readLedger, revert, rollbackSnapshot, takeSnapshot, type Ledger, type Rule } from './ledger.ts';
 import { safeRead, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
 import { appendBlock, blockRule, prependBlock, tomlTableScalar, type Markers } from './rules.ts';
@@ -182,7 +182,7 @@ function writeCodexProjectFiles(ctx: SetupContext, root: string, disabled = fals
   const toml = disabled ? { top: 'developer_instructions = ""\n', table: '[features.token_budget]\nenabled = false\n' } : projectCodexToml({ experiments });
   let ledger: Ledger;
   try {
-    safeWrite(config, appendBlock(prependBlock(unmanaged, toml.top, TOML_TOP_MARKERS), toml.table, TOML_MARKERS));
+    safeWrite(config, appendBlock(prependBlock(unmanaged, toml.top, TOML_TOP_MARKERS), toml.table, TOML_MARKERS),existingBytes);
     ledger = completeLedger(snap);
     // A repair must retain changes made since the initial enable. Keep the old
     // rollback bytes only when the currently unmanaged text still matches them.
@@ -265,6 +265,8 @@ export function enableProject(ctx: SetupContext, projectRoot: string): string[] 
     if (errors.length > 1) throw new AggregateError(errors, 'Codex activation failed; rollback was incomplete; backups are preserved');
     throw e;
   }
+  // Participation has committed. Cleanup failure does not undo successful activation.
+  if(snap)try{discardSnapshot(snap);}catch{setupLines.push(`Codex: unused publication rollback snapshot could not be removed; retained at ${snap.dir}`);}
   const rec = findRecord({ projectRoot, stateDir: dirname(ctx.setupDir) })!;
   const lines = [`Context Engine enabled for ${rec.project} and its subdirectories (new sessions).`];
   if (killSwitchOn(ctx.env)) lines.push('Note: the kill switch CONTEXT_ENGINE=off is set in this shell, so the adapters stay off where it is set.');

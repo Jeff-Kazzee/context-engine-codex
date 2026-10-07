@@ -176,6 +176,7 @@ function account(log: string, entry: Record<string, unknown>): { accounting?: 's
     return {};
   } catch (e) {
     if (e instanceof SerializeTimeout) return { accounting: 'skipped', note: SKIPPED_NOTE };
+    if ((e as NodeJS.ErrnoException).code === 'CE_LOG_APPEND_AMBIGUOUS') return { accounting: 'skipped', note: 'Event Log accounting could not be confirmed; the result is complete.' };
     if (['EACCES', 'EPERM', 'EROFS', 'ENOSPC', 'EDQUOT', 'EIO'].includes((e as NodeJS.ErrnoException).code ?? '')) return { accounting: 'skipped', note: SKIPPED_NOTE };
     throw e;
   }

@@ -15,7 +15,7 @@
 //    are removed only when empty, and unowned directories remain.
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { basename, dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { closeSync, constants, fsyncSync, openSync } from 'node:fs';
 import { openPrivateDirectory } from '../core/store.ts';
 import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeRemoveTree, safeWrite } from './files.ts';
@@ -92,16 +92,21 @@ export function timestamp(d = new Date()): string {
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 }
 
-/** Backs up `files` byte for byte into a new timestamped dir under `backupRoot`, and lists `watch`. */
-export function takeSnapshot(opts: { backupRoot: string; kind: string; files: string[]; watch: string[]; namespaced: string[]; extra?: Record<string, unknown> }): Snapshot {
+/** Reuse root/file ownership checks before install and uninstall runner commands. */
+export function preflightOwnership(opts: {files:string[];watch:string[];namespaced:string[]}): void {
   for (const path of opts.watch) {
     checkComponents(path);
-    try { if (!lstatSync(path).isDirectory()) throw new Error(`setup watched root is not a directory: ${path}`); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    try {if(!lstatSync(path).isDirectory())throw new Error(`setup watched root is not a directory: ${path}`);}
+    catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
     checkOwnedDirectory(path);
   }
-  for (const path of opts.namespaced) checkComponents(path);
-  for (const path of opts.files) checkOwnedFile(path);
+  for(const path of opts.namespaced)checkComponents(path);
+  for(const path of opts.files)checkOwnedFile(path);
+}
+
+/** Backs up `files` byte for byte into a new timestamped dir under `backupRoot`, and lists `watch`. */
+export function takeSnapshot(opts: { backupRoot: string; kind: string; files: string[]; watch: string[]; namespaced: string[]; extra?: Record<string, unknown> }): Snapshot {
+  preflightOwnership(opts);
   const before=opts.files.map(path=>{const bytes=safeRead(path);assertBackupSafe(path,bytes);return bytes;});
   const at = new Date();
   checkComponents(opts.backupRoot);
@@ -145,6 +150,24 @@ function writeBackup(path: string, bytes: Buffer): void {
     fd = openSync(join(`/proc/self/fd/${parent}`,path.split('/').at(-1)!),constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
     writeFileSync(fd,bytes); fsyncSync(fd); fsyncSync(parent);
   } finally {if(fd!==undefined)closeSync(fd);closeSync(parent);}
+}
+
+/** Discard only successful publication rollback copies; retain unexpected entries. */
+export function discardSnapshot(s: Snapshot): void {
+  for(const f of s.files)if(f.before){
+    if(dirname(f.before)!==join(s.dir,'before'))throw new Error('rollback snapshot copy outside its directory');
+    safeRemove(f.before,safeRead(f.before));
+  }
+  const parent=openPrivateDirectory(dirname(s.dir))!;
+  let directory:number|undefined;
+  try {
+    directory=openPrivateDirectory(s.dir)!;
+    for(const name of ['before','after'])rmdirSync(join(`/proc/self/fd/${directory}`,name));
+    fsyncSync(directory);
+    const target=join(`/proc/self/fd/${parent}`,basename(s.dir)),now=lstatSync(target),opened=lstatSync(`/proc/self/fd/${directory}/.`);
+    if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('rollback snapshot directory changed; retained');
+    rmdirSync(target);fsyncSync(parent);
+  }finally{if(directory!==undefined)closeSync(directory);closeSync(parent);}
 }
 
 /** Records the edit's result next to the backups and returns the ledger. */
@@ -248,7 +271,6 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
     const before = f.before ? safeRead(f.before) : null;
     if (unchanged[f.path] && unchangedBytes(f, rules[f.path], current.get(f.path)!)) {
       if (before) {
-        mkdirSync(dirname(f.path), { recursive: true });
         safeWrite(f.path, before,current.get(f.path)!);
         reports.push({ path: f.path, outcome: 'restored' });
       } else {
@@ -270,7 +292,7 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
   for (const n of l.namespaced) if (!n.existed) safeRemoveTree(n.path);
   for (const c of l.createdFiles) {
     const bytes = safeRead(c.path);
-    if (bytes && sha(bytes) === c.sha) unlinkSync(c.path);
+    if (bytes && sha(bytes) === c.sha) safeRemove(c.path,bytes);
   }
   for (const d of [...l.createdDirs].sort((a, b) => b.length - a.length)) {
     try {

@@ -3,7 +3,7 @@
 import { closeSync, constants, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { assess, completeLedger, type FileReport, type Ledger, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
+import { assess, completeLedger, type FileReport, type Ledger, preflightOwnership, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
 import { checkOwnedDirectory, safeRead, safeWrite, withSetupLock } from './files.ts';
 import { openPrivateDirectory } from '../core/store.ts';
 import { codexSpec, runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
@@ -108,6 +108,8 @@ export function uninstall(ctx: SetupContext, spec: RunnerSpec): string[] {
 export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   const ledger = installedLedger(ctx, spec.id, spec);
   if (!ledger) throw new SetupError(`${spec.title}: not installed by Context Engine (no install record in ${ctx.setupDir})`);
+  checkOwnedDirectory(spec.home);
+  preflightOwnership(spec);
   const lines: string[] = [];
   for (const cmd of spec.uninstall) {
     const r = runBinary(spec.bin, cmd, ctx.env);
