@@ -96,7 +96,7 @@ test('wave26: successfully recorded completed events clear only their own intent
 test('wave26: a completed hook lease timeout retains independent intent after the first succeeds',async()=>{
  const f=setup();hook(f,{hook_event_name:'UserPromptSubmit',prompt:'BOOTSTRAP'});
  const pause=join(f.projectRoot,'pause.mjs'),ready=join(f.projectRoot,'first-record-ready');
- fs.writeFileSync(pause,`import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=fs.writeSync;let paused=false;fs.writeSync=function(fd,data,...args){if(!paused&&String(data).includes('FIRST_COMPLETED')){paused=true;fs.writeFileSync(${JSON.stringify(ready)},'ready');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,7000);}return original(fd,data,...args)};syncBuiltinESMExports();`);
+ fs.writeFileSync(pause,`import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=fs.writeSync;let paused=false;fs.writeSync=function(fd,data,...args){if(!paused&&String(data).includes('FIRST_COMPLETED')){paused=true;fs.writeFileSync(${JSON.stringify(ready)},'ready');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,13000);}return original(fd,data,...args)};syncBuiltinESMExports();`);
  const first=spawn(process.execPath,[HOOK],{cwd:f.projectRoot,env:{...process.env,CONTEXT_ENGINE_STATE_DIR:f.stateDir,CONTEXT_ENGINE_CLI:CLI,NODE_OPTIONS:'--import='+pause},stdio:['pipe','pipe','pipe']});
  let firstOutput='';first.stdout.on('data',chunk=>firstOutput+=chunk);first.stderr.resume();const ended=new Promise<void>((resolve,reject)=>{first.on('error',reject);first.on('exit',()=>resolve());});
  first.stdin.end(JSON.stringify({cwd:f.projectRoot,session_id:sid,hook_event_name:'Stop',last_assistant_message:'FIRST_COMPLETED'}));
@@ -140,7 +140,7 @@ test('wave26: shell sync and record calls share a bounded host-time allowance',(
  fs.writeFileSync(preload,`import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const native=cp.spawnSync;cp.spawnSync=function(cmd,args,opts){const operation=args.find(x=>x==='sync'||x==='record');fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({operation,timeout:opts.timeout})+'\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20);if(operation==='record')return {status:null,stdout:'',stderr:'',error:Object.assign(new Error('synthetic delayed record timeout'),{code:'ETIMEDOUT'})};return native(cmd,args,opts);};syncBuiltinESMExports();`);
  const result=hook(f,{hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'ordinary-check'},tool_response:'COMPLETED_SHELL'},{NODE_OPTIONS:'--import='+preload});
  assert.match(result.stdout,/continue.*false/);
- const observed=fs.readFileSync(calls,'utf8').trim().split('\n').map(line=>JSON.parse(line));assert.deepEqual(observed,[{operation:'sync',timeout:10000},{operation:'record',timeout:10000}]);
- assert.ok(5000+observed.reduce((sum,c)=>sum+c.timeout,0)<30000);
+ const observed=fs.readFileSync(calls,'utf8').trim().split('\n').map(line=>JSON.parse(line));assert.deepEqual(observed,[{operation:'sync',timeout:7500},{operation:'record',timeout:7500}]);
+ assert.ok(10000+observed.reduce((sum,c)=>sum+c.timeout,0)<30000);
  assert.match(hook(f,{hook_event_name:'PreToolUse',tool_name:'new_context'}).stdout,/deny/);
 });
