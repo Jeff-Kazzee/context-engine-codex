@@ -133,7 +133,8 @@ export function codexProjectSettings(root: string, experiments?: string[]): bool
     const text = safeRead(p)?.toString('utf8') ?? '';
     const candidates = experiments === undefined ? [projectCodexToml({experiments:[]}),projectCodexToml({experiments:['stale-refs']})] : [projectCodexToml({experiments})];
     const matches = (m: Markers, body: string) => {
-      const start = text.indexOf(m.begin+'\n'), stop = text.indexOf(m.end+'\n',start);
+      const terminated = text.endsWith('\n') ? text : text + '\n';
+      const start = terminated.indexOf(m.begin+'\n'), stop = terminated.indexOf(m.end+'\n',start);
       return start >= 0 && stop > start && text.slice(start+m.begin.length+1,stop).trim() === body.trim();
     };
     return candidates.some(expected=>matches(TOML_TOP_MARKERS,expected.top) && matches(TOML_MARKERS,expected.table));

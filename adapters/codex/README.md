@@ -23,3 +23,11 @@ Prompt retries retain a durable operation ID until recording and the pending che
 If an older pending request has no operation ID and no successful-record marker, its committed status is ambiguous. Preserve its session data and disable Context Engine before continuing in the native conversation. Do not delete the marker to force a retry. These offline controls do not prove delivery to a model.
 
 Every completed tool is checked for a Working Context change before its output is recorded, including tools with unfamiliar path fields. A private notice marker preserves an accepted edit across a failed hook output write. An ordinary tool hook can retry the notice. Pending notice work blocks a new prompt or reset before it can hide the edited revision. A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write.
+
+Completed-tool retries use the host's `tool_use_id`, plus `turn_id` when present, as a stable operation identity. The pending intent and core recording share that identity, so a retry after a committed child loses its reply does not append the tool output twice. Distinct tool IDs remain distinct even when their output is identical.
+
+If an earlier pending marker has no verifiable host identity, an identified event cannot be proved distinct from that debt. This includes markers left by older hook versions. The adapter refuses before recording or syncing the event and preserves the marker, Event Log, HEAD and Working Context. Preserve the session data and continue with Context Engine disabled in the native conversation.
+
+Stop events have no unique completion ID in Codex 0.161.0. The host can emit multiple Stops during one turn, so `turn_id` alone cannot identify a retry. Successful Stops record independently. After an ambiguous failed Stop recording, Context Engine preserves the pending intent and refuses an unidentified retry. Preserve the session data and continue with Context Engine disabled in the native conversation. Do not delete the marker to force a retry.
+
+Managed-file classification resolves tool paths against the project root. A path outside that root or under another directory's `.context-engine` remains ordinary tool output. Setup can remove its final managed instruction block when the file has no trailing newline.

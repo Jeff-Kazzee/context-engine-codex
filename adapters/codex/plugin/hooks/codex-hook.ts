@@ -115,24 +115,86 @@ function requireRecorded(input: HookInput, own?: string): void {
     if (readdirSync(`/proc/self/fd/${parent}`).some(name => name !== own && (name === PENDING_RECORD || /^codex-record-pending-[0-9a-f-]+\.json$/.test(name)))) throw new PendingPrompt(RECORD_REFUSAL);
   } finally { closeSync(parent); }
 }
-function recordCompleted<T>(input: HookInput, text: string, fn: () => T, afterRecorded?: (result: T) => void): T {
+/** Use host identity for retries. Equal output alone never identifies an event. */
+function completedOperationId(input: HookInput): string | undefined {
+  const turn = typeof input.turn_id === 'string' && input.turn_id ? input.turn_id : undefined;
+  const tool = typeof input.tool_use_id === 'string' && input.tool_use_id ? input.tool_use_id : undefined;
+  // Stop can run repeatedly inside one continued turn, so turn_id is not an event ID.
+  if (input.hook_event_name !== 'PostToolUse' || !tool) return undefined;
+  const hash = store.sha(JSON.stringify(['completed-v1', input.hook_event_name, turn ?? null, tool ?? null]));
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+}
+
+/** Legacy or unidentified debt cannot prove that a newly identified event is distinct. */
+function requireUnambiguousCompletion(stateDir: string, own: string | undefined, identifiedCaller: boolean): void {
+  const current = lock.holderFor(process.pid, RUNNER, 0);
+  const parent = store.openPrivateDirectory(stateDir)!;
+  try {
+    for (const name of readdirSync(`/proc/self/fd/${parent}`)) {
+      if (name === own || !(name === PENDING_RECORD || /^codex-record-pending-[0-9a-f-]+\.json$/.test(name))) continue;
+      const bytes = store.readBytes(join(stateDir, name), 4096);
+      if (!bytes) continue;
+      let marker: { hash?: unknown; operationId?: unknown; failed?: unknown; publisher?: Partial<Lock.LockHolder>; hostEvent?: { toolUseId?: unknown; turnId?: unknown } };
+      try { marker = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+      catch { throw new PendingPrompt(RECORD_REFUSAL + ' The host event has no stable identity and pending completion state is ambiguous.'); }
+      const hostEvent = marker?.hostEvent;
+      const identified = typeof hostEvent?.toolUseId === 'string' && hostEvent.toolUseId.length > 0
+        && (hostEvent.turnId === null || (typeof hostEvent.turnId === 'string' && hostEvent.turnId.length > 0))
+        && completedOperationId({ hook_event_name: 'PostToolUse', session_id: '', cwd: '', tool_use_id: hostEvent.toolUseId, turn_id: hostEvent.turnId }) === marker.operationId
+        && name === `codex-record-pending-${marker.operationId}.json`
+        && typeof marker.hash === 'string' && /^[0-9a-f]{64}$/.test(marker.hash);
+      if (identifiedCaller) {
+        if (identified) continue;
+        throw new PendingPrompt(RECORD_REFUSAL + ' An earlier completion has no stable identity, so this event cannot be proved distinct.');
+      }
+      const publisher = marker?.publisher;
+      if (typeof marker?.hash !== 'string' || !/^[0-9a-f]{64}$/.test(marker.hash)
+          || typeof marker.operationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(marker.operationId)
+          || (marker.failed !== undefined && marker.failed !== false) || !publisher || !Number.isSafeInteger(publisher.pid) || publisher.pid! <= 0
+          || publisher.hostname !== current.hostname || !(publisher.startMarker === null || typeof publisher.startMarker === 'string')
+          || !lock.isAlive(publisher as Lock.LockHolder)) {
+        throw new PendingPrompt(RECORD_REFUSAL + ' The host event has no stable identity and an earlier completion cannot be safely retried.');
+      }
+    }
+  } finally { closeSync(parent); }
+}
+
+function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: string) => T, afterRecorded?: (result: T) => void): T {
   const state = store.resolveStateRoot(), l = store.layout(input.cwd, input.session_id, state);
   store.ensureDirs(l, state);
-  const name = `codex-record-pending-${randomUUID()}.json`, path = join(l.stateDir, name);
-  const bytes = JSON.stringify({ hash: store.sha(text) });
-  // Publish independent intent before waiting for the lease. Another operation cannot clear it.
+  const stable = completedOperationId(input);
+  const operationId = stable ?? randomUUID();
+  const name = `codex-record-pending-${operationId}.json`, path = join(l.stateDir, name);
+  const hash = store.sha(text);
+  requireUnambiguousCompletion(l.stateDir, stable ? name : undefined, Boolean(stable));
+  if (stable) {
+    const pending = pendingPrompt(input, name);
+    if (pending.hash && (pending.hash !== hash || pending.operationId !== operationId)) throw new PendingPrompt(RECORD_REFUSAL + ' The host event identity conflicts with its pending completion.');
+  }
+  const hostEvent = stable ? { toolUseId: input.tool_use_id as string, turnId: typeof input.turn_id === 'string' && input.turn_id ? input.turn_id : null } : undefined;
+  const marker = { hash, operationId, hostEvent, publisher: lock.holderFor(process.pid, RUNNER, 0) };
+  const bytes = JSON.stringify(marker);
+  // Publish independent intent before waiting for the lease. Another event cannot clear it.
   store.atomicWrite(path, bytes, 'frame-key-tmp');
-  return withPromptLease(input, () => {
-    const result = fn();
-    try { store.removeDirectoryEntries(dirname(path), candidate => candidate === name); }
-    catch (error) {
-      // An unlink followed by a failed directory flush is ambiguous: restore this operation's marker.
-      try { store.atomicWrite(path, bytes, 'frame-key-tmp'); } catch {}
-      throw error;
-    }
-    afterRecorded?.(result);
-    return result;
-  }, 10_000);
+  let cleared = false;
+  try {
+    return withPromptLease(input, () => {
+      requireUnambiguousCompletion(l.stateDir, name, Boolean(stable));
+      const result = fn(operationId);
+      try { store.removeDirectoryEntries(dirname(path), candidate => candidate === name); }
+      catch (error) {
+        // An unlink followed by a failed directory flush is ambiguous. Restore the intent.
+        try { store.atomicWrite(path, bytes, 'frame-key-tmp'); } catch {}
+        throw error;
+      }
+      cleared = true;
+      afterRecorded?.(result);
+      return result;
+    }, 10_000);
+  } catch (error) {
+    if (!cleared) { try { store.atomicWrite(path, JSON.stringify({ ...marker, failed: true }), 'frame-key-tmp'); } catch {} }
+    throw error;
+  }
 }
 
 /** The agent's own reset (new_context): the one event that fails closed. */
@@ -189,7 +251,7 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
     // echoing it back would duplicate the file into itself, or re-add what the agent offloaded.
-    recordCompleted(input, renderToolCall(input), () => {
+    recordCompleted(input, renderToolCall(input), operationId => {
     let ownFile = touchesWorkingContext(input);
     const previous = readNoticeState(input);
     // Durable intent precedes the child CLI, whose receipt acknowledgement stops at its own stdout.
@@ -206,7 +268,7 @@ async function main(input: HookInput): Promise<void> {
     // An unreported edit remains the current revision until its read instruction reaches hook output.
     if (pending || observed.receipt?.kind === 'committed' || observed.receipt?.kind === 'restored') ownFile = true;
     writeNoticeState(input, pending ?? { kind: 'idle', lastNotifiedRevision: previous.lastNotifiedRevision });
-    const result = ownFile ? observed : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }]);
+    const result = ownFile ? observed : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }], undefined, operationId);
     // A restore (always) and stale citations (stale-refs experiment, Working Context calls only) go
     // out as `block`, which replaces the tool result the model sees, the original output kept below
     // the notice: the agent must see them before it touches the file again. A budget reminder (a tier
@@ -247,7 +309,7 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'Stop') {
     if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) {
       const text = input.last_assistant_message;
-      recordCompleted(input, text, () => { requireNoticeOutput(input); return core(input, 'record', [{ role: 'assistant', text }]); });
+      recordCompleted(input, text, operationId => { requireNoticeOutput(input); return core(input, 'record', [{ role: 'assistant', text }], undefined, operationId); });
     }
   } else if (input.hook_event_name === 'PreCompact') {
     withPromptLease(input,()=>{
@@ -337,7 +399,11 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
 function touchesWorkingContext(input: HookInput): boolean {
   const data = input.tool_input as Record<string, unknown> | undefined;
   if (!data || typeof data !== 'object') return false;
-  const managedPath = (path: string) => path.replaceAll('\\', '/').split('/').includes(lib.WORKING_CONTEXT_DIR);
+  const managedRoot = resolve(input.cwd, lib.WORKING_CONTEXT_DIR);
+  const managedPath = (path: string) => {
+    const candidate = resolve(input.cwd, path);
+    return candidate === managedRoot || candidate.startsWith(managedRoot + '/');
+  };
   for (const key of ['file_path', 'path', 'filename']) {
     if (typeof data[key] === 'string' && managedPath(data[key] as string)) return true;
   }

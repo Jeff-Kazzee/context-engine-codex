@@ -16,6 +16,8 @@ export interface LockHolder {
   runner: string;
   hardLimit: number;
   acquiredAt: string;
+  /** Unique lock lifetime, preserved when the same owner updates its metadata. */
+  generation?: string;
 }
 
 export function processStartMarker(pid: number): string | null {
@@ -23,7 +25,7 @@ export function processStartMarker(pid: number): string | null {
 }
 
 export function holderFor(pid: number, runner: string, hardLimit: number): LockHolder {
-  return { pid, hostname: hostname(), startMarker: processStartMarker(pid), runner, hardLimit, acquiredAt: new Date().toISOString() };
+  return { pid, hostname: hostname(), startMarker: processStartMarker(pid), runner, hardLimit, acquiredAt: new Date().toISOString(), generation: randomBytes(16).toString('hex') };
 }
 
 const sameProcess = (a: LockHolder, b: LockHolder) => a.pid === b.pid && a.hostname === b.hostname && a.startMarker === b.startMarker;
@@ -59,8 +61,8 @@ export function readLock(path: string, parentFd?: number): LockHolder | null | '
   if(bytes===undefined)return null;
   try {
     const h = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as LockHolder;
-    if(!h || !Number.isSafeInteger(h.pid) || h.pid<=0 || typeof h.hostname!=='string' || !(h.startMarker===null || typeof h.startMarker==='string') || typeof h.runner!=='string' || typeof h.hardLimit!=='number' || !Number.isFinite(h.hardLimit) || h.hardLimit<0 || typeof h.acquiredAt!=='string')return 'unreadable';
-    return {pid:h.pid,hostname:h.hostname,startMarker:h.startMarker,runner:h.runner,hardLimit:h.hardLimit,acquiredAt:h.acquiredAt};
+    if(!h || !Number.isSafeInteger(h.pid) || h.pid<=0 || typeof h.hostname!=='string' || !(h.startMarker===null || typeof h.startMarker==='string') || typeof h.runner!=='string' || typeof h.hardLimit!=='number' || !Number.isFinite(h.hardLimit) || h.hardLimit<0 || typeof h.acquiredAt!=='string'||(h.generation!==undefined&&(typeof h.generation!=='string'||!/^[0-9a-f]{32}$/.test(h.generation))))return 'unreadable';
+    return {pid:h.pid,hostname:h.hostname,startMarker:h.startMarker,runner:h.runner,hardLimit:h.hardLimit,acquiredAt:h.acquiredAt,...(h.generation ? {generation:h.generation} : {})};
   } catch {
     return 'unreadable';
   }
@@ -116,7 +118,7 @@ export function acquireLock(path: string, me: LockHolder): Acquired {
     if (current === null) continue; // released between our link and our read: try again
     if (current !== 'unreadable') {
       if (sameProcess(current, me)) {
-        atomicWrite(path, JSON.stringify({ ...me, acquiredAt: current.acquiredAt }), 'lock-tmp');
+        atomicWrite(path, JSON.stringify({ ...me, acquiredAt: current.acquiredAt, generation: current.generation ?? me.generation }), 'lock-tmp');
         return { status: 'acquired', takeoverFrom: null, reused: true };
       }
       if (isAlive(current)) return { status: 'refused', holder: current };
@@ -133,7 +135,7 @@ export function acquireLock(path: string, me: LockHolder): Acquired {
 
 export function releaseLock(path: string, me: LockHolder, parentFd?: number): void {
   const current = readLock(path, parentFd);
-  if (current && current !== 'unreadable' && sameProcess(current, me)) unlinkSync(atParent(path, parentFd));
+  if (current && current !== 'unreadable' && sameProcess(current, me) && (me.generation === undefined || current.generation === me.generation)) unlinkSync(atParent(path, parentFd));
 }
 
 /** Thrown by `serialized` when the operation lock stays held by a live process past the timeout. */

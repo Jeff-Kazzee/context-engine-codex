@@ -705,3 +705,21 @@ test('wave49: an undelivered read notice blocks a prompt and reset before they c
   assert.equal(JSON.parse(reset.stdout).hookSpecificOutput.permissionDecision, 'deny');
   assert.equal(wc(f), edited);
 });
+
+for (const file_path of ['vendor/.context-engine/ordinary.txt', '.context-engine/../ordinary.txt', '../another-project/.context-engine/file.txt']) {
+  test(`wave52: an ordinary resolved path retains its result: ${file_path}`, () => {
+    const f = enabledFixture();
+    const result = hook(f, toolUse('Read', { file_path }, 'ORDINARY_PATH_RESULT'));
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(wc(f), /ORDINARY_PATH_RESULT/);
+  });
+}
+
+test('wave52: a normalized path inside the project managed directory still avoids self-copy', () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('ORIGINAL_TASK')).status, 0);
+  const before = wc(f);
+  const result = hook(f, toolUse('Read', { file_path: `.context-engine/unused/../${SID}/context.md` }, 'SELF_COPY_RESULT'));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(wc(f), before);
+});

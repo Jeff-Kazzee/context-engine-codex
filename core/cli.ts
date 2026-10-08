@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-import {writeSync} from 'node:fs';
+import { readSync, writeSync } from 'node:fs';
 // context-engine CLI: a thin shell over the core library. Prints one JSON object on stdout.
-import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
@@ -264,12 +263,24 @@ function main(argv: string[]): number {
   });
 }
 
+const RECORD_INPUT_MAX_BYTES = 64 * 1024 * 1024;
+
 function readEvents(): RunnerEvent[] {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(0, 'utf8'));
-  } catch {
-    throw new Usage('record expects JSON on stdin: an array of {"role","text"} events or one event');
+    const chunks: Buffer[] = [], chunk = Buffer.alloc(65536);
+    let total = 0;
+    for (;;) {
+      const count = readSync(0, chunk, 0, Math.min(chunk.length, RECORD_INPUT_MAX_BYTES + 1 - total), null);
+      if (count === 0) break;
+      total += count;
+      if (total > RECORD_INPUT_MAX_BYTES) throw new Usage('record and native-compaction stdin exceeds the 64 MiB JSON input limit');
+      chunks.push(Buffer.from(chunk.subarray(0, count)));
+    }
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total)));
+  } catch (error) {
+    if (error instanceof Usage) throw error;
+    throw new Usage('record expects JSON on stdin (UTF-8): an array of {"role","text"} events or one event');
   }
   const events = Array.isArray(parsed) ? parsed : [parsed];
   if (events.some((e) => !e || typeof e !== 'object' || typeof e.role !== 'string' || typeof e.text !== 'string')) {

@@ -17,7 +17,7 @@ import { anchor, childTarget } from '../core/platform.ts';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirPrivateSync, opendirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from '../core/platform.ts';
 import { basename, dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
-import { closeSync, fsyncSync, openSync } from '../core/platform.ts';
+import { closeSync, fstatSync, fsyncSync, openSync } from '../core/platform.ts';
 import { openPrivateDirectory } from '../core/store.ts';
 import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeRemoveEmptyDirectory, safeRemoveTree, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
@@ -109,38 +109,54 @@ export function preflightOwnership(opts: {files:string[];watch:string[];namespac
 export function takeSnapshot(opts: { backupRoot: string; kind: string; files: string[]; watch: string[]; namespaced: string[]; extra?: Record<string, unknown> }): Snapshot {
   preflightOwnership(opts);
   const before=opts.files.map(path=>{const bytes=safeRead(path);assertBackupSafe(path,bytes);return bytes;});
+  const listing = list(opts.watch);
+  const namespaced = opts.namespaced.map(path => ({ path, existed: existsSync(path) }));
   const at = new Date();
-  checkComponents(opts.backupRoot);
-  const parent = openPrivateDirectory(opts.backupRoot,{create:true})!;
-  let dir: string;
+  const copies: Array<{ path: string; bytes: Buffer }> = [];
+  const directories: string[] = [];
+  let dir: string | undefined;
   try {
-    for (let n=1;;n++) {
-      const name = `${opts.kind}-${timestamp(at)}${n===1?'':'-'+n}`;
-      if (name.includes('/') || name.includes('\\') || name === '..') throw new Error('invalid snapshot kind');
-      dir = join(opts.backupRoot,name);
-      try { mkdirPrivateSync(childTarget(anchor(parent),name)); fsyncSync(parent); break; }
-      catch(e) { if((e as NodeJS.ErrnoException).code!=='EEXIST') throw e; }
+    checkComponents(opts.backupRoot);
+    const parent = openPrivateDirectory(opts.backupRoot, { create: true })!;
+    try {
+      for (let n = 1;; n++) {
+        const name = `${opts.kind}-${timestamp(at)}${n === 1 ? '' : '-' + n}`;
+        if (name.includes('/') || name.includes('\\') || name === '..') throw new Error('invalid snapshot kind');
+        const candidate = join(opts.backupRoot, name);
+        try { mkdirPrivateSync(childTarget(anchor(parent), name)); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue; throw error; }
+        dir = candidate;
+        directories.push(dir);
+        fsyncSync(parent);
+        break;
+      }
+    } finally { closeSync(parent); }
+    for (const category of ['before', 'after']) {
+      const path = join(dir, category);
+      directories.push(path);
+      closeSync(openPrivateDirectory(path, { create: true })!);
     }
-  } finally {closeSync(parent);}
-  for(const category of ['before','after']) closeSync(openPrivateDirectory(join(dir,category),{create:true})!);
-  const files = opts.files.map((path, i) => {
-    const copy = join(dir, 'before', `${i}-${path.split('/').at(-1)}`);
-    const bytes = before[i]!;
-    if (bytes === null) return { path, before: null, after: null };
-    writeBackup(copy,bytes);
-    return { path, before: copy, after: null };
-  });
-  return {
-    version: 1,
-    kind: opts.kind,
-    at: at.toISOString(),
-    dir,
-    files,
-    namespaced: opts.namespaced.map((path) => ({ path, existed: existsSync(path) })),
-    extra: opts.extra ?? {},
-    watch: opts.watch,
-    listing: list(opts.watch),
-  };
+    const files = opts.files.map((path, i) => {
+      const copy = join(dir!, 'before', `${i}-${path.split('/').at(-1)}`);
+      const bytes = before[i]!;
+      if (bytes === null) return { path, before: null, after: null };
+      writeBackup(copy, bytes);
+      copies.push({ path: copy, bytes });
+      return { path, before: copy, after: null };
+    });
+    return { version: 1, kind: opts.kind, at: at.toISOString(), dir, files, namespaced,
+      extra: opts.extra ?? {}, watch: opts.watch, listing };
+  } catch (error) {
+    try {
+      for (const copy of copies.reverse()) safeRemove(copy.path, copy.bytes);
+      for (const path of directories.reverse()) {
+        if (existsSync(path)) safeRemoveEmptyDirectory(path);
+      }
+    } catch (cleanup) {
+      throw new AggregateError([error, cleanup], `snapshot creation failed and cleanup is incomplete at ${dir ?? opts.backupRoot}`);
+    }
+    throw error;
+  }
 }
 
 /** Exclusive backup writes through the verified private parent; planted copies are never followed. */
@@ -150,6 +166,17 @@ function writeBackup(path: string, bytes: Buffer): void {
   try {
     fd = openSync(childTarget(anchor(parent),path.split('/').at(-1)!),'exclusive-nofollow');
     writeFileSync(fd,bytes); fsyncSync(fd); fsyncSync(parent);
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        const target = childTarget(anchor(parent), path.split('/').at(-1)!);
+        const opened = fstatSync(fd), current = lstatSync(target);
+        if (opened.dev !== current.dev || opened.ino !== current.ino || current.nlink !== 1) throw new Error('incomplete snapshot copy was replaced; retained');
+        unlinkSync(target);
+        fsyncSync(parent);
+      } catch (cleanup) { throw new AggregateError([error, cleanup], `snapshot copy failed and cleanup is incomplete at ${path}`); }
+    }
+    throw error;
   } finally {if(fd!==undefined)closeSync(fd);closeSync(parent);}
 }
 
@@ -191,7 +218,10 @@ export function completeLedger(s: Snapshot): Ledger {
     at: s.at,
     dir: s.dir,
     files,
-    createdFiles: created.filter((p) => owned(p) && !p.endsWith('/')).map((path) => ({ path, sha: sha(safeRead(path) ?? Buffer.alloc(0)) })),
+    createdFiles: created.filter((p) => owned(p) && !p.endsWith('/')).flatMap(path => {
+      const bytes = safeRead(path);
+      return bytes === null ? [] : [{ path, sha: sha(bytes) }];
+    }),
     // Only namespaced directories are owned; remove them only when empty.
     createdDirs: created.filter((p) => owned(p) && p.endsWith('/')).map((p) => p.slice(0, -1)),
     retainedPaths: created.filter(p => !owned(p)),

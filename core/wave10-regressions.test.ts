@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fixture, tempDir } from './testing.ts';
 import { openSession, recall } from './index.ts';
-import { appendLog } from './store.ts';
+import { appendLog, sha } from './store.ts';
 import { cite } from './refs.ts';
 
 function opened() {
@@ -73,9 +73,12 @@ test('wave10: exhausted revision counter refuses before adding a runner event', 
   const { f, s } = opened(); s.record([{ role: 'user', text: 'LAST_REVISION' }]); const state = s.stateDir; s.close();
   const headPath = join(state, 'HEAD'), head = JSON.parse(fs.readFileSync(headPath, 'utf8'));
   fs.renameSync(join(state, 'revisions', `${head.rev}.md`), join(state, 'revisions', `${Number.MAX_SAFE_INTEGER}.md`));
-  head.rev = Number.MAX_SAFE_INTEGER; fs.writeFileSync(headPath, JSON.stringify(head));
-  // This control isolates counter exhaustion, with complete matching accounting.
-  appendLog(join(state, 'events.jsonl'), {type:'revision',rev:head.rev,kind:head.kind,sha:head.sha,chars:fs.readFileSync(s.workingContextPath,'utf8').length});
+  head.rev = Number.MAX_SAFE_INTEGER;
+  head.prepared = sha(JSON.stringify([head.rev, head.sha, head.parent, head.through, head.kind]));
+  // Isolate counter exhaustion with a consistent prepared boundary and accounting.
+  appendLog(join(state, 'events.jsonl'), {type:'revision-prepared',rev:head.rev,sha:head.sha,parent:head.parent,kind:head.kind,through:head.through,prepared:head.prepared});
+  appendLog(join(state, 'events.jsonl'), {type:'revision',rev:head.rev,kind:head.kind,sha:head.sha,chars:fs.readFileSync(s.workingContextPath,'utf8').length,through:head.through,prepared:head.prepared});
+  fs.writeFileSync(headPath, JSON.stringify(head));
   const r = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }); assert.equal(r.status, 'open');
   const log = fs.readFileSync(join(state, 'events.jsonl')), before = fs.readFileSync(headPath);
   assert.throws(() => r.session.record([{ role: 'user', text: 'MUST_NOT_APPEND' }]), /revision counter exhausted/);
