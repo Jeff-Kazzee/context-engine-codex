@@ -1,0 +1,4 @@
+node_modules/
+# Per-session Working Contexts (see plan.md, "Layout"). Never committed.
+.context-engine/
+.claude/worktrees/

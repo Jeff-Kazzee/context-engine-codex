@@ -1,0 +1,29 @@
+{
+  "name": "context-engine-codex",
+  "version": "0.1.5",
+  "description": "Model-controlled, editable working context for coding agents (shared core + CLI).",
+  "license": "MIT",
+  "author": "Jeff Kazzee",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "context-engine": "core/cli.ts",
+    "context-engine-codex-turns": "adapters/codex/turn-loop/cli.ts",
+    "context-engine-codex": "core/cli.ts"
+  },
+  "exports": {
+    ".": "./core/index.ts",
+    "./codex-turn-loop": "./adapters/codex/turn-loop/index.ts"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"core/**/*.test.ts\" \"setup/*.test.ts\" \"adapters/codex/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^7.0.2"
+  }
+}
