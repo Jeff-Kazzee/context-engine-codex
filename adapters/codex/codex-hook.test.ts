@@ -629,3 +629,79 @@ test('renewed: duplicated supported IPC payload exceeds old 16 MiB floor without
  writeFileSync(fake,"const text='x'.repeat(9*1024*1024);process.stdout.write(JSON.stringify({ok:true,revision:1,workingContextText:text,turns:[{role:'user',text}],budget:{overBudget:false}}));");
  const r=hook(f,newContext,{CONTEXT_ENGINE_CLI:fake});assert.equal(r.status,0,r.stderr);assert.equal(r.stdout,'','a successful synthetic sync must pass IPC');
 });
+
+test('wave49: dotted session IDs commit edits and emit a usable read instruction', () => {
+  const f = enabledFixture(), id = 'session.1';
+  assert.equal(hook(f, { ...prompt('active task'), session_id: id }).status, 0);
+  const path = join(f.projectRoot, '.context-engine', id, 'context.md');
+  const edited = '[[CTX_TURN role=user]]\nDOTTED_EDIT_SENTINEL';
+  writeFileSync(path, edited);
+  const result = hook(f, { ...toolUse('Write', { file_path: path }, 'done'), session_id: id });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /--session session\.1 --sha/);
+  assert.doesNotMatch(result.stdout, /DOTTED_EDIT_SENTINEL|stopReason/);
+});
+
+test('wave49: an unknown tool path shape preserves the edit and submits its read notice', () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('active task')).status, 0);
+  const edited = '[[CTX_TURN role=user]]\nMCP_EDIT_SENTINEL';
+  writeFileSync(wcPath(f), edited);
+  const result = hook(f, toolUse('mcp__files__write', { target_path: wcPath(f) }, 'DO_NOT_REAPPEND_OUTPUT'));
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /revision 2 was validated/);
+  assert.equal(wc(f), edited);
+  assert.doesNotMatch(result.stdout, /MCP_EDIT_SENTINEL/);
+});
+
+async function interruptNoticeOutput(f: Fixture) {
+  const child = spawn(process.execPath, [HOOK], { cwd: f.projectRoot, env: env(f), stdio: ['pipe', 'pipe', 'pipe'] });
+  const exited = once(child, 'exit');
+  let stderr = '';
+  child.stderr.on('data', data => { stderr += data.toString(); });
+  // Close the actual pipe before the hook returns. Its child core CLI keeps its own live output pipe.
+  child.stdout.destroy();
+  child.stdin.end(JSON.stringify({ session_id: SID, cwd: f.projectRoot,
+    ...toolUse('Write', { file_path: wcPath(f) }, 'write completed') }));
+  const [code] = await exited;
+  assert.notEqual(code, 0, stderr);
+  assert.match(stderr, /EPIPE|broken pipe/i);
+}
+
+test('wave49: failed public stdout retains the accepted read notice for an ordinary hook retry', async () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('active task')).status, 0);
+  const edited = '[[CTX_TURN role=user]]\nRETRY_EDIT_SENTINEL';
+  writeFileSync(wcPath(f), edited);
+  await interruptNoticeOutput(f);
+  assert.equal(wc(f), edited);
+  const retry = hook(f, toolUse('Read', { file_path: 'ordinary.txt' }, 'ordinary output'));
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.match(retry.stdout, /revision 2 was validated/);
+  assert.doesNotMatch(retry.stdout, /RETRY_EDIT_SENTINEL/);
+  assert.equal(wc(f), edited);
+  const subsequent = hook(f, toolUse('Read', { file_path: 'ordinary.txt' }, 'NEXT_OUTPUT_SENTINEL'));
+  assert.equal(subsequent.status, 0, subsequent.stderr);
+  assert.doesNotMatch(subsequent.stdout, /was validated/);
+  assert.match(wc(f), /NEXT_OUTPUT_SENTINEL/);
+  const reset = hook(f, { hook_event_name: 'PreToolUse', tool_name: 'new_context' });
+  assert.equal(reset.status, 0, reset.stderr);
+  assert.equal(reset.stdout, '');
+});
+
+test('wave49: an undelivered read notice blocks a prompt and reset before they can hide its revision', async () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('active task')).status, 0);
+  const edited = '[[CTX_TURN role=user]]\nPENDING_EDIT_SENTINEL';
+  writeFileSync(wcPath(f), edited);
+  await interruptNoticeOutput(f);
+  const nextPrompt = hook(f, prompt('must wait'));
+  assert.equal(JSON.parse(nextPrompt.stdout).continue, false);
+  assert.match(nextPrompt.stdout, /read notice/);
+  const stop = hook(f, { hook_event_name: 'Stop', last_assistant_message: 'must not hide the pending edit' });
+  assert.equal(JSON.parse(stop.stdout).continue, false);
+  assert.match(stop.stdout, /read notice/);
+  const reset = hook(f, { hook_event_name: 'PreToolUse', tool_name: 'new_context' });
+  assert.equal(JSON.parse(reset.stdout).hookSpecificOutput.permissionDecision, 'deny');
+  assert.equal(wc(f), edited);
+});

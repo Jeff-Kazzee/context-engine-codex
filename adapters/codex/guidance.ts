@@ -29,7 +29,7 @@ export const READ_COMMAND = 'context-engine read --session "$CODEX_THREAD_ID"';
 
 /** Static metadata only. Emitting this notice does not deliver any editable context. */
 export function editedContextReadNotice(sessionId: string, revision: number, sha256: string): string {
-  if (!/^[A-Za-z0-9_-]+$/.test(sessionId) || !Number.isSafeInteger(revision) || revision < 1
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sessionId) || !Number.isSafeInteger(revision) || revision < 1
       || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error('invalid Working Context read-back identity');
   return `Context Engine: Working Context revision ${revision} was validated (sha256 ${sha256}). This notice does not deliver its content. To use the edit within this turn, run context-engine read --session ${sessionId} --sha ${sha256} and read every part. Read-back adds tool data to the next continuation and does not remove earlier native history.`;
 }

@@ -8,7 +8,7 @@
 // checkout itself (tests, the regression), the core is found relative to this file. Session work
 // goes through the `context-engine` CLI, which also serializes concurrent hooks of one session.
 import { spawnSync } from 'node:child_process';
-import { closeSync, readFileSync, readdirSync } from 'node:fs';
+import { closeSync, readFileSync, readdirSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -57,6 +57,32 @@ let store: typeof Store;
 let lock: typeof Lock;
 const PENDING_PROMPT = 'codex-prompt-pending.json';
 const PENDING_RECORD = 'codex-record-pending.json';
+const READ_NOTICE = 'codex-read-notice.json';
+type ReadNoticeState =
+  | { kind: 'idle' | 'checking'; lastNotifiedRevision: number }
+  | { kind: 'pending'; lastNotifiedRevision: number; revision: number; sha256: string };
+function readNoticePath(input: HookInput): string {
+  return join(store.layout(input.cwd, input.session_id, store.resolveStateRoot()).stateDir, READ_NOTICE);
+}
+function readNoticeState(input: HookInput): ReadNoticeState {
+  const bytes = store.readBytes(readNoticePath(input), 1024);
+  if (!bytes) return { kind: 'idle', lastNotifiedRevision: 0 };
+  const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  if (!value || typeof value !== 'object' || !('kind' in value) || !('lastNotifiedRevision' in value)
+      || typeof value.lastNotifiedRevision !== 'number' || !Number.isSafeInteger(value.lastNotifiedRevision)
+      || value.lastNotifiedRevision < 0) throw new Error('invalid read notice state');
+  const lastNotifiedRevision = value.lastNotifiedRevision;
+  if (value.kind === 'idle' || value.kind === 'checking') return { kind: value.kind, lastNotifiedRevision };
+  if (value.kind === 'pending' && 'revision' in value && typeof value.revision === 'number'
+      && Number.isSafeInteger(value.revision) && value.revision > lastNotifiedRevision
+      && 'sha256' in value && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256)) {
+    return { kind: 'pending', lastNotifiedRevision, revision: value.revision, sha256: value.sha256 };
+  }
+  throw new Error('invalid read notice state');
+}
+function writeNoticeState(input: HookInput, state: ReadNoticeState): void {
+  store.atomicWrite(readNoticePath(input), JSON.stringify(state), 'frame-key-tmp');
+}
 function withPromptLease<T>(input: HookInput, fn:()=>T, timeoutMs = 1000): T {
   const state=store.resolveStateRoot(),l=store.layout(input.cwd,input.session_id,state);
   store.ensureDirs(l,state);
@@ -76,7 +102,11 @@ function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string;
 }
 
 const RECORD_REFUSAL = 'Context Engine: an earlier completed tool or assistant event could not be safely recorded. Keep the native conversation; repair storage or disable Context Engine before continuing. Resets remain blocked.';
+function requireNoticeOutput(input: HookInput): void {
+  if (readNoticeState(input).kind !== 'idle') throw new PendingPrompt('Context Engine: a Working Context read notice has not reached hook output. Keep the native conversation and retry an ordinary tool before submitting another prompt or resetting.');
+}
 function requireRecorded(input: HookInput, own?: string): void {
+  requireNoticeOutput(input);
   const l = store.layout(input.cwd, input.session_id, store.resolveStateRoot());
   const parent = store.openPrivateDirectory(l.stateDir);
   if (parent === undefined) return;
@@ -85,7 +115,7 @@ function requireRecorded(input: HookInput, own?: string): void {
     if (readdirSync(`/proc/self/fd/${parent}`).some(name => name !== own && (name === PENDING_RECORD || /^codex-record-pending-[0-9a-f-]+\.json$/.test(name)))) throw new PendingPrompt(RECORD_REFUSAL);
   } finally { closeSync(parent); }
 }
-function recordCompleted<T>(input: HookInput, text: string, fn: () => T): T {
+function recordCompleted<T>(input: HookInput, text: string, fn: () => T, afterRecorded?: (result: T) => void): T {
   const state = store.resolveStateRoot(), l = store.layout(input.cwd, input.session_id, state);
   store.ensureDirs(l, state);
   const name = `codex-record-pending-${randomUUID()}.json`, path = join(l.stateDir, name);
@@ -100,6 +130,7 @@ function recordCompleted<T>(input: HookInput, text: string, fn: () => T): T {
       try { store.atomicWrite(path, bytes, 'frame-key-tmp'); } catch {}
       throw error;
     }
+    afterRecorded?.(result);
     return result;
   }, 10_000);
 }
@@ -158,15 +189,24 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
     // echoing it back would duplicate the file into itself, or re-add what the agent offloaded.
-    let ownFile = false;
-    const result = recordCompleted(input, renderToolCall(input), () => {
-    ownFile = touchesWorkingContext(input);
-    const shell = typeof (input.tool_input as Record<string, unknown> | undefined)?.command === 'string';
-    const observed = ownFile || shell ? core(input, 'sync') : undefined;
-    // Actual file effects, not arbitrary command syntax, decide whether shell text could resurrect edits.
-    if (shell && (observed?.receipt?.kind === 'committed' || observed?.receipt?.kind === 'restored')) ownFile = true;
-    return ownFile ? observed! : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }]);
-    });
+    recordCompleted(input, renderToolCall(input), () => {
+    let ownFile = touchesWorkingContext(input);
+    const previous = readNoticeState(input);
+    // Durable intent precedes the child CLI, whose receipt acknowledgement stops at its own stdout.
+    writeNoticeState(input, { kind: 'checking', lastNotifiedRevision: previous.lastNotifiedRevision });
+    const observed = core(input, 'sync');
+    const delivery = observed.delivery;
+    let pending: Extract<ReadNoticeState, { kind: 'pending' }> | undefined;
+    if (observed.revisionKind === 'model-edit' && delivery && delivery.revision === observed.revision
+        && delivery.revision > previous.lastNotifiedRevision && /^[a-f0-9]{64}$/.test(delivery.sha256)) {
+      pending = { kind: 'pending', lastNotifiedRevision: previous.lastNotifiedRevision,
+        revision: delivery.revision, sha256: delivery.sha256 };
+    }
+    // Observe actual file effects for every tool shape, including MCP-specific path keys.
+    // An unreported edit remains the current revision until its read instruction reaches hook output.
+    if (pending || observed.receipt?.kind === 'committed' || observed.receipt?.kind === 'restored') ownFile = true;
+    writeNoticeState(input, pending ?? { kind: 'idle', lastNotifiedRevision: previous.lastNotifiedRevision });
+    const result = ownFile ? observed : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }]);
     // A restore (always) and stale citations (stale-refs experiment, Working Context calls only) go
     // out as `block`, which replaces the tool result the model sees, the original output kept below
     // the notice: the agent must see them before it touches the file again. A budget reminder (a tier
@@ -182,14 +222,17 @@ async function main(input: HookInput): Promise<void> {
     const budget = result.budget;
     const notices: string[] = [];
     if (budget && (budget.tier || budget.urgent)) notices.push(budget.text);
-    const delivery = result.delivery;
-    if (ownFile && receipt?.kind === 'committed' && result.revisionKind === 'model-edit'
-        && delivery && delivery.revision === result.revision && /^[a-f0-9]{64}$/.test(delivery.sha256)) {
-      // This is a static read-back notice. Editable text never enters developer-authority hook context.
-      notices.push(guidance.editedContextReadNotice(input.session_id, delivery.revision, delivery.sha256));
+    if (pending) {
+      // Static metadata only. Editable text remains ordinary tool data after an explicit read.
+      notices.push(guidance.editedContextReadNotice(input.session_id, pending.revision, pending.sha256));
     }
     if (notices.length) out.hookSpecificOutput = { hookEventName: 'PostToolUse', additionalContext: notices.join('\n') };
-    if (Object.keys(out).length) emit(out);
+    return { out, pending };
+    }, ({ out, pending }) => {
+      if (Object.keys(out).length) emit(out);
+      // This confirms hook transport output only, never ingestion by a later model request.
+      if (pending) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: pending.revision });
+    });
   } else if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'new_context') {
     // The reset gate: a refusal here reaches the model as the new_context tool result, so it can
     // fix the file and retry. The reset itself only happens after this step's sampling ends.
@@ -204,7 +247,7 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'Stop') {
     if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) {
       const text = input.last_assistant_message;
-      recordCompleted(input, text, () => core(input, 'record', [{ role: 'assistant', text }]));
+      recordCompleted(input, text, () => { requireNoticeOutput(input); return core(input, 'record', [{ role: 'assistant', text }]); });
     }
   } else if (input.hook_event_name === 'PreCompact') {
     withPromptLease(input,()=>{
@@ -311,7 +354,19 @@ function touchesWorkingContext(input: HookInput): boolean {
 }
 
 function emit(output: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify(output)}\n`);
+  const bytes = Buffer.from(`${JSON.stringify(output)}\n`);
+  const deadline = Date.now() + 5000;
+  for (let offset = 0; offset < bytes.length;) {
+    try {
+      const written = writeSync(1, bytes, offset, bytes.length - offset);
+      if (written <= 0) throw new Error('hook output made no progress');
+      offset += written;
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error ? error.code : undefined;
+      if ((code !== 'EAGAIN' && code !== 'EWOULDBLOCK') || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+    }
+  }
 }
 
 function responseText(input: HookInput): string {

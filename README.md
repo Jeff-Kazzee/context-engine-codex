@@ -6,7 +6,9 @@ An experimental, opt-in plugin that lets your agent edit its **Working Context**
 
 An accepted edit now produces a static revision and digest notice with an exact read-back command. The notice does not contain or deliver editable context. Reading every part with that digest can add the edited content as tool output within the same user turn. This is additive input for a later continuation and retains older native history. It does not reproduce per-step context eviction or guarantee a smaller request. Partial reads, a changed digest, and a file path alone do not establish delivery.
 
-**Source approval and installation acceptance:** this candidate is in an open PR; main remains bootstrap-only. Source merge requires passing offline checks, independent review and Jeff's approval of the exact head. Real persistent plugin loading, interactive delivery and long-session performance remain unverified; these are installation/release acceptance gaps, not substitutes for source review. Do not recommend installation until a supported-host trial proves next-request delivery. No model evaluations or host configuration changes are part of the offline source checks.
+**Source approval and installation acceptance:** this candidate is in an open PR targeting `dev`. Changes move from the topic branch to `dev`, then through a separately approved promotion to `main`. Main remains bootstrap-only. Source merge requires passing offline checks, independent review and Jeff's approval of the exact head.
+
+Real persistent plugin loading, interactive delivery and long-session performance remain unverified. These are installation/release acceptance gaps, not substitutes for source review. Do not recommend installation until a supported-host trial proves next-request delivery. No model evaluations or host configuration changes are part of the offline source checks.
 
 ## Give this prompt to your agent to set it up
 
@@ -38,6 +40,16 @@ After the test passes and I approve the target-project scope, enable only the
 named project and report exact mode, versions, commands, config/backups changed,
 evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
+
+The [CI workflow](.github/workflows/ci.yml) checks the exact PR source commit on three hosts with Node 24.21.0. Its platform coverage is:
+
+| Host | Maintained coverage | Stateful support |
+| --- | --- | --- |
+| Linux | Core, setup and adapter suites | Supported with the documented Linux requirements |
+| Windows | Pure operations and refusal before state or setup mutation | Unsupported |
+| macOS | Pure operations and refusal before state or setup mutation | Unsupported |
+
+Actual Windows and macOS jobs passed on 2026-10-08 in [the initial CI run](https://github.com/Jeff-Kazzee/context-engine-codex/actions/runs/37730433891) at `1e63576690d435cbec35f8cc192b49fcdb4fa798`. These baseline results do not validate later commits. Each updated PR head requires its own successful CI. Offline contract checks do not prove provider delivery, model behavior or interactive acceptance.
 
 ## 1. Check compatibility before installing
 
