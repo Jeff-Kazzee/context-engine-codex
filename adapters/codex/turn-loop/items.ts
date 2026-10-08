@@ -68,7 +68,7 @@ export type WorkingContextItems =
 export function workingContextItems(text: string, opts: { path: string; hardLimit: number }): WorkingContextItems {
   if (parseTurns(text).length === 0) return { ok: false, reason: 'empty', detail: 'it holds no turn with any text' };
   if (CONTROL.test(text)) return { ok: false, reason: 'control-characters', detail: 'it contains control characters (NUL or similar)' };
-  if (text.includes(CARRIER_CLOSE)) return { ok: false, reason: 'carrier-tag', detail: `it contains the carrier tag ${CARRIER_CLOSE}` };
+  if (/<\/working_context\s*>/i.test(text)) return { ok: false, reason: 'carrier-tag', detail: `it contains the carrier tag ${CARRIER_CLOSE}` };
   if (text.length > opts.hardLimit) {
     return { ok: false, reason: 'over-hard-limit', detail: `it is ${text.length} chars, over the hard limit of ${opts.hardLimit}` };
   }
