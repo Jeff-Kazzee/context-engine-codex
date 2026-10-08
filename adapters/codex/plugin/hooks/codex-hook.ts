@@ -180,7 +180,15 @@ async function main(input: HookInput): Promise<void> {
       Object.assign(out, { decision: 'block', reason: `${receipt.text}${restored ? ' Re-read the file before editing it again.' : ''}\n\nTool output:\n${responseText(input)}` });
     }
     const budget = result.budget;
-    if (budget && (budget.tier || budget.urgent)) out.hookSpecificOutput = { hookEventName: 'PostToolUse', additionalContext: budget.text };
+    const notices: string[] = [];
+    if (budget && (budget.tier || budget.urgent)) notices.push(budget.text);
+    const delivery = result.delivery;
+    if (ownFile && receipt?.kind === 'committed' && result.revisionKind === 'model-edit'
+        && delivery && delivery.revision === result.revision && /^[a-f0-9]{64}$/.test(delivery.sha256)) {
+      // This is a static read-back notice. Editable text never enters developer-authority hook context.
+      notices.push(guidance.editedContextReadNotice(input.session_id, delivery.revision, delivery.sha256));
+    }
+    if (notices.length) out.hookSpecificOutput = { hookEventName: 'PostToolUse', additionalContext: notices.join('\n') };
     if (Object.keys(out).length) emit(out);
   } else if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'new_context') {
     // The reset gate: a refusal here reaches the model as the new_context tool result, so it can
@@ -332,6 +340,8 @@ function renderToolCall(input: HookInput): string {
 interface CoreResult {
   ok: boolean;
   revision?: number;
+  revisionKind?: string;
+  delivery?: Core.WorkingContextDelivery;
   workingContext?: string;
   receipt?: { kind: 'committed' | 'restored' | 'stale'; text: string; stale?: { count: number } };
   budget?: Core.BudgetReport;
@@ -346,6 +356,7 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], 
   const cli = process.env.CONTEXT_ENGINE_CLI || 'context-engine';
   const hardLimit = process.env.CONTEXT_ENGINE_HARD_LIMIT || String(DEFAULT_HARD_LIMIT);
   const args = [command, '--session', input.session_id, '--project', input.cwd, '--runner', RUNNER, '--hard-limit', hardLimit, '--owner-pid', String(runnerPid()), '--if-enabled', '--budget', String(budgetTokens)];
+  if (command === 'sync') args.push('--delivery-max-bytes', String(lib.READ_MAX_BYTES));
   if(maxBytes!==undefined)args.push('--max-context-bytes',String(maxBytes));
   if(operationId!==undefined)args.push('--operation-id',operationId);
   const [file, argv] = /\.[cm]?[jt]s$/.test(cli) ? [process.execPath, [cli, ...args]] : [cli, args];

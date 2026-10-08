@@ -12,7 +12,7 @@ export { cite, experimentOn, MAX_STALE_LISTED, STALE_REFS_GUIDANCE } from './ref
 export type { StaleReason, StaleRef, StaleReport } from './refs.ts';
 export { findRecord, KILL_SWITCH_ENV, killSwitchOn, participation, ROLLOUT_DEFAULT, setParticipation } from './participation.ts';
 export type { Participation, ParticipationRef } from './participation.ts';
-export { CODEX_MANUAL_COMPACTION, CODEX_TOKEN_LIMIT_RESET, COMPACTION_ONLY_FALLBACK, deliveryMode } from './delivery.ts';
-export type { DeliveryMode } from './delivery.ts';
+export { CODEX_MANUAL_COMPACTION, CODEX_TOKEN_LIMIT_RESET, COMPACTION_ONLY_FALLBACK, deliveryMode, prepareWorkingContextDelivery } from './delivery.ts';
+export type { DeliveryMode, WorkingContextDelivery } from './delivery.ts';
 export { BUDGET_TIERS } from './budget.ts';
 export type { BudgetReport, BudgetTier } from './budget.ts';

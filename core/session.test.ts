@@ -152,7 +152,7 @@ test('a file written before any revision is committed as revision 1; an unusable
 
   const s2 = open(f, 'S2', 50);
   writeFileSync(s2.workingContextPath, 'my own notes\n');
-  assert.deepEqual(s2.sync(), { revision: 1, turns: [{ role: 'user', text: 'my own notes' }], chars: 13, workingContextText: 'my own notes\n' });
+  assert.deepEqual(s2.sync(), { revision: 1, revisionKind: 'init', turns: [{ role: 'user', text: 'my own notes' }], chars: 13, workingContextText: 'my own notes\n' });
 });
 
 test('resume continues from the latest committed revision: deleted content does not come back', () => {

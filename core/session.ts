@@ -97,6 +97,8 @@ export interface SyncResult {
   workingContextText: string;
   /** Committed revision (0 = nothing committed yet). */
   revision: number;
+  /** The stored cause of this revision, absent for old snapshots without that metadata. */
+  revisionKind?: 'init' | 'model-edit' | 'runner-append' | 'native-compaction';
   /** Runner-neutral turns parsed from the committed revision. */
   turns: Turn[];
   /** Size of the committed revision, in characters. */
@@ -377,7 +379,7 @@ class Core {
 
   private result(head: Head | null, receipt?: Receipt): SyncResult {
     const text = head ? this.snapshot(head.rev) : '';
-    const r: SyncResult = { revision: head?.rev ?? 0, turns: parseTurns(text), chars: text.length, workingContextText: text };
+    const r: SyncResult = { revision: head?.rev ?? 0, ...(head?.kind ? { revisionKind: head.kind } : {}), turns: parseTurns(text), chars: text.length, workingContextText: text };
     if (receipt) r.receipt = receipt;
     return r;
   }

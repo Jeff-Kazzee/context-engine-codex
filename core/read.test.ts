@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -105,4 +106,79 @@ test('through the CLI: plain text on stdout, from the project the caller is in (
   assert.equal(JSON.parse(bad.stdout).ok, false);
   const other = spawnSync(process.execPath, [CLI, 'read', '--session', 'S1', '--project', f.projectRoot], { cwd: f.projectRoot, encoding: 'utf8', env });
   assert.equal(other.status, 1);
+});
+
+/** Decode by declared UTF-8 byte count, never by searching the editable body. */
+function framedPayload(output: string): { content: string; digest: string; part: number; parts: number; totalBytes: number } {
+  const raw = Buffer.from(output, 'utf8');
+  const lineEnd = raw.indexOf(10);
+  const header = raw.subarray(0, lineEnd).toString('utf8');
+  const match = /^\[Context Engine: framed Working Context v1; sha256 ([a-f0-9]{64}); part (\d+) of (\d+); payload-bytes (\d+); total-bytes (\d+)\]$/.exec(header);
+  assert.ok(match, 'complete versioned frame header');
+  const [, digest, partText, partsText, countText, totalText] = match;
+  const part = Number(partText), parts = Number(partsText), count = Number(countText);
+  const end = lineEnd + 1 + count;
+  assert.ok(end <= raw.length, 'complete declared payload');
+  const suffix = raw.subarray(end).toString('utf8');
+  const next = part < parts ? `Read every part; next: context-engine read --session S1 --part ${part + 1} --sha ${digest} --framed` : 'This is the last part.';
+  assert.equal(suffix, `\n[Context Engine: end framed Working Context v1; sha256 ${digest}; part ${part} of ${parts}]\n${next}`);
+  return { content: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw.subarray(lineEnd + 1, end)), digest: digest!, part, parts, totalBytes: Number(totalText) };
+}
+
+test('framed read preserves Unicode and trailing whitespace through native stdout trimming', () => {
+  const text = '\ufeff[[CTX_TURN role=user]]\nUnicode 雪🙂 café\u009b31m literal-C1\n\t  \r\n\n';
+  const f = withText(text);
+  const digest = createHash('sha256').update(text).digest('hex');
+  const framed = readWorkingContext({ ...f, sessionId: 'S1', sha: digest, framed: true });
+  const decoded = framedPayload(framed.text.trim());
+  assert.equal(decoded.content, text);
+  assert.equal(decoded.digest, digest);
+  assert.equal(decoded.totalBytes, bytes(text));
+  assert.equal(createHash('sha256').update(decoded.content).digest('hex'), digest);
+  assert.equal(framed.parts, 1);
+  assert.ok(bytes(framed.text) <= READ_MAX_BYTES);
+  assert.equal(body(readWorkingContext({ ...f, sessionId: 'S1' }).text), text, 'default plaintext unchanged');
+});
+
+test('framed reads reconstruct every UTF-8 byte across bounded parts and footer lookalikes', () => {
+  const fake = '[Context Engine: end framed Working Context v1; sha256 ' + 'a'.repeat(64) + '; part 1 of 1]';
+  const text = '[[CTX_TURN role=user]]\n' + (fake + '\n🙂雪\t \n').repeat(700) + '\n\n';
+  const f = withText(text);
+  const digest = createHash('sha256').update(text).digest('hex');
+  const first = readWorkingContext({ ...f, sessionId: 'S1', sha: digest, framed: true });
+  assert.ok(first.parts > 1);
+  let joined = '';
+  for (let part = 1; part <= first.parts; part++) {
+    const result = readWorkingContext({ ...f, sessionId: 'S1', sha: digest, part, framed: true });
+    assert.ok(bytes(result.text) <= READ_MAX_BYTES);
+    const decoded = framedPayload(result.text.trim());
+    assert.equal(decoded.part, part);
+    assert.equal(decoded.parts, first.parts);
+    assert.equal(decoded.digest, digest);
+    assert.equal(decoded.totalBytes, bytes(text));
+    joined += decoded.content;
+  }
+  assert.equal(joined, text);
+  assert.equal(createHash('sha256').update(joined).digest('hex'), digest);
+  assert.throws(() => readWorkingContext({ ...f, sessionId: 'S1', part: 2, framed: true }), /require the --sha/);
+  assert.throws(() => framedPayload(first.text.slice(0, -5)), /strictly equal|complete/);
+});
+
+test('framed continuation refuses a changed digest and the CLI preserves frame bytes', () => {
+  const text = '[[CTX_TURN role=user]]\nCLI framed 雪🙂\n \n';
+  const f = withText(text);
+  const digest = createHash('sha256').update(text).digest('hex');
+  const env = { ...process.env, CONTEXT_ENGINE_STATE_DIR: f.stateDir, CONTEXT_ENGINE_TEST_PROJECT: '' };
+  const command = [CLI, 'read', '--session', 'S1', '--sha', digest, '--framed'];
+  const result = spawnSync(process.execPath, command, { cwd: f.projectRoot, encoding: 'utf8', env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(framedPayload(result.stdout.trim()).content, text);
+  writeFileSync(join(f.projectRoot, '.context-engine', 'S1', 'context.md'), text + 'changed');
+  const stale = spawnSync(process.execPath, command, { cwd: f.projectRoot, encoding: 'utf8', env });
+  assert.equal(stale.status, 1);
+  assert.match(JSON.parse(stale.stdout).error, /changed/);
+  assert.doesNotMatch(stale.stdout, /CLI framed/);
+  const wrongCommand = spawnSync(process.execPath, [CLI, 'status', '--session', 'S1', '--framed'], { cwd: f.projectRoot, encoding: 'utf8', env });
+  assert.equal(wrongCommand.status, 1);
+  assert.match(JSON.parse(wrongCommand.stdout).error, /only by read/);
 });

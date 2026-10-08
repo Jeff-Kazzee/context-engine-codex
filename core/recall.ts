@@ -227,9 +227,11 @@ export const CODEX_TOOL_OUTPUT_CAP_BYTES = 10_000 * 4;
 export const READ_MAX_BYTES = 32_000;
 /** Room kept for the header line (session ids are at most 128 characters). */
 const HEADER_BYTES = 640;
+// Includes both frame lines, separators and the longest supported next-part command.
+const FRAME_OVERHEAD_BYTES = 1024;
 
 export interface ReadResult {
-  /** The header line, then this part of the file, byte for byte. */
+  /** Plain header plus payload, or a v1 byte-count frame when requested. */
   text: string;
   part: number;
   parts: number;
@@ -268,7 +270,7 @@ function splitParts(text: string, max: number): string[] {
  */
 export const READ_MAX_FILE_BYTES = 16 * 1024 * 1024;
 
-export function readWorkingContext(opts: SessionRef & { part?: number; sha?: string }): ReadResult {
+export function readWorkingContext(opts: SessionRef & { part?: number; sha?: string; framed?: boolean }): ReadResult {
   const log = eventLog(opts);
   const rel = workingContextRelPath(opts.sessionId);
   const path = join(realpathSync(opts.projectRoot), rel);
@@ -278,7 +280,7 @@ export function readWorkingContext(opts: SessionRef & { part?: number; sha?: str
   if (bytes === 'not-a-file') throw new Error(`the Working Context ${rel} is a symbolic link or a hard link, which is never read; replace it with a regular file`);
   // Preserve a UTF-8 BOM too: every returned part must reconstruct the original bytes.
   const whole = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  const parts = splitParts(whole, READ_MAX_BYTES - HEADER_BYTES);
+  const parts = splitParts(whole, READ_MAX_BYTES - (opts.framed ? FRAME_OVERHEAD_BYTES : HEADER_BYTES));
   const part = opts.part ?? 1;
   if (!Number.isSafeInteger(part) || part < 1 || part > parts.length) throw new Error(`no part ${part} of ${parts.length}: the Working Context has ${parts.length} part(s)`);
   const sum = createHash('sha256').update(bytes).digest('hex');
@@ -286,8 +288,16 @@ export function readWorkingContext(opts: SessionRef & { part?: number; sha?: str
   if (opts.sha !== undefined && !/^[a-f0-9]{64}$/.test(opts.sha)) throw new Error('invalid --sha content digest');
   if (opts.sha !== undefined && opts.sha !== sum) throw new Error('Working Context changed; restart with part 1 rather than combining different revisions');
   const size = `~${formatInt(approxTokens(whole.length))} tokens in all`;
-  const next = part < parts.length ? `Read every part; next: context-engine read --session ${opts.sessionId} --part ${part + 1} --sha ${sum}` : 'This is the last part.';
+  const next = part < parts.length ? `Read every part; next: context-engine read --session ${opts.sessionId} --part ${part + 1} --sha ${sum}${opts.framed ? ' --framed' : ''}` : 'This is the last part.';
   const header = `[Context Engine: Working Context ${rel}, part ${part} of ${parts.length} (${size}). ${next}]`;
+  const payload = parts[part - 1]!;
+  // A reader consumes exactly payloadBytes after the first LF, then checks the
+  // fixed suffix. Body text resembling a footer cannot end the frame early.
+  const payloadBytes = Buffer.byteLength(payload, 'utf8');
+  const text = opts.framed
+    ? `[Context Engine: framed Working Context v1; sha256 ${sum}; part ${part} of ${parts.length}; payload-bytes ${payloadBytes}; total-bytes ${bytes.length}]\n${payload}\n[Context Engine: end framed Working Context v1; sha256 ${sum}; part ${part} of ${parts.length}]\n${next}`
+    : `${header}\n${payload}`;
+  if (Buffer.byteLength(text, 'utf8') > READ_MAX_BYTES) throw new Error('Working Context read output exceeds its byte bound; nothing was returned');
   const accounted = account(log, { type: 'read', part, parts: parts.length, sha: sum, chars: whole.length });
-  return { text: `${header}\n${parts[part - 1]}`, part, parts: parts.length, sha: sum, ...(accounted.accounting ? { accounting: accounted.accounting } : {}) };
+  return { text, part, parts: parts.length, sha: sum, ...(accounted.accounting ? { accounting: accounted.accounting } : {}) };
 }

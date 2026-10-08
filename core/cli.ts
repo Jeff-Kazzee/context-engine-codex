@@ -9,6 +9,7 @@ import {
   inspectSession,
   openSession,
   participation,
+  prepareWorkingContextDelivery,
   readWorkingContext,
   READ_MAX_BYTES,
   recall,
@@ -68,13 +69,16 @@ Session commands (for adapters; one JSON object on stdout):
   show     show --session <id> <event-id>
            One event (e.g. e12, r1) from this session's Event Log, at most
            ${SHOW_MAX_BYTES} bytes; "truncated":true means the text was cut. Takes no lock.
-  read     read --session <id> [--part <n> --sha <digest>]
+  read     read --session <id> [--part <n> --sha <digest>] [--framed]
            Print part n (default 1) of this session's Working Context file
            as plain text, behind a header line naming the part, the total
            and the next command. Each output is at most ${READ_MAX_BYTES} bytes, under
            Codex's tool-output cap, and the parts put together are the file.
            For later parts, copy the printed next command including --sha.
            A changed file refuses continuation: restart with part 1.
+           --framed surrounds exact payload bytes with a versioned byte-count
+           header and footer, protecting whitespace from native tool trimming.
+           Follow its next command with --framed and the same --sha.
            Like recall: no --project, no lock; logged for eval accounting.
   cite     Experiment (stale-refs): print a marker citing <path>[#L<from>[-<to>]]
            or commit:<rev>, e.g. ⟦src:core/cli.ts#L10-20@1a2b3c4d⟧. Needs no
@@ -96,6 +100,10 @@ Options:
                       Context's budget. Results then carry "budget": a size
                       readout and any reminder it fired (25/50/75% once
                       each; urgent near the limit; over budget).
+  --delivery-max-bytes <bytes>
+                     sync only: include a bounded delivery packet from the
+                     committed revision. This prepares data, not proof that
+                     a model received it. Oversized packets are not truncated.
   --owner-pid <pid>   Process that owns the session lock (default: the parent
                       process of this CLI). Pass your long-lived adapter pid
                       if you call the CLI through a shell.
@@ -161,11 +169,13 @@ function main(argv: string[]): number {
       runner: { type: 'string' },
       'hard-limit': { type: 'string' },
       'max-context-bytes': { type: 'string' },
+      'delivery-max-bytes': { type: 'string' },
       'operation-id': { type: 'string' },
       'owner-pid': { type: 'string' },
       budget: { type: 'string' },
       part: { type: 'string' },
       sha: { type: 'string' },
+      framed: { type: 'boolean' },
       'if-enabled': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -177,6 +187,9 @@ function main(argv: string[]): number {
   const [command, ...rest] = positionals;
   if(values['max-context-bytes']!==undefined&&command!=='record')throw new Usage('--max-context-bytes applies only to record');
   if(values['operation-id']!==undefined&&command!=='record')throw new Usage('--operation-id applies only to record');
+  if (values['delivery-max-bytes'] !== undefined && command !== 'sync') throw new Usage('--delivery-max-bytes applies only to sync');
+  const deliveryMaxBytes = values['delivery-max-bytes'] !== undefined
+    ? positiveInt(values['delivery-max-bytes'], '--delivery-max-bytes') : undefined;
   const projectRoot = values.project ?? process.cwd();
   if (command === 'cite') {
     if (rest.length !== 1) throw new Usage('cite takes one argument: <path>[#L<from>[-<to>]] or commit:<rev>');
@@ -186,6 +199,7 @@ function main(argv: string[]): number {
     return 0;
   }
   if (!['open', 'sync', 'record', 'native-compaction', 'close', 'status', 'recall', 'show', 'read'].includes(command!)) throw new Usage(`unknown command: ${command} (see --help)`);
+  if (values.framed && command !== 'read') throw new Usage('--framed is supported only by read');
   if (!values.session) throw new Usage('--session is required');
 
   const sessionId = values.session;
@@ -197,8 +211,8 @@ function main(argv: string[]): number {
     if (command === 'read' && rest.length) throw new Usage(`unexpected argument: ${rest[0]}`);
     const own = process.env[TEST_PROJECT_ENV] || sessionProjectFrom(process.cwd(), sessionId);
     if (command === 'read') {
-      // Plain text for the agent, not JSON: escaping would make every part larger and harder to read.
-      process.stdout.write(readWorkingContext({ projectRoot: own, sessionId, part: values.part ? positiveInt(values.part, '--part') : 1, sha: values.sha }).text);
+      // Framing keeps payload whitespace inside fixed boundaries without JSON expansion.
+      process.stdout.write(readWorkingContext({ projectRoot: own, sessionId, part: values.part ? positiveInt(values.part, '--part') : 1, sha: values.sha, framed: values.framed }).text);
       return 0;
     }
     if (command === 'recall') return print({ ok: true, ...recall({ projectRoot: own, sessionId, query: rest.join(' ') }) });
@@ -233,7 +247,9 @@ function main(argv: string[]): number {
       return print({ ok: true, closed: true });
     }
     const result: SyncResult = command === 'record' ? s.record(events, {maxBytes: values['max-context-bytes'] !== undefined ? positiveInt(values['max-context-bytes'],'--max-context-bytes') : undefined, operationId: values['operation-id']}) : command === 'native-compaction' ? s.nativeCompaction(events) : s.sync();
-    const bytes=Buffer.from(`${JSON.stringify({ ok: true, ...result, workingContext: s.workingContextPath, ...(command === 'open' ? { frameKey: s.frameKey } : {}) })}\n`);
+    const delivery = deliveryMaxBytes === undefined ? undefined
+      : prepareWorkingContextDelivery(result, { hardLimit, maxBytes: deliveryMaxBytes, budgetTokens });
+    const bytes=Buffer.from(`${JSON.stringify({ ok: true, ...result, ...(delivery ? { delivery } : {}), workingContext: s.workingContextPath, ...(command === 'open' ? { frameKey: s.frameKey } : {}) })}\n`);
     resultOutputStarted=true;
     const outputDeadline=Date.now()+5000;
     for(let offset=0;offset<bytes.length;){

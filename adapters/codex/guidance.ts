@@ -27,6 +27,13 @@ const RECALL = RECALL_GUIDANCE.replaceAll('<session-id>', '"$CODEX_THREAD_ID"');
 /** The command that reads the Working Context back in parts that fit Codex's tool-output cap. */
 export const READ_COMMAND = 'context-engine read --session "$CODEX_THREAD_ID"';
 
+/** Static metadata only. Emitting this notice does not deliver any editable context. */
+export function editedContextReadNotice(sessionId: string, revision: number, sha256: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(sessionId) || !Number.isSafeInteger(revision) || revision < 1
+      || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error('invalid Working Context read-back identity');
+  return `Context Engine: Working Context revision ${revision} was validated (sha256 ${sha256}). This notice does not deliver its content. To use the edit within this turn, run context-engine read --session ${sessionId} --sha ${sha256} and read every part. Read-back adds tool data to the next continuation and does not remove earlier native history.`;
+}
+
 // ---- the Working Context's budget (issue #22) ----
 
 /**

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { fixture, tempDir } from '../../core/testing.ts';
 import { CODEX_TOKEN_LIMIT_RESET, setParticipation } from '../../core/index.ts';
 import { CODEX_DEFAULT_SHARED_BUDGET, projectCodexToml } from './guidance.ts';
+import { createHash } from 'node:crypto';
 
 const HOOK = fileURLToPath(new URL('./plugin/hooks/codex-hook.ts', import.meta.url));
 const CLI = fileURLToPath(new URL('../../core/cli.ts', import.meta.url));
@@ -162,9 +163,43 @@ test("a tool call on the Working Context commits the model's edit and is not ech
   writeFileSync(wcPath(f), edited);
   const r = hook(f, toolUse('Bash', { command: WC_CMD }, edited));
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, '', 'a committed edit needs no message');
+  const notice = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+  assert.match(notice, /revision 2 was validated/);
+  assert.match(notice, /This notice does not deliver its content/);
+  assert.doesNotMatch(notice, /rename foo to bar/);
   assert.equal(wc(f), edited, 'reading or editing the Working Context adds no turn (no self-echo)');
   assert.equal(status(f).revision, 2, 'the model edit is committed as a new revision');
+});
+
+test('a changed-revision notice contains no editable data and binds subsequent validated read-back', () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('CURRENT_USER_REQUIREMENT OLD_MEMORY_SENTINEL')).status, 0);
+  const edited = '[[CTX_TURN role=user]]\nCURRENT_USER_REQUIREMENT NEW_MEMORY_SENTINEL\n';
+  writeFileSync(wcPath(f), edited);
+  const changed = hook(f, toolUse('Write', { file_path: wcPath(f), content: edited }, 'write complete'));
+  assert.equal(changed.status, 0, changed.stderr);
+  const notice = JSON.parse(changed.stdout).hookSpecificOutput.additionalContext;
+  const sha = createHash('sha256').update(edited).digest('hex');
+  assert.ok(notice.includes(`--sha ${sha}`));
+  assert.doesNotMatch(notice, /NEW_MEMORY_SENTINEL|CURRENT_USER_REQUIREMENT/);
+  assert.match(notice, /notice does not deliver/);
+  const read = spawnSync(process.execPath, [CLI, 'read', '--session', SID, '--sha', sha], {
+    cwd: f.projectRoot, encoding: 'utf8', env: env(f),
+  });
+  assert.equal(read.status, 0, read.stderr);
+  const body = read.stdout.slice(read.stdout.indexOf('\n') + 1);
+  assert.equal(body, edited);
+  assert.equal(createHash('sha256').update(body).digest('hex'), sha);
+  assert.doesNotMatch(body, /OLD_MEMORY_SENTINEL/);
+  const unchanged = hook(f, toolUse('Read', { file_path: wcPath(f) }, edited));
+  assert.equal(unchanged.status, 0, unchanged.stderr);
+  assert.doesNotMatch(unchanged.stdout, /was validated|NEW_MEMORY_SENTINEL/);
+  writeFileSync(wcPath(f), edited + 'LATER_EDIT');
+  const stale = spawnSync(process.execPath, [CLI, 'read', '--session', SID, '--sha', sha], {
+    cwd: f.projectRoot, encoding: 'utf8', env: env(f),
+  });
+  assert.equal(stale.status, 1);
+  assert.match(stale.stdout, /Working Context changed/);
 });
 
 test('an emptied Working Context is restored, and the tool result tells the model its edit was not applied', () => {
@@ -192,7 +227,11 @@ test('stale-refs experiment: stale citations are reported with the output of the
   assert.match(marker, /^⟦src:parser\.ts#L1@[0-9a-f]{8}⟧$/);
   hook(f, prompt('Task: refactor parser.'), on);
   writeFileSync(wcPath(f), `${wc(f)}\n[[CTX_TURN 2 role=assistant]]\na is defined at ${marker}\n`);
-  assert.equal(hook(f, toolUse('Bash', { command: WC_CMD }, 'file text'), on).stdout, '', 'fresh citation: nothing to report');
+  const fresh = JSON.parse(hook(f, toolUse('Bash', { command: WC_CMD }, 'file text'), on).stdout);
+  assert.equal(fresh.decision, undefined, 'a fresh citation does not block the tool result');
+  assert.match(fresh.hookSpecificOutput.additionalContext, /Working Context revision 2 was validated/, 'the accepted edit still gets its static notice');
+  assert.equal(fresh.hookSpecificOutput.additionalContext.includes(marker), false, 'the notice contains no editable citation payload');
+  assert.doesNotMatch(fresh.hookSpecificOutput.additionalContext, /cited reference.*stale/);
 
   writeFileSync(join(f.projectRoot, 'parser.ts'), 'export const a = 42;\nexport const b = 2;\n');
   assert.equal(hook(f, toolUse('Bash', { command: 'ls' }, 'parser.ts'), on).stdout, '', 'other tool calls are not interrupted');

@@ -4,6 +4,8 @@ An experimental, opt-in plugin that lets your agent edit its **Working Context**
 
 **Full Replacement at agent-initiated resets (any model step); history grows between resets.** The agent must call `new_context`, then read every part of its Working Context. A token-limit reset is **Compaction-only (Codex token-limit reset; Working Context read back by the agent)**; manual `/compact` is **Compaction-only (Codex manual compaction; Working Context read back by the agent)**.
 
+An accepted edit now produces a static revision and digest notice with an exact read-back command. The notice does not contain or deliver editable context. Reading every part with that digest can add the edited content as tool output within the same user turn. This is additive input for a later continuation and retains older native history. It does not reproduce per-step context eviction or guarantee a smaller request. Partial reads, a changed digest, and a file path alone do not establish delivery.
+
 **Source approval and installation acceptance:** this candidate is in an open PR; main remains bootstrap-only. Source merge requires passing offline checks, independent review and Jeff's approval of the exact head. Real persistent plugin loading, interactive delivery and long-session performance remain unverified; these are installation/release acceptance gaps, not substitutes for source review. Do not recommend installation until a supported-host trial proves next-request delivery. No model evaluations or host configuration changes are part of the offline source checks.
 
 ## Give this prompt to your agent to set it up
@@ -84,9 +86,13 @@ Trust the test project through Codex's normal trust prompt. Review/approve the f
 
 ## 3. Prove delivery, then enable your intended project
 
-Use harmless, unique strings such as `CE_OLD_TEST` and `CE_NEW_TEST`. Ask the agent to locate its own Working Context, retain the active request and decisions, replace the old sentinel with the new one, and proceed across the documented boundary. For Codex, that boundary is an agent-initiated `new_context`, followed by complete read-back. A native token-limit compaction is a different mode.
+Use harmless, unique strings such as `CE_OLD_TEST` and `CE_NEW_TEST`. Preserve the current human request and the runner instructions, tools and permissions. Test the intended delivery mode explicitly.
 
-Inspect authorized, minimally scoped request-level evidence: old sentinel absent, new sentinel delivered, Working Context at user-message authority, and runner instructions/tools/permissions preserved. Do not capture a real private project or authentication. A changed `context.md`, an active status line, or the agent saying it remembered something is insufficient proof of replacement. If your runtime offers no safe request inspection, report the result as **unverified** and keep the test scope.
+For within-turn Injection, edit the committed Working Context and inspect the static revision-and-digest notice. That notice is not content delivery. Run its exact `context-engine read` command and read every part with the same digest. Inspect the following native request for the complete new content in ordinary tool output. Earlier native history remains. Partial reads or a changed digest do not pass.
+
+For Full Replacement at agent-initiated resets, use an agent-initiated `new_context`, then complete the digest-bound read-back. Verify that the old native window has been removed and the new request carries the intended file as tool output. Native token-limit and manual compaction use their separately documented Compaction-only paths.
+
+Inspect only authorized, scoped request evidence from a disposable project. A changed file, active status, prepared packet, hook return or model statement does not establish delivery. If safe request inspection is unavailable, report delivery as **unverified** and keep the test scope.
 
 After you accept the result, move to the intended project and run `context-engine-codex enable`, then `context-engine-codex status`. Preserve the original task, user control and ordinary approval boundaries. Editable context is user data and can retain prompt injections; it does not gain system/developer authority.
 
