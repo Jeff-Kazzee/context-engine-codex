@@ -578,7 +578,7 @@ function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd:
   }
 }
 
-/** Reads every complete Event Log entry. A torn final line or a corrupt line is skipped. Memory follows the largest entry, not the complete history. */
+/** Reads every complete Event Log entry. An incomplete final tail is ignored. Complete malformed records refuse recovery. Memory follows the largest entry, not the complete history. */
 export function* readLog(path: string): Generator<Record<string,unknown>> {
   let fd: number;
   try {fd=verifiedLogDescriptor(path,false,true);}
@@ -595,17 +595,20 @@ export function* readLog(path: string): Generator<Record<string,unknown>> {
         bytes+=piece.length;
         parts.push(Buffer.from(piece));
         if(end<0)break;
-        const line=Buffer.concat(parts,bytes).toString('utf8');parts=[];bytes=0;start=end+1;
-        let entry: Record<string,unknown>;
-        try {entry=JSON.parse(line) as Record<string,unknown>;}catch{continue;}
-        if(validLogEntry(entry)) {
-          if (entry.type === 'runner-events') {
-            const events = entry.events as Array<{seq:number}>;
-            if (events.length && events[0]!.seq <= lastSequence) throw new Error('Event Log runner-event sequence regressed across records; refusing recovery');
-            if (events.length) lastSequence = events.at(-1)!.seq;
-          }
-          yield entry;
+        const complete = Buffer.concat(parts, bytes); parts=[]; bytes=0; start=end+1;
+        let line: string;
+        try { line = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(complete); }
+        catch (cause) { throw new Error('Event Log contains invalid UTF-8 in a complete record, refusing recovery', { cause }); }
+        let entry: unknown;
+        try { entry = JSON.parse(line); }
+        catch (cause) { throw new Error('Event Log contains malformed JSON in a complete record, refusing recovery', { cause }); }
+        if (!validLogEntry(entry)) throw new Error('Event Log contains an invalid complete record, refusing recovery');
+        if (entry.type === 'runner-events') {
+          const events = entry.events as Array<{seq:number}>;
+          if (events.length && events[0]!.seq <= lastSequence) throw new Error('Event Log runner-event sequence regressed across records; refusing recovery');
+          if (events.length) lastSequence = events.at(-1)!.seq;
         }
+        yield entry;
       }
     }
     // Preserve the existing protocol: incomplete final lines are not records.

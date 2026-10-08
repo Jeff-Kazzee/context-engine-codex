@@ -113,7 +113,8 @@ const jsonBytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v));
 /** Never cut between the halves of a surrogate pair. */
 function safeIndex(text: string, i: number): number {
   const c = text.charCodeAt(i);
-  return c >= 0xdc00 && c <= 0xdfff ? i - 1 : i;
+  const previous = text.charCodeAt(i - 1);
+  return i > 0 && c >= 0xdc00 && c <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff ? i - 1 : i;
 }
 
 function snippet(text: string, at: number): string {

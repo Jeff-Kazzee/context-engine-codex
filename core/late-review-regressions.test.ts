@@ -43,14 +43,21 @@ test('late review: private state publication remains anchored after parent verif
  fs.readlinkSync=((p:any,...args:any[])=>{const real=(native as any)(p,...args);if(!swapped&&real===parent){swapped=true;fs.renameSync(parent,moved);fs.symlinkSync(outside,parent);}return real;}) as typeof fs.readlinkSync;syncBuiltinESMExports();
  try{atomicWrite(join(parent,'HEAD'),'SYNTHETIC_NEW','head-tmp');assert.equal(swapped,true);assert.equal(fs.readFileSync(join(outside,'HEAD'),'utf8'),'SYNTHETIC_UNCHANGED');assert.equal(fs.readFileSync(join(moved,'HEAD'),'utf8'),'SYNTHETIC_NEW');assert.deepEqual(fs.readdirSync(outside),['HEAD']);}finally{fs.readlinkSync=native;syncBuiltinESMExports();}
 });
-test('late review: malformed event batches skip while valid later replay and evidence survive',()=>{
+test('late review: malformed complete event batches refuse without discarding later evidence',()=>{
  const f=fixture(),opts={...f,sessionId:'S1',runner:'synthetic',hardLimit:100000};let r=openSession(opts);assert.equal(r.status,'open');r.session.record([{role:'user',text:'SYNTHETIC_FIRST'}]);r.session.close();
  const l=layout(f.projectRoot,'S1',f.stateDir);fs.rmSync(join(l.stateDir,'recovery.json'),{force:true});
+ const prior=fs.readFileSync(l.events,'utf8'),context=fs.readFileSync(l.workingContext);
  const bad=[{type:'runner-events',events:null},{type:'runner-events',events:[{seq:2,event:null}]},{type:'runner-events',events:[{seq:2,event:{role:'user',text:7}}]}];
  const valid={type:'runner-events',events:[{seq:2,event:{role:'user',text:'SYNTHETIC_LATER'}}]};fs.appendFileSync(l.events,[...bad,valid].map(x=>JSON.stringify(x)+'\n').join(''));
- assert.equal([...readLog(l.events)].filter(x=>x.type==='runner-events').length,2);
+ const damaged=fs.readFileSync(l.events);
+ assert.throws(()=>[...readLog(l.events)],/invalid complete record/);
+ assert.throws(()=>openSession(opts),/invalid complete record/);
+ assert.deepEqual(fs.readFileSync(l.events),damaged);assert.deepEqual(fs.readFileSync(l.workingContext),context);
+ // Restore this synthetic fixture's known-good source explicitly, then recover the retained valid event.
+ fs.writeFileSync(l.events,prior+JSON.stringify(valid)+'\n');
  r=openSession(opts);assert.equal(r.status,'open');try{assert.match(r.session.sync().workingContextText,/SYNTHETIC_LATER/);assert.equal(recall({...f,sessionId:'S1',query:'SYNTHETIC_LATER'}).total,1);assert.match(show({...f,sessionId:'S1',id:'e2'}).text,/SYNTHETIC_LATER/);}finally{r.session.close();}
 });
+
 test('late review: nonboolean materialization refuses before stale context can commit',()=>{
  const f=fixture(),opts={...f,sessionId:'S1',runner:'synthetic',hardLimit:100000},r=openSession(opts);assert.equal(r.status,'open');r.session.record([{role:'user',text:'SYNTHETIC_COMMITTED'}]);r.session.close();
  const l=layout(f.projectRoot,'S1',f.stateDir),head=JSON.parse(fs.readFileSync(l.head,'utf8'));head.materialized='false';fs.writeFileSync(l.head,JSON.stringify(head));const before=fs.readFileSync(l.workingContext);

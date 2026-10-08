@@ -68,8 +68,11 @@ test('renewed6: recovery recall and show scan log without whole-file allocation'
 });
 
 import { readLog } from './store.ts';
-test('renewed6: streaming log keeps UTF8 across chunks and ignores corrupt or torn records',()=>{
+test('renewed6: streaming log keeps UTF8 across chunks, ignores torn tails and refuses corrupt complete records',()=>{
  const path=join(tempDir('stream'),'events.jsonl'),text='漢'.repeat(30000);
- fs.writeFileSync(path,JSON.stringify({type:'synthetic',text})+'\nNOT_JSON\n'+JSON.stringify({type:'next',text:'OK'})+'\n'+JSON.stringify({type:'torn'}));
+ const valid=JSON.stringify({type:'synthetic',text})+'\n'+JSON.stringify({type:'next',text:'OK'})+'\n';
+ fs.writeFileSync(path,valid+JSON.stringify({type:'torn'}));
  assert.deepEqual([...readLog(path)],[{type:'synthetic',text},{type:'next',text:'OK'}]);
+ const damaged=valid+'NOT_JSON\n';fs.writeFileSync(path,damaged);
+ assert.throws(()=>[...readLog(path)],/malformed JSON/);assert.equal(fs.readFileSync(path,'utf8'),damaged);
 });

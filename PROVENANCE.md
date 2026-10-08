@@ -119,3 +119,5 @@ Claude's fixture reconstructed all 341 UTF-8 bytes from the framed result. Its p
 Request-assembly observations use fixed synthetic local protocol responses in disposable profiles. They do not measure model reasoning, autonomous compliance with read instructions, external provider delivery or long-session performance. The Codex direct-host fixture retains the native workspace sandbox and disables tool networking. Its parent runtime process has no global egress constraint, and incidental runtime network traffic is not measured.
 
 Wave48 shared-core source pin: `045582297117f5084f4a24136c7dae6ea2590261` (49 identical core files in both distributions). This local pin includes the bounded packet and framed-read implementation described above. The original snapshot commit remains unchanged.
+
+Wave51 shared-core source pin: `06bb6cf91cb7bb7716d6da0364b16d0dd3fbfc1e` (50 identical core files in both distributions). This pin includes complete Event Log corruption refusal and Unicode cut preservation. The original snapshot commit remains unchanged.
