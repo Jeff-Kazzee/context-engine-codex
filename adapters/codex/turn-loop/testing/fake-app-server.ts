@@ -19,12 +19,20 @@ interface TurnScript {
   serverRequest?: boolean;
   hang?: boolean;
   ignoreInterrupt?: boolean;
+  /** Never answers turn/start. The turn's notifications still arrive, carrying its turn ID. */
+  dropStartReply?: boolean;
+  /** An agentMessage for the new turn, sent before the turn/start reply. */
+  earlyItem?: string;
+  /** Items for a foreign turn on this thread (before and after the reply) and for the previous thread. */
+  foreignItems?: boolean;
 }
 
 interface Script {
   turns?: TurnScript[];
   /** Methods that fail with this JSON-RPC error. */
   errors?: Record<string, { code: number; message: string }>;
+  /** Methods whose first call only fails with this JSON-RPC error. */
+  errorsOnce?: Record<string, { code: number; message: string }>;
   /** Exit abruptly when this method arrives. */
   exitOn?: string;
 }
@@ -43,6 +51,7 @@ const send = (m: Msg): void => {
 };
 const threads = new Map<string, { history: Array<{ role: string; text: string }>; params: any }>();
 const waiting = new Map<string | number, (m: Msg) => void>();
+const failedOnce = new Set<string>();
 let threadSeq = 0;
 let turnSeq = 0;
 let itemSeq = 0;
@@ -50,6 +59,9 @@ const active = new Map<string, { threadId: string; ignoreInterrupt: boolean }>()
 
 const textOf = (content: unknown): string =>
   Array.isArray(content) ? content.map((p: any) => (typeof p?.text === 'string' ? p.text : JSON.stringify(p))).join('\n') : JSON.stringify(content);
+
+const notifyItem = (threadId: string, turnId: string, item: object) =>
+  send({ method: 'item/completed', params: { threadId, turnId, item: { id: `item-${++itemSeq}`, ...item }, completedAtMs: Date.now() } });
 
 async function runTurn(threadId: string, turnId: string, input: any[], s: TurnScript): Promise<void> {
   const thread = threads.get(threadId)!;
@@ -66,7 +78,7 @@ async function runTurn(threadId: string, turnId: string, input: any[], s: TurnSc
     });
     log({ serverRequestAnswer: answer });
   }
-  const item = (item: object) => send({ method: 'item/completed', params: { threadId, turnId, item: { id: `item-${++itemSeq}`, ...item }, completedAtMs: Date.now() } });
+  const item = (item: object) => notifyItem(threadId, turnId, item);
   item({ type: 'userMessage', content: input });
   if (s.command) {
     item({ type: 'commandExecution', command: s.command.command, aggregatedOutput: s.command.output, exitCode: s.command.exitCode, status: 'completed' });
@@ -75,6 +87,10 @@ async function runTurn(threadId: string, turnId: string, input: any[], s: TurnSc
   item({ type: 'agentMessage', text: reply });
   send({ method: 'thread/tokenUsage/updated', params: { threadId, turnId, tokenUsage: { total: { inputTokens: 10 }, last: { inputTokens: 10 } } } });
   thread.history.push(prompt, { role: 'assistant', text: reply });
+  if (s.foreignItems) {
+    notifyItem(`thread-${Number(threadId.slice('thread-'.length)) - 1}`, turnId, { type: 'agentMessage', text: 'FOREIGN_PREVIOUS_THREAD' });
+    notifyItem(threadId, 'turn-foreign', { type: 'agentMessage', text: 'FOREIGN_LATE_TURN' });
+  }
   const status = s.status ?? 'completed';
   if (s.hang) {
     active.set(turnId, { threadId, ignoreInterrupt: !!s.ignoreInterrupt });
@@ -94,7 +110,9 @@ function handle(m: Msg): void {
     return;
   }
   if (script.exitOn === m.method) process.exit(3);
-  const err = script.errors?.[m.method];
+  const once = failedOnce.has(m.method) ? undefined : script.errorsOnce?.[m.method];
+  if (once) failedOnce.add(m.method);
+  const err = script.errors?.[m.method] ?? once;
   if (err && m.id !== undefined) return send({ id: m.id, error: err });
   const p = m.params ?? {};
   switch (m.method) {
@@ -116,8 +134,11 @@ function handle(m: Msg): void {
     case 'turn/start': {
       if (!threads.has(p.threadId)) return send({ id: m.id, error: { code: -32600, message: `thread not found: ${p.threadId}` } });
       const turnId = `turn-${++turnSeq}`;
-      send({ id: m.id, result: { turn: { id: turnId, items: [], status: 'inProgress', error: null } } });
-      void runTurn(p.threadId, turnId, p.input ?? [], script.turns?.[turnSeq - 1] ?? {});
+      const s = script.turns?.[turnSeq - 1] ?? {};
+      if (s.earlyItem !== undefined) notifyItem(p.threadId, turnId, { type: 'agentMessage', text: s.earlyItem });
+      if (s.foreignItems) notifyItem(p.threadId, 'turn-foreign', { type: 'agentMessage', text: 'FOREIGN_EARLY_TURN' });
+      if (!s.dropStartReply) send({ id: m.id, result: { turn: { id: turnId, items: [], status: 'inProgress', error: null } } });
+      void runTurn(p.threadId, turnId, p.input ?? [], s);
       return;
     }
     case 'thread/unsubscribe':

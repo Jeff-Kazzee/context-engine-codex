@@ -388,3 +388,40 @@ test('wave31: confirmed shutdown releases registry after receipt acknowledgement
   assert.equal(shutdowns,1);assert.equal(inspectSession({...t.opts}).lock,null);
   const resumed=await actual(t.opts);await resumed.close();assert.equal(shutdowns,2);
 });
+
+test('[CDX-019] a lost turn/start reply recovers the turn ID from early notifications', async () => {
+  const t = setup({ turns: [{ dropStartReply: true, hang: true, reply: 'PARTIAL_AFTER_LOST_REPLY' }, { reply: 'NEXT' }] }, { turnTimeoutMs: 1000 });
+  const loop = await startCodexTurnLoop(t.opts);
+  const r = await loop.runTurn('LOST_REPLY_PROMPT');
+  assert.equal(r.status, 'interrupted');
+  assert.equal(r.turnId, 'turn-1');
+  assert.deepEqual(t.sent('turn/interrupt'), [{ threadId: r.threadId, turnId: 'turn-1' }]);
+  assert.equal(r.finalMessage, 'PARTIAL_AFTER_LOST_REPLY');
+  assert.match(readFileSync(t.wcPath, 'utf8'), /LOST_REPLY_PROMPT[\s\S]*PARTIAL_AFTER_LOST_REPLY/);
+  assert.equal((await loop.runTurn('next')).status, 'completed', 'a settled interruption keeps the loop usable');
+});
+
+test('[CDX-021] foreign and early notifications are filtered, and early ones are replayed in order', async () => {
+  const t = setup({ turns: [{ reply: 'FIRST' }, { earlyItem: 'EARLY_ITEM', foreignItems: true, reply: 'SECOND' }] });
+  const loop = await startCodexTurnLoop(t.opts);
+  assert.equal((await loop.runTurn('PROMPT_ONE')).threadId, 'thread-1');
+  const r = await loop.runTurn('PROMPT_TWO');
+  assert.equal(r.status, 'completed');
+  assert.equal(r.threadId, 'thread-2');
+  assert.deepEqual(r.items.map((i: any) => i.type === 'agentMessage' ? i.text : i.type), ['EARLY_ITEM', 'userMessage', 'SECOND']);
+  const context = readFileSync(t.wcPath, 'utf8');
+  assert.match(context, /PROMPT_TWO[\s\S]*EARLY_ITEM[\s\S]*SECOND/);
+  assert.doesNotMatch(context, /FOREIGN_/);
+});
+
+test('[CDX-021] a turn after a refused injection unsubscribes the old thread and never continues either', async () => {
+  const t = setup({ turns: [{ reply: 'ONE' }, { reply: 'THREE' }], errorsOnce: { 'thread/inject_items': { code: -32600, message: 'synthetic one-time refusal' } } });
+  const loop = await startCodexTurnLoop(t.opts);
+  assert.equal((await loop.runTurn('PROMPT_ONE')).threadId, 'thread-1');
+  assert.equal((await loop.runTurn('PROMPT_TWO')).status, 'refused');
+  const third = await loop.runTurn('PROMPT_THREE');
+  assert.equal(third.status, 'completed');
+  assert.equal(third.threadId, 'thread-3');
+  assert.deepEqual(t.sent('thread/unsubscribe').map(p => p.threadId), ['thread-2', 'thread-1']);
+  assert.deepEqual(t.sent('turn/start').map(p => p.threadId), ['thread-1', 'thread-3']);
+});

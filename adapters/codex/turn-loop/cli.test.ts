@@ -9,12 +9,13 @@ import { FAKE_APP_SERVER } from './testing/fake.ts';
 
 const CLI = fileURLToPath(new URL('./cli.ts', import.meta.url));
 
-function setup() {
+/** `script` receives the project root, so scripted turns can write its Working Context. */
+function setup(script: (projectRoot: string) => object = () => ({})) {
   const f = fixture();
   const dir = tempDir('fake-codex');
   const logPath = join(dir, 'log.jsonl');
   const scriptPath = join(dir, 'script.json');
-  writeFileSync(scriptPath, JSON.stringify({}));
+  writeFileSync(scriptPath, JSON.stringify(script(f.projectRoot)));
   const run = (args: string[], input?: string) => {
     const r = spawnSync(
       process.execPath,
@@ -79,4 +80,17 @@ test('a bad invocation prints a JSON error and exits 1', () => {
   const r = t.run(['--hard-limit', 'lots']);
   assert.equal(r.status, 1);
   assert.equal(r.lines.at(-1)!.event, 'error');
+});
+
+test('[CDX-017] a refused turn exits 3 and skips later prompts', () => {
+  const t = setup(projectRoot => ({ turns: [{ reply: 'ONE', writeFile: { path: join(projectRoot, '.context-engine', 'S1', 'context.md'), content: '[[CTX_TURN 1 role=user]]\nBAD\u0000BYTE\n' } }] }));
+  const r = t.run(['--prompt', 'PROMPT_ONE', '--prompt', 'PROMPT_TWO', '--prompt', 'PROMPT_THREE']);
+  assert.equal(r.status, 3, r.stderr);
+  assert.deepEqual(r.lines.map((l) => [l.event, l.status ?? null, l.mode ?? null]), [
+    ['start', null, 'Full Replacement per user turn'],
+    ['turn', 'completed', 'Full Replacement per user turn'],
+    ['turn', 'refused', null],
+  ]);
+  assert.match(JSON.stringify(r.lines[2]!.receipts), /control/);
+  assert.equal(t.requests().length, 1, 'only the first prompt reached the model');
 });
