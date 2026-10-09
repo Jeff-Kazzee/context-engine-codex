@@ -3,13 +3,55 @@ import { anchor, childTarget } from '../core/platform.ts';
 // config file they touch backed up byte for byte first (ledger.ts).
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirPrivateSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '../core/platform.ts';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
-import { assess, completeLedger, type FileReport, type Ledger, preflightOwnership, readLedger, revert, rollbackSnapshot, takeSnapshot } from './ledger.ts';
+import { basename, dirname, join, resolve } from 'node:path';
+import { assess, completeLedger, type FileReport, type Ledger, preflightOwnership, readLedger, revert, rollbackSnapshot, type Snapshot, takeSnapshot } from './ledger.ts';
 import { checkOwnedDirectory, safeRead, safeWrite, withSetupLock } from './files.ts';
 import { openPrivateDirectory } from '../core/store.ts';
 import { codexSpec, runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
 
 const pointerPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}.json`);
+/** The snapshot of an install that has started changing runner config and has not yet published or rolled back. */
+const pendingPath = (ctx: SetupContext, id: string) => join(ctx.setupDir, `${id}.pending.json`);
+
+function removePending(ctx: SetupContext, id: string): void {
+  const parent = openPrivateDirectory(ctx.setupDir)!;
+  try {
+    try { unlinkSync(childTarget(anchor(parent), `${id}.pending.json`)); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; throw e; }
+    fsyncSync(parent);
+  } finally { closeSync(parent); }
+}
+
+/** A killed install's snapshot, accepted only when every path in it is the one this runner's policy derives. */
+function interruptedInstall(ctx: SetupContext, spec: RunnerSpec): Snapshot | null {
+  const bytes = safeRead(pendingPath(ctx, spec.id));
+  if (bytes === null) return null;
+  const s = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Snapshot;
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const copy = (i: number) => join(s.dir, 'before', `${i}-${basename(spec.files[i]!)}`);
+  if (typeof s.dir !== 'string' || resolve(s.dir) !== s.dir || dirname(s.dir) !== join(ctx.setupDir, 'backups') || !basename(s.dir).startsWith(`${spec.id}-`)
+    || !Array.isArray(s.files) || !same(s.files.map((f) => f.path), spec.files) || !s.files.every((f, i) => f.after === null && (f.before === null || f.before === copy(i)))
+    || !Array.isArray(s.namespaced) || !same(s.namespaced.map((n) => n.path), spec.namespaced) || !s.namespaced.every((n) => typeof n.existed === 'boolean')
+    || !same(s.watch, spec.watch) || !Array.isArray(s.listing) || !s.listing.every((p) => typeof p === 'string')) {
+    throw new SetupError(`${spec.title}: the interrupted install record violates confinement policy: ${pendingPath(ctx, spec.id)}`);
+  }
+  closeSync(openPrivateDirectory(s.dir)!);
+  return s;
+}
+
+/** A SIGKILL skips the rollback in installLocked, so the next run finishes it before anything else. */
+function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
+  const snap = interruptedInstall(ctx, spec);
+  if (!snap) return [];
+  checkOwnedDirectory(spec.home);
+  preflightOwnership(spec);
+  const retained = rollbackSnapshot(snap, spec.rules);
+  removePending(ctx, spec.id);
+  return [
+    'An earlier install was interrupted. Its configuration changes were rolled back and unmanaged edits were kept.',
+    `Unowned new paths retained from it: ${retained.length}. Its before backups: ${join(snap.dir, 'before')}`,
+  ];
+}
 
 /** Inspect an atomically moved candidate; never delete a later writer's pointer name. */
 function removeFailedPointer(ctx: SetupContext, id: string, publication: string): void {
@@ -61,9 +103,11 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   checkOwnedDirectory(spec.home);
   const prior = installedLedger(ctx, spec.id, spec);
   if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine-${spec.id} uninstall\` first`);
+  const recovered = undoInterruptedInstall(ctx, spec);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
   let publication: string | undefined;
   try {
+    safeWrite(pendingPath(ctx, spec.id), `${JSON.stringify(snap)}\n`);
     spec.prepare?.();
     for (const cmd of spec.install) {
       const r = runBinary(spec.bin, cmd, ctx.env);
@@ -76,15 +120,17 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
     mkdirPrivateSync(ctx.setupDir, { recursive: true });
     publication = `${JSON.stringify({ dir: ledger.dir })}\n`;
     safeWrite(pointerPath(ctx, spec.id), publication);
+    removePending(ctx, spec.id);
     const changed = ledger.files.filter((f) => !sameBytes(f.before, f.after)).map((f) => f.path);
     return [
+      ...recovered,
       `Changed by \`${spec.bin} plugin\`: ${changed.join(', ') || '(no config file)'}`,
       `Byte backups taken before the change: ${join(ledger.dir, 'before')}`,
       `New paths outside Context Engine namespaces retained: ${ledger.retainedPaths?.length ?? 0} (ownership unverified; uninstall will leave them alone)`,
     ];
   } catch (e) {
     let retained: string[];
-    try { retained = rollbackSnapshot(snap, spec.rules); }
+    try { retained = rollbackSnapshot(snap, spec.rules); removePending(ctx, spec.id); }
     catch (rollbackError) { throw new AggregateError([e, rollbackError], `${spec.title}: install failed and rollback was incomplete; before backups are preserved at ${join(snap.dir, 'before')}`); }
     // A rename may publish before its directory flush throws. Remove only our pointer.
     if (publication && safeRead(pointerPath(ctx, spec.id))?.equals(Buffer.from(publication))) {
@@ -108,7 +154,11 @@ export function uninstall(ctx: SetupContext, spec: RunnerSpec): string[] {
 
 export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   const ledger = installedLedger(ctx, spec.id, spec);
-  if (!ledger) throw new SetupError(`${spec.title}: not installed by Context Engine (no install record in ${ctx.setupDir})`);
+  if (!ledger) {
+    const recovered = undoInterruptedInstall(ctx, spec);
+    if (recovered.length) return recovered;
+    throw new SetupError(`${spec.title}: not installed by Context Engine (no install record in ${ctx.setupDir})`);
+  }
   checkOwnedDirectory(spec.home);
   preflightOwnership(spec);
   const lines: string[] = [];
@@ -120,6 +170,8 @@ export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   const parent = openPrivateDirectory(ctx.setupDir)!;
   try { unlinkSync(childTarget(anchor(parent), `${spec.id}.json`)); fsyncSync(parent); }
   finally { closeSync(parent); }
+  // A kill between pointer publication and pending removal leaves this install's own pending record.
+  if (interruptedInstall(ctx, spec)?.dir === ledger.dir) removePending(ctx, spec.id);
   lines.push(`Backups kept: ${ledger.dir}`);
   if (ledger.retainedPaths?.length) lines.push(`Unowned new paths retained: ${ledger.retainedPaths.length}`);
   return lines;
