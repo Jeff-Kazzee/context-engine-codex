@@ -17,6 +17,8 @@ export function assertBackupSafe(path: string, bytes: Buffer | null): void {
   }
   // Only plain table/assignment syntax is accepted for TOML backup inspection.
   // Escaped keys and inline tables are ambiguous to this bounded key scanner.
+  // A Codex trust table such as [projects."/abs/path"] names a project directory, not a credential.
+  const projectTable=(raw:string)=>/^\s*projects\s*\.\s*(?:"\/[^"\\\r\n]*"|'\/[^'\r\n]*')\s*$/.test(raw);
   let triple:string|null=null;
   const checkKey=(raw:string)=>{
     const bare=raw.replace(/"[^"\\\r\n]*"|'[^'\r\n]*'/g,'KEY');
@@ -38,7 +40,7 @@ export function assertBackupSafe(path: string, bytes: Buffer | null): void {
   for(const line of text.split(/\r?\n/)){
     if(triple){scan(line,0);continue;}
     const trimmed=line.trim();if(!trimmed||trimmed.startsWith('#'))continue;
-    if(trimmed.startsWith('[')){const header=trimmed.match(/^\[{1,2}(.+?)\]{1,2}\s*(?:#.*)?$/);if(!header)refuse();else checkKey(header[1]!);continue;}
+    if(trimmed.startsWith('[')){const header=trimmed.match(/^\[{1,2}(.+?)\]{1,2}\s*(?:#.*)?$/);if(!header)refuse();else if(!projectTable(header[1]!))checkKey(header[1]!);continue;}
     let quote:string|null=null,equals=-1;
     for(let i=0;i<line.length;i++){const c=line[i];if(quote){if(c==='\\')refuse();if(c===quote)quote=null;}else if(c==='"'||c==="'")quote=c;else if(c==='='){equals=i;break;}else if(c==='#')break;}
     if(equals<0||quote)refuse();checkKey(line.slice(0,equals));scan(line,equals+1);
