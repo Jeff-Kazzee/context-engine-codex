@@ -197,7 +197,12 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
     finally { closeSync(file); }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-    const existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+    // A concurrent first open creates this file empty and then writes it. Wait for that write.
+    let existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+    for (const deadline = Date.now() + 2_000; Buffer.isBuffer(existing) && existing.length === 0 && Date.now() < deadline;) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+      existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+    }
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
     if (rules.at(-1) !== '*') throw new Error('.context-engine/.gitignore must end with a blanket * rule; fix it before enabling Context Engine');
@@ -220,10 +225,18 @@ const FRAME_KEY = /^[0-9a-f]{32}$/;
 
 /** The frame key stored at `path`, or null when there is none or it is not a whole key. */
 function storedFrameKey(path: string): string | null {
-  try {
-    const text = readBytes(path,33)?.toString('utf8').trim();
-    return text && FRAME_KEY.test(text) ? text : null;
-  } catch(e) { if((e as NodeJS.ErrnoException).code==='CE_SIZE_LIMIT')return null;throw e; }
+  for (const deadline = Date.now() + 2_000; ;) {
+    try {
+      const text = readBytes(path,33)?.toString('utf8').trim();
+      return text && FRAME_KEY.test(text) ? text : null;
+    } catch(e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if(code==='CE_SIZE_LIMIT')return null;
+      // Another opener's publication gives the key two names until it removes its temp name.
+      if(code!=='CE_STATE_LINK_COUNT' || Date.now()>=deadline)throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+    }
+  }
 }
 
 /**
@@ -466,7 +479,8 @@ function writeTemp(path: FileTarget, data: string, point: CrashPoint): FileTarge
   return tmp;
 }
 
-export function atomicWrite(path: string, data: string, point: CrashPoint): void {
+/** `beforeRename` runs after the new bytes are flushed, just before they replace the file. */
+export function atomicWrite(path: string, data: string, point: CrashPoint, beforeRename?: () => void): void {
   if (point !== 'wc-tmp') {
     const parent = dirname(resolve(path));
     const fd = openPrivateDirectory(parent)!;
@@ -474,6 +488,7 @@ export function atomicWrite(path: string, data: string, point: CrashPoint): void
     try {
       const target=childTarget(anchor(fd),basename(path));
       tmp=writeTemp(target,data,point);
+      beforeRename?.();
       renameSync(tmp,target);
       fsyncSync(fd);
     } finally { if(tmp)try{unlinkSync(tmp);}catch{} closeSync(fd); }
@@ -489,6 +504,7 @@ export function atomicWrite(path: string, data: string, point: CrashPoint): void
     if (!fstatSync(fd).isDirectory() || openedPath(fd) !== parent) throw new Error('Working Context parent could not be verified; refusing to write');
     const target = childTarget(anchor(fd), basename(path));
     tmp = writeTemp(target, data, point);
+    beforeRename?.();
     renameSync(tmp, target);
     fsyncSync(fd);
   } finally {

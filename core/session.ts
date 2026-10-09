@@ -499,11 +499,27 @@ class Core {
     return head;
   }
 
+  /**
+   * Writes committed text over the Working Context. Just before the rename, a file that is neither
+   * the parent this revision was built on nor the new text holds an edit made since the last sync,
+   * or while the adapter was down. It is not committed over the append. It is kept in the Event Log
+   * with a restore receipt. An edit landing between that read and the rename is still overwritten.
+   */
   private materialize(head: Head, text: string): void {
     crashPoint('before-wc');
-    this.writeWorkingContext(text);
+    assertWorkingContextDir(this.l.workingContext);
+    atomicWrite(this.l.workingContext, text, 'wc-tmp', () => this.keepStaleEdit(head, text.length));
     head.materialized = true;
     atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
+  }
+
+  private keepStaleEdit(head: Head, chars: number): void {
+    const read = readWorkingContextFile(this.l.workingContext, Math.min(SNAPSHOT_MAX_BYTES, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size)));
+    const current = read && typeof read !== 'string' ? decode(read) : null;
+    if (current === null || !current.trim() || [head.parent, head.sha].includes(sha(current))) return;
+    appendLog(this.l.events, { type: 'restored', rev: head.rev, reason: 'unmaterialized-append', rejected: current });
+    const receipt: Receipt = { kind: 'restored', revision: head.rev, reason: 'unmaterialized-append', chars, approxTokens: approxTokens(chars), text: `Context Engine: revision ${head.rev} was restored because committed runner events had not yet reached the Working Context. The intervening edit is kept in the Event Log; read the restored file before editing it again. ${sizeReadout(chars)}` };
+    this.retainReceipt({ revision: head.rev, chars, workingContextText: '', turns: [], receipt });
   }
 
   private writeWorkingContext(text: string): void {
@@ -593,7 +609,7 @@ class Core {
         const recorded = entry.operation as { id?: unknown; sha?: unknown };
         if (recorded.id !== operation.id) continue;
         if (recorded.sha !== operation.sha) throw new Error('record operation identifier was used for different input');
-        return this.result(this.apply(), synced.receipt);
+        return this.result(this.apply(), this.pendingReceipt);
       }
     }
     if (events.length === 0) return synced;
@@ -616,8 +632,9 @@ class Core {
     this.unapplied.push(...numbered);
     crashPoint('after-log');
     const head = this.apply();
+    // The sync receipt, plus any edit that raced the append (see materialize).
     const r = this.result(head);
-    if (synced.receipt) r.receipt = synced.receipt;
+    if (this.pendingReceipt) r.receipt = this.pendingReceipt;
     return r;
   }
 
@@ -799,12 +816,8 @@ class Core {
       const current = read && typeof read !== 'string' ? decode(read) : null;
       const currentSha = current === null ? null : sha(current);
       if (currentSha !== head.sha) {
-        const committed = this.snapshot(head.rev);
-        if (current !== null && current.trim() && currentSha !== head.parent) {
-          appendLog(this.l.events, { type: 'restored', rev: head.rev, reason: 'unmaterialized-append', rejected: current });
-          interruptedReceipt = { kind: 'restored', revision: head.rev, reason: 'unmaterialized-append', chars: committed.length, approxTokens: approxTokens(committed.length), text: `Context Engine: revision ${head.rev} was restored because committed runner events had not yet reached the Working Context. The intervening edit is kept in the Event Log; read the restored file before editing it again. ${sizeReadout(committed.length)}` };
-        }
-        this.materialize(head, committed);
+        this.materialize(head, this.snapshot(head.rev));
+        interruptedReceipt = this.pendingReceipt ?? repairedReceipt;
         rematerialized = true;
       } else {
         head.materialized = true;
