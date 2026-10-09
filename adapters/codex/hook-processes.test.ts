@@ -363,3 +363,55 @@ test('[PERF-010] a Stop that waits out most of its lease and then stalls in the 
   assert.ok(stopped.ms > 24_000, `the 9.5 s lease wait and the 15 s record timeout both elapsed: ${Math.round(stopped.ms)} ms`);
   assert.ok(stopped.ms < 29_000, `${Math.round(stopped.ms)} ms`);
 });
+
+/** Loses a read notice for an accepted edit, then has a Stop refused for it, as in a real turn. */
+async function loseNoticeThenRefuseStop(f: Fixture): Promise<void> {
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nNOTICE_EDIT_SENTINEL\n');
+  assert.notEqual((await runHook(f, SID, toolUse('Write', { file_path: wcPath(f) }, 'write completed'), {}, 30_000, true)).status, 0);
+  assert.ok(stoppedContinuation(await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'))));
+}
+
+/** The notice in `run`, checked by reading its digest-bound command against the current revision. */
+async function assertReadableNotice(f: Fixture, run: Run, revision: number): Promise<void> {
+  const notice = String(JSON.parse(run.stdout || '{}').hookSpecificOutput?.additionalContext ?? '');
+  assert.match(notice, new RegExp(`revision ${revision} was validated`), `the hook carries the notice: ${run.stdout || '(empty stdout)'}`);
+  const sha = /--sha ([0-9a-f]{64})/.exec(notice)![1]!;
+  const read = await startBounded([process.execPath, CLI, 'read', '--session', SID, '--sha', sha], { cwd: f.projectRoot, env: hookEnv(f), input: '', timeoutMs: 30_000 }).done;
+  assert.equal(read.status, 0, read.stdout + read.stderr);
+  assert.match(read.stdout, /NOTICE_EDIT_SENTINEL/);
+}
+
+test('[CDX-009] a notice whose prompt lost its output reaches the next tool hook for the revision that prompt committed', async () => {
+  const f = enabledFixture();
+  await loseNoticeThenRefuseStop(f);
+  const lostPrompt = await runHook(f, SID, prompt('NEXT_REQUEST'), {}, 30_000, true);
+  assert.notEqual(lostPrompt.status, 0, 'the prompt committed revision 3, but its output never reached Codex');
+  assert.equal(headRevision(f, SID), 3);
+  const tool = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
+  assert.equal(tool.status, 0, tool.stderr);
+  await assertReadableNotice(f, tool, 3);
+  const later = await runHook(f, SID, prompt('LATER_REQUEST'));
+  assert.equal(stoppedContinuation(later), false, later.stdout);
+  assert.doesNotMatch(later.stdout, /was validated/, 'the notice is delivered once');
+});
+
+test('[CDX-009] a notice reaches the tool hook that waited while a prompt committed and was then refused', async () => {
+  const f = enabledFixture();
+  await loseNoticeThenRefuseStop(f);
+  const state = layout(f.projectRoot, SID, f.stateDir).stateDir;
+  const ready = join(f.projectRoot, 'prompt-paused'), release = join(f.projectRoot, 'prompt-release'), pause = join(f.projectRoot, 'pause-prompt.mjs');
+  // Holds the prompt hook inside its lease, before its record call, until the tool hook is waiting.
+  writeFileSync(pause, `import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const spawn=cp.spawnSync;cp.spawnSync=function(...args){if(!fs.existsSync(${JSON.stringify(ready)})){fs.writeFileSync(${JSON.stringify(ready)},'ready');for(const until=Date.now()+8000;!fs.existsSync(${JSON.stringify(release)})&&Date.now()<until;)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return spawn.apply(this,args);};syncBuiltinESMExports();`);
+  const promptRun = startBounded([process.execPath, HOOK], { cwd: f.projectRoot, env: hookEnv(f, { NODE_OPTIONS: `--import=${pause}` }), input: JSON.stringify(event(f, SID, prompt('NEXT_REQUEST'))), timeoutMs: 30_000 });
+  let toolRun: ReturnType<typeof startBounded> | undefined;
+  try {
+    await waitUntil(() => existsSync(ready), 'the prompt holds the lease before its record call');
+    toolRun = startBounded([process.execPath, HOOK], { cwd: f.projectRoot, env: hookEnv(f), input: JSON.stringify(event(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'))), timeoutMs: 30_000 });
+    await waitUntil(() => readdirSync(state).some(name => name.startsWith('codex-record-pending-')), 'the tool hook published its intent and waits for the lease');
+  } finally { writeFileSync(release, 'release'); }
+  const promptDone = await promptRun.done, toolDone = await toolRun!.done;
+  assert.ok(stoppedContinuation(promptDone), `the prompt committed, then saw the tool intent: ${promptDone.stdout}`);
+  assert.equal(toolDone.status, 0, toolDone.stderr);
+  await assertReadableNotice(f, toolDone, headRevision(f, SID));
+});
