@@ -3,7 +3,7 @@
 // Every hook runs as its own bounded process with the event JSON on stdin, as Codex runs it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { tempDir } from '../../core/testing.ts';
@@ -11,8 +11,8 @@ import { setParticipation } from '../../core/index.ts';
 import { layout, sha } from '../../core/store.ts';
 import { world } from '../../setup/testing/world.ts';
 import {
-  denial, enabledFixture, headRevision, killGroup, loggedEvents, newContext, pendingMarkers, preCompact, prompt, runHook,
-  runnerResults, sessionBytes, startRunner, stop, stoppedContinuation, toolUse, type Fixture, type Run,
+  denial, enabledFixture, event, HOOK, headRevision, hookEnv, killGroup, loggedEvents, newContext, pendingMarkers, preCompact, prompt,
+  runHook, runnerResults, sessionBytes, startBounded, startRunner, stop, stoppedContinuation, toolUse, type Fixture, type Run,
 } from './testing/hook-process.ts';
 
 const SID = '01a10d16-4780-71c2-803c-80339e0708d3';
@@ -246,4 +246,40 @@ test('[CDX-009] an ordinary tool hook still delivers a pending read notice after
   const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
   assert.equal(stoppedContinuation(next), false, 'the session continues once the notice reached hook output');
   assert.match(readFileSync(wcPath(f), 'utf8'), /NOTICE_EDIT_SENTINEL[\s\S]*NEXT_REQUEST/);
+});
+
+test('[CORE-005] a PostToolUse record racing an apply_patch of the Working Context keeps the patch', {
+  todo: 'core defect, routed to U01: record() materializes over an edit written after its sync, and the edit reaches no file, revision or Event Log row (core/session.ts:502-511)',
+}, async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('RACE_TASK'))).status, 0);
+  const ready = join(f.projectRoot, 'materialize-paused'), release = join(f.projectRoot, 'materialize-release');
+  const pause = join(f.projectRoot, 'pause-materialize.mjs');
+  // Pauses the core CLI's record call after its sync, right before it renames the new file into place.
+  writeFileSync(pause, `import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
+if(process.argv[1]?.endsWith('/core/cli.ts')&&process.argv.includes('record')){
+  const rename=fs.renameSync;
+  fs.renameSync=function(from,to){
+    if(String(to).endsWith('/context.md')&&!fs.existsSync(${JSON.stringify(ready)})){
+      fs.writeFileSync(${JSON.stringify(ready)},'ready');
+      for(const until=Date.now()+15000;!fs.existsSync(${JSON.stringify(release)})&&Date.now()<until;)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+    }
+    return rename.call(this,from,to);
+  };
+  syncBuiltinESMExports();
+}`);
+  const toolA = startBounded([process.execPath, HOOK], {
+    cwd: f.projectRoot, env: hookEnv(f, { NODE_OPTIONS: `--import=${pause}` }), input: JSON.stringify(event(f, SID, toolUse('Bash', { command: 'make check' }, 'TOOL_A_OUTPUT'))), timeoutMs: 40_000,
+  });
+  try {
+    for (const until = Date.now() + 15_000; !existsSync(ready);) { assert.ok(Date.now() < until, 'tool A reached materialization'); await delay(20); }
+    writeFileSync(wcPath(f), `${readFileSync(wcPath(f), 'utf8')}\nPATCH_SENTINEL\n`);
+  } finally { writeFileSync(release, 'release'); }
+  const ranA = await toolA.done;
+  assert.equal(ranA.status, 0, ranA.stderr);
+  const toolB = await runHook(f, SID, toolUse('apply_patch', { file_path: wcPath(f) }, 'patch applied'));
+  assert.equal(toolB.status, 0, toolB.stderr);
+  const l = layout(f.projectRoot, SID, f.stateDir);
+  const stored = [readFileSync(wcPath(f), 'utf8'), readFileSync(l.events, 'utf8'), ...readdirSync(l.revisions).map(name => readFileSync(join(l.revisions, name), 'utf8'))];
+  assert.ok(stored.some(text => text.includes('PATCH_SENTINEL')), 'the patch is in the file, a revision or the Event Log');
 });
