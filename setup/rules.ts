@@ -127,6 +127,16 @@ function tomlKey(part: string): string {
   }
   return out;
 }
+/** The decoded key path of a [table] header line, or null for any other line. */
+function tableKey(line: string): string[] | null {
+  const match = /^\s*\[\s*((?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)(?:\s*\.\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+))*)\s*\]\s*(?:#.*)?$/.exec(line);
+  return match?.[1]?.match(/"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+/g)?.map(tomlKey) ?? null;
+}
+/** A table header in one spelling, so equivalent spellings of one table match the same pattern. */
+function canonicalHeader(line: string): string {
+  const key = tableKey(line);
+  return key ? `[${key.map((part) => (/^[\w-]+$/.test(part) ? part : JSON.stringify(part))).join('.')}]` : line.trim();
+}
 export function tomlTableBoolean(text: string, table: string[], key: string): boolean {
   return tomlTableScalar(text, table, key) === true;
 }
@@ -138,8 +148,7 @@ export function tomlTableScalar(text: string, table: string[], key: string): str
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (headers.has(i)) {
-      const match = /^\s*\[\s*((?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)(?:\s*\.\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+))*)\s*\]\s*(?:#.*)?$/.exec(line);
-      const parts = match?.[1]?.match(/"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+/g)?.map(tomlKey);
+      const parts = tableKey(line);
       active = !!parts && parts.length === table.length && parts.every((part,n) => part === table[n]);
     } else if (active && outside.has(i)) {
       const match = /^\s*("(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)\s*=\s*(true|false|"(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?$/.exec(line);
@@ -162,15 +171,17 @@ export function tomlTablesRule(ours: RegExp, emptyParents: RegExp): Rule {
   const strip = (text: string, before: string | null) => {
     const lines = text.split('\n');
     const positions = tomlHeaders(lines), priorLines = (before ?? '').split('\n');
-    const priorHeaders = new Set([...tomlHeaders(priorLines)].map(i => priorLines[i]!.trim()));
+    const priorHeaders = new Set([...tomlHeaders(priorLines)].map(i => canonicalHeader(priorLines[i]!)));
     const out: string[] = [];
     for (let i = 0; i < lines.length; ) {
       const line = lines[i]!;
-      const ourTable = positions.has(i) && ours.test(line.trim());
+      const header = positions.has(i) ? canonicalHeader(line) : null;
+      const named = (pattern: RegExp) => header !== null && (pattern.test(line.trim()) || pattern.test(header));
+      const ourTable = named(ours);
       let end = i + 1;
       while (end < lines.length && !positions.has(end)) end++;
       const body = lines.slice(i + 1, end);
-      const emptyParent = positions.has(i) && emptyParents.test(line.trim()) && !priorHeaders.has(line.trim()) && body.every((l) => l.trim() === '');
+      const emptyParent = header !== null && named(emptyParents) && !priorHeaders.has(header) && body.every((l) => l.trim() === '');
       if (!ourTable && !emptyParent) {
         out.push(line);
         i++;
