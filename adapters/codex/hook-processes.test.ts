@@ -12,7 +12,7 @@ import { setParticipation } from '../../core/index.ts';
 import { layout, sha } from '../../core/store.ts';
 import { world } from '../../setup/testing/world.ts';
 import {
-  denial, enabledFixture, event, HOOK, headRevision, hookEnv, killGroup, loggedEvents, newContext, pendingMarkers, preCompact, prompt,
+  CLI, denial, enabledFixture, event, HOOK, headRevision, hookEnv, killGroup, loggedEvents, newContext, pendingMarkers, preCompact, prompt,
   runHook, runnerResults, sessionBytes, startBounded, startRunner, stop, stoppedContinuation, toolUse, type Fixture, type Run,
 } from './testing/hook-process.ts';
 
@@ -283,4 +283,28 @@ if(process.argv[1]?.endsWith('/core/cli.ts')&&process.argv.includes('record')){
   const l = layout(f.projectRoot, SID, f.stateDir);
   const stored = [readFileSync(wcPath(f), 'utf8'), readFileSync(l.events, 'utf8'), ...readdirSync(l.revisions).map(name => readFileSync(join(l.revisions, name), 'utf8'))];
   assert.ok(stored.some(text => text.includes('PATCH_SENTINEL')), 'the patch is in the file, a revision or the Event Log');
+});
+
+test('[CDX-009] the next prompt after a refused Stop delivers the pending read notice and the session recovers', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nNOTICE_EDIT_SENTINEL\n');
+  const lost = await runHook(f, SID, toolUse('Write', { file_path: wcPath(f) }, 'write completed'), {}, 30_000, true);
+  assert.notEqual(lost.status, 0, 'the notice never reached hook output');
+  assert.ok(stoppedContinuation(await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'))), 'the Stop cannot hide the edit');
+  const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(stoppedContinuation(next), false, next.stdout);
+  const notice = String(JSON.parse(next.stdout).hookSpecificOutput?.additionalContext ?? '');
+  const sha = /--sha ([0-9a-f]{64})/.exec(notice)?.[1];
+  assert.ok(sha, `the prompt carries a read notice: ${notice}`);
+  assert.doesNotMatch(notice, /NOTICE_EDIT_SENTINEL|NEXT_REQUEST/);
+  const read = await startBounded([process.execPath, CLI, 'read', '--session', SID, '--sha', sha], { cwd: f.projectRoot, env: hookEnv(f), input: '', timeoutMs: 30_000 }).done;
+  assert.equal(read.status, 0, read.stdout + read.stderr);
+  assert.match(read.stdout, /NOTICE_EDIT_SENTINEL[\s\S]*NEXT_REQUEST/, 'the notice names the revision the prompt committed');
+  assert.equal((await runHook(f, SID, newContext)).stdout, '', 'a reset is allowed again');
+  assert.equal((await runHook(f, SID, preCompact)).stdout, '', 'compaction is allowed again');
+  const later = await runHook(f, SID, prompt('LATER_REQUEST'));
+  assert.equal(stoppedContinuation(later), false, later.stdout);
+  assert.doesNotMatch(later.stdout, /was validated/, 'the notice is delivered once');
 });
