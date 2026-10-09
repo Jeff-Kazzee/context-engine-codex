@@ -176,6 +176,8 @@ function privateWorkingContextFile(path: string): void {
   } finally { closeSync(fd); }
 }
 
+const MANAGED_IGNORE = '# Context Engine Working Contexts are never committed.\n*\n';
+
 /** Creates the private state directories (mode 0700) and the Working Context directory. */
 export function ensureDirs(l: Layout, stateRoot: string): void {
   requireSupportedPlatform();
@@ -193,7 +195,7 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
   try {
     // O_EXCL does not follow even a dangling symlink at this name.
     const file = openSync(ignore, 'exclusive-nofollow');
-    try { writeFileSync(file, '# Context Engine Working Contexts are never committed.\n*\n'); fsyncSync(file); }
+    try { writeFileSync(file, MANAGED_IGNORE); fsyncSync(file); }
     finally { closeSync(file); }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
@@ -202,6 +204,14 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
     for (const deadline = Date.now() + 2_000; Buffer.isBuffer(existing) && existing.length === 0 && Date.now() < deadline;) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
       existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+    }
+    // Still empty: its creator died before writing it. Only that exact state is repaired. Two
+    // repairers publish the same bytes.
+    const found = Buffer.isBuffer(existing) && existing.length === 0 ? lstatSync(ignore) : undefined;
+    if (found?.isFile() && found.nlink === 1 && found.size === 0 && found.owner === 'current') {
+      const tmp = writeTemp(ignore, MANAGED_IGNORE, 'ignore-tmp');
+      try { renameSync(tmp, ignore); } finally { try { unlinkSync(tmp); } catch {} }
+      existing = Buffer.from(MANAGED_IGNORE);
     }
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
@@ -415,8 +425,19 @@ export function assertWorkingContextDir(wc: string): void {
  * descriptor must not be a credential. Throws (fails closed) when /proc is unavailable.
  */
 export function readWorkingContextFile(wc: string): Buffer | undefined | 'not-a-file';
-export function readWorkingContextFile(wc: string, maxBytes: number): Buffer | undefined | 'not-a-file' | 'too-large';
-export function readWorkingContextFile(wc: string, maxBytes?: number): Buffer | undefined | 'not-a-file' | 'too-large' {
+export function readWorkingContextFile(wc: string, maxBytes: number): WorkingContextRead;
+export function readWorkingContextFile(wc: string, maxBytes?: number): WorkingContextRead {
+  const fd = openWorkingContext(wc);
+  if (typeof fd !== 'number') return fd;
+  try { return maxBytes === undefined ? readFileSync(fd) : readOpened(fd, maxBytes); }
+  finally { closeSync(fd); }
+}
+
+/** What a Working Context read found: its bytes, nothing, or why its bytes were not read. */
+export type WorkingContextRead = Buffer | undefined | 'not-a-file' | 'too-large';
+
+/** Opens the Working Context with every check readWorkingContextFile describes. */
+function openWorkingContext(wc: string): number | undefined | 'not-a-file' {
   requireSupportedPlatform();
   assertWorkingContextDir(wc);
   let fd: number;
@@ -433,23 +454,55 @@ export function readWorkingContextFile(wc: string, maxBytes?: number): Buffer | 
     const st = fstatSync(fd);
     const real = openedPath(fd);
     if (real !== wc) throw new Error(`the Working Context's directory changed while it was being opened (${wc} led to ${real}); refusing to read it`);
-    if (isCredential(real, st) || !st.isFile() || st.nlink !== 1) return 'not-a-file';
-    if (maxBytes !== undefined) {
-      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('invalid Working Context read bound');
-      if (st.size > maxBytes) return 'too-large';
-      const chunk = Buffer.alloc(Math.min(65536, maxBytes + 1)), parts: Buffer[] = [];
-      let total = 0;
-      for (;;) {
-        const n = readSync(fd, chunk, 0, Math.min(chunk.length, maxBytes + 1 - total), null);
-        if (!n) return Buffer.concat(parts, total);
-        total += n;
-        if (total > maxBytes) return 'too-large';
-        parts.push(Buffer.from(chunk.subarray(0, n)));
-      }
-    }
-    return readFileSync(fd);
-  } finally {
+    if (!isCredential(real, st) && st.isFile() && st.nlink === 1) return fd;
+  } catch (e) {
     closeSync(fd);
+    throw e;
+  }
+  closeSync(fd);
+  return 'not-a-file';
+}
+
+/** Reads an opened Working Context from its first byte, refusing more than `maxBytes`. */
+function readOpened(fd: number, maxBytes: number): Buffer | 'too-large' {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('invalid Working Context read bound');
+  if (fstatSync(fd).size > maxBytes) return 'too-large';
+  const chunk = Buffer.alloc(Math.min(65536, maxBytes + 1)), parts: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const n = readSync(fd, chunk, 0, Math.min(chunk.length, maxBytes + 1 - total), total);
+    if (!n) return Buffer.concat(parts, total);
+    total += n;
+    if (total > maxBytes) return 'too-large';
+    parts.push(Buffer.from(chunk.subarray(0, n)));
+  }
+}
+
+/**
+ * Writes `data` over the Working Context. Just before the rename, `keep` sees what the file holds.
+ * Keeping an edit appends to the Event Log and takes time, so while `keep` returns true the file is
+ * opened and checked again, up to four times. After the rename, `keep` also sees anything an
+ * in-place write put into the replaced file since the last check. An editor that renames its own
+ * file over the Working Context after the last check is still overwritten unseen, because Node
+ * offers no renameat2(RENAME_EXCHANGE) and the core has no native dependencies.
+ */
+export function replaceWorkingContext(wc: string, data: string, maxBytes: number, keep: (read: WorkingContextRead) => boolean): void {
+  const last: { fd?: number; read: WorkingContextRead } = { read: undefined };
+  try {
+    atomicWrite(wc, data, 'wc-tmp', () => {
+      for (let look = 0; look < 4; look++) {
+        if (last.fd !== undefined) { closeSync(last.fd); last.fd = undefined; }
+        const opened = openWorkingContext(wc);
+        last.fd = typeof opened === 'number' ? opened : undefined;
+        last.read = last.fd === undefined ? opened as undefined | 'not-a-file' : readOpened(last.fd, maxBytes);
+        if (!keep(last.read)) return;
+      }
+    });
+    if (last.fd === undefined) return;
+    const after = readOpened(last.fd, maxBytes);
+    if (Buffer.isBuffer(after) && Buffer.isBuffer(last.read) ? !after.equals(last.read) : after !== last.read) keep(after);
+  } finally {
+    if (last.fd !== undefined) closeSync(last.fd);
   }
 }
 

@@ -14,7 +14,8 @@ export type CrashPoint =
   | 'wc-tmp' // Working Context temp file written, not renamed
   | 'lock-tmp' // lock temp file written, not renamed
   | 'recovery-checkpoint-tmp' // optional recovery cache publication
-  | 'frame-key-tmp'; // frame-key temp file written, not published
+  | 'frame-key-tmp' // frame-key temp file written, not published
+  | 'ignore-tmp'; // managed .gitignore repair written, not renamed
 
 export class InjectedCrash extends Error {}
 

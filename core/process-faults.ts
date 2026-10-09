@@ -1,8 +1,8 @@
 // INTERNAL test preload, private to the core's own tests. Not exported from index.ts.
 //
 // `node --import <this file> core/cli.ts ...` with CE_TEST_FAULT set to a JSON FaultPlan stops a
-// real process at one filesystem call: it sends itself SIGKILL there, or blocks until the test
-// releases it. Unlike the in-process seam in faults.ts, a kill runs no finally block, releases no
+// real process at one filesystem call: it sends itself SIGKILL there, blocks until the test
+// releases it, or notes that it got there. Unlike the in-process seam in faults.ts, a kill runs no finally block, releases no
 // lock or lease and closes no descriptor, exactly like a crash. Nothing is patched when the
 // variable is unset.
 import fs from 'node:fs';
@@ -16,8 +16,11 @@ export interface FaultPlan {
   contains?: string;
   /** Before the call, after it returns, or (writeSync only) after writing the first half of its bytes. */
   at: 'before' | 'after' | 'half';
-  /** kill: SIGKILL this process. block: create `<dir>/blocked`, wait for `<dir>/release`, and self-kill after 60 s. */
-  action: 'kill' | 'block';
+  /**
+   * kill: SIGKILL this process. block: create `<dir>/blocked`, wait for `<dir>/release`, and
+   * self-kill after 60 s. note: append this pid to `<dir>/notes` and go on.
+   */
+  action: 'kill' | 'block' | 'note';
   dir?: string;
 }
 
@@ -43,6 +46,7 @@ function install(plan: FaultPlan): void {
   const act = (): void => {
     fired = true;
     if (plan.action === 'kill') for (;;) { process.kill(process.pid, 'SIGKILL'); sleep(1000); }
+    if (plan.action === 'note') return void native.appendFileSync!(`${plan.dir}/notes`, `${process.pid}\n`);
     native.writeFileSync!(`${plan.dir}/blocked`, String(process.pid));
     const deadline = Date.now() + 60_000;
     while (!native.existsSync!(`${plan.dir}/release`)) {

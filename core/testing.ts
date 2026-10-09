@@ -12,10 +12,18 @@ let root: string | undefined;
 
 // Each test file runs in its own process. Its directories share one root, which goes when that
 // process exits, together with anything a test renamed or created beside them.
-process.on('exit', () => {
+function removeRoot(): void {
   if (root === undefined) return;
   try { rmSync(root, { recursive: true, force: true }); }
   catch (e) { process.stderr.write(`could not remove test directory ${root}: ${(e as Error).message}\n`); }
+  root = undefined;
+}
+process.on('exit', removeRoot);
+// A runner timeout or cancel stops a test process with SIGTERM, which skips 'exit'. Clean up, then
+// die of the same signal.
+process.once('SIGTERM', () => {
+  removeRoot();
+  process.kill(process.pid, 'SIGTERM');
 });
 
 export function tempDir(label: string): string {

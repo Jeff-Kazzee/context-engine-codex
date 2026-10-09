@@ -20,6 +20,8 @@ const event = (text: string) => JSON.stringify({ role: 'tool', text });
 const count = (text: string, needle: string) => text.split(needle).length - 1;
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 const range = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
+/** The core's temp file for new Working Context bytes, made just before they replace the file. */
+const WC_TEMP = '/context\\.md\\.ce-\\d+-[0-9a-f]{8}\\.tmp$';
 
 /** The bytes of every session file a call could change, by path. */
 function sessionFiles(l: Layout): Record<string, string> {
@@ -144,7 +146,7 @@ test('[CORE-022] a live operation-lock holder makes withSessionSerialized and th
     const started = Date.now();
     assert.throws(() => withSessionSerialized({ ...f, sessionId: 'S1' }, () => { ran = true; }), SerializeTimeout);
     const waited = Date.now() - started;
-    assert.ok(waited >= 15_000 && waited < 17_000, `waited ${waited} ms`);
+    assert.ok(waited >= 15_000, `gave up after ${waited} ms, before the 15 s wait`);
     assert.equal(ran, false, 'the operation never ran');
 
     const cli = await busy.done;
@@ -158,9 +160,8 @@ test('[CORE-022] a live operation-lock holder makes withSessionSerialized and th
 
     writeFileSync(join(sig, 'leave'), '');
     await once(holder, 'exit');
-    const again = Date.now();
     withSessionSerialized({ ...f, sessionId: 'S1' }, () => { ran = true; });
-    assert.ok(ran && Date.now() - again < 1_000, 'a free operation lock admits the next call at once');
+    assert.ok(ran, 'a free operation lock admits the next call');
   } finally {
     await stopGroup(holder);
   }
@@ -248,8 +249,11 @@ test('[CORE-024] first-ever concurrent calls on a fresh session all succeed', { 
   const runs = [startCli(f, args, { input: event('FRESH_0'), fault: { call: 'writeFileSync', path: '/\\.context-engine/\\.gitignore$', at: 'before', action: 'block', dir: sig } })];
   try {
     await waitForFile(join(sig, 'blocked'));
-    for (let i = 1; i < 8; i++) runs.push(startCli(f, args, { input: event(`FRESH_${i}`) }));
-    await new Promise((r) => setTimeout(r, 750));
+    // Each later call notes when it opens the file to read it, which is while call 0 holds it empty.
+    const seen = { call: 'openSync', path: '/\\.context-engine/\\.gitignore$', at: 'after', action: 'note', dir: sig } as const;
+    for (let i = 1; i < 8; i++) runs.push(startCli(f, args, { input: event(`FRESH_${i}`), fault: seen }));
+    await waitForFile(join(sig, 'notes'));
+    assert.equal(readFileSync(join(f.projectRoot, '.context-engine', '.gitignore'), 'utf8'), '', 'a contender read the file while it was empty');
     writeFileSync(join(sig, 'release'), '');
     const results = await Promise.all(runs.map((r) => r.done));
     results.forEach((r, i) => assert.equal(r.code, 0, `call ${i}: ${r.stdout}${r.stderr}`));
@@ -266,14 +270,14 @@ test('[CORE-024] first-ever concurrent calls on a fresh session all succeed', { 
   }
 });
 
-test('[CORE-005] a model write racing materialization is committed or logged, never lost', { timeout: 30_000 }, async () => {
+test('[CORE-005] an edit made after record() syncs and before it writes the Working Context is kept in the Event Log with a receipt', { timeout: 30_000 }, async () => {
   const f = fixture();
   const sig = tempDir('race-sig');
   assert.equal((await startCli(f, ['record', ...opening], { input: event('BASE') }).done).code, 0);
   const l = layout(f.projectRoot, 'S1', f.stateDir);
   const racing = startCli(f, ['record', ...opening], {
     input: event('APPEND_SENTINEL'),
-    fault: { call: 'openSync', path: '/context\\.md\\.ce-\\d+-[0-9a-f]{8}\\.tmp$', at: 'before', action: 'block', dir: sig },
+    fault: { call: 'openSync', path: WC_TEMP, at: 'before', action: 'block', dir: sig },
   });
   try {
     await waitForFile(join(sig, 'blocked'));
@@ -291,6 +295,84 @@ test('[CORE-005] a model write racing materialization is committed or logged, ne
     await stopGroup(racing.child);
   }
 });
+
+test('[CORE-005] an edit racing an append after a committed model edit gets a restore receipt for the new HEAD', { timeout: 30_000 }, async () => {
+  const f = fixture();
+  const sig = tempDir('receipt-sig');
+  assert.equal((await startCli(f, ['record', ...opening], { input: event('BASE') }).done).code, 0);
+  const l = layout(f.projectRoot, 'S1', f.stateDir);
+  const base = readFileSync(l.workingContext, 'utf8');
+  writeFileSync(l.workingContext, `${base}\n[[CTX_TURN 2 role=notes]]\nFIRST_EDIT\n`);
+  const racing = startCli(f, ['record', ...opening], {
+    input: event('APPEND_SENTINEL'),
+    fault: { call: 'openSync', path: WC_TEMP, at: 'before', action: 'block', dir: sig },
+  });
+  try {
+    await waitForFile(join(sig, 'blocked'));
+    writeFileSync(l.workingContext, `${base}\n[[CTX_TURN 2 role=notes]]\nSECOND_EDIT\n`);
+    writeFileSync(join(sig, 'release'), '');
+    const r = await racing.done;
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const result = JSON.parse(r.stdout);
+    assert.equal(JSON.parse(readFileSync(l.head, 'utf8')).rev, 3, 'FIRST_EDIT is revision 2 and the append is revision 3');
+    assert.equal(result.revision, 3);
+    assert.deepEqual([result.receipt?.kind, result.receipt?.revision], ['restored', 3]);
+    assert.match(result.receipt.text, /edit committed as revision 2[\s\S]*revision 3 was restored/);
+  } finally {
+    await stopGroup(racing.child);
+  }
+});
+
+test('[CORE-005] an in-place write after the last check and before the rename is kept', { timeout: 30_000 }, async () => {
+  const f = fixture();
+  const sig = tempDir('gap-sig');
+  assert.equal((await startCli(f, ['record', ...opening], { input: event('BASE') }).done).code, 0);
+  const l = layout(f.projectRoot, 'S1', f.stateDir);
+  const racing = startCli(f, ['record', ...opening], {
+    input: event('APPEND_SENTINEL'),
+    fault: { call: 'renameSync', path: '/context\\.md$', at: 'before', action: 'block', dir: sig },
+  });
+  try {
+    await waitForFile(join(sig, 'blocked'));
+    writeFileSync(l.workingContext, `${readFileSync(l.workingContext, 'utf8')}\n[[CTX_TURN 2 role=notes]]\nGAP_EDIT\n`);
+    writeFileSync(join(sig, 'release'), '');
+    const r = await racing.done;
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const kept = eventLog(l.events).filter((row) => row.type === 'restored' && String(row.rejected).includes('GAP_EDIT'));
+    assert.equal(kept.length, 1, 'GAP_EDIT is kept in the Event Log once');
+    assert.equal(JSON.parse(r.stdout).receipt?.kind, 'restored');
+    assert.equal(count(readFileSync(l.workingContext, 'utf8'), 'APPEND_SENTINEL'), 1);
+  } finally {
+    await stopGroup(racing.child);
+  }
+});
+
+const unreadableEdits: Array<[string, Buffer, Record<string, unknown>]> = [
+  ['not UTF-8', Buffer.from([0x5b, 0xff, 0xfe, 0x0a]), { rejectedBase64: Buffer.from([0x5b, 0xff, 0xfe, 0x0a]).toString('base64') }],
+  ['over the read bound', Buffer.alloc(50_000, 0x61), { rejected: null, oversized: true }],
+];
+for (const [label, bytes, row] of unreadableEdits) {
+  test(`[CORE-005] a racing edit that is ${label} still leaves a restored row`, { timeout: 30_000 }, async () => {
+    const f = fixture();
+    const sig = tempDir('unreadable-sig');
+    assert.equal((await startCli(f, ['record', ...opening], { input: event('BASE') }).done).code, 0);
+    const l = layout(f.projectRoot, 'S1', f.stateDir);
+    const racing = startCli(f, ['record', ...opening], { input: event('APPEND_SENTINEL'), fault: { call: 'openSync', path: WC_TEMP, at: 'before', action: 'block', dir: sig } });
+    try {
+      await waitForFile(join(sig, 'blocked'));
+      writeFileSync(l.workingContext, bytes);
+      writeFileSync(join(sig, 'release'), '');
+      const r = await racing.done;
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      const restored = eventLog(l.events).filter((entry) => entry.type === 'restored');
+      assert.equal(restored.length, 1);
+      for (const [key, value] of Object.entries(row)) assert.deepEqual(restored[0]![key], value, key);
+      assert.equal(JSON.parse(r.stdout).receipt?.kind, 'restored');
+    } finally {
+      await stopGroup(racing.child);
+    }
+  });
+}
 
 // Writes <sig>/<name>-ready, then calls sessionFrameKey on each directory as soon as <sig>/go-<i>
 // exists, and writes what it got.

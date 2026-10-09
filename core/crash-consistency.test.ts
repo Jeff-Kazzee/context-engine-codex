@@ -1,7 +1,7 @@
 // Commit durability. A spy records the syscalls of one record() call. The order test checks that
 // each publication flushes before it is made visible. The power-loss test replays the trace against
-// a model in which only flushed bytes and flushed directory entries survive, and opens every image
-// a crash could leave.
+// a model in which only flushed bytes and flushed directory entries survive, and opens each image
+// that model allows after one of the traced calls. It cannot show what a real filesystem keeps.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

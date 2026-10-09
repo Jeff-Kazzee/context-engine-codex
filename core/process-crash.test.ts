@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { openSession } from './index.ts';
 import type { FaultPlan } from './process-faults.ts';
@@ -145,13 +145,122 @@ test('[CORE-023] a CLI process killed inside the operation lock and append lease
   const l = layout(f.projectRoot, 'S1', f.stateDir);
   assert.ok(existsSync(`${l.lock}.op`) && existsSync(`${l.events}.append.lock`), 'the kill landed inside both');
 
-  const started = Date.now();
+  // Exit 0 means both dead holders were taken over, not waited out: a live holder ends in SerializeTimeout.
   const next = await startCli(f, ['record', ...opening], { input: event('SECOND') }).done;
   assert.equal(next.code, 0, next.stdout + next.stderr);
-  assert.ok(Date.now() - started < 2_000, `took ${Date.now() - started} ms`);
   for (const lease of [`${l.lock}.op`, `${l.events}.append.lock`]) assert.ok(!existsSync(lease), `${lease} is not stranded`);
   const text = readFileSync(l.workingContext, 'utf8');
   assert.equal(count(text, 'SECOND'), 1);
   assert.equal(count(text, 'FIRST'), 0);
   eventLog(l.events);
+});
+
+test('[CORE-005] a recovery killed after keeping a stale edit keeps it once on retry', { timeout: 30_000 }, async () => {
+  const f = fixture();
+  const owner = ownerProcess();
+  try {
+    const own = [...opening, '--owner-pid', String(owner.pid)];
+    assert.equal((await startCli(f, ['record', ...own], { input: event('BASE') }).done).code, 0);
+    const halted = await startCli(f, ['record', ...own], { input: event('SENTINEL'), fault: { call: 'renameSync', path: '/HEAD$', at: 'after', action: 'kill' } }).done;
+    assert.equal(halted.signal, 'SIGKILL', halted.stderr);
+    const l = layout(f.projectRoot, 'S1', f.stateDir);
+    writeFileSync(l.workingContext, `${readFileSync(l.workingContext, 'utf8')}\n[[CTX_TURN 2 role=notes]]\nSTALE_EDIT\n`);
+    const kept = () => eventLog(l.events).filter((r) => r.type === 'restored' && String(r.rejected).includes('STALE_EDIT')).length;
+
+    const crashed = await startCli(f, ['sync', ...own], { fault: { call: 'renameSync', path: '/context\\.md$', at: 'before', action: 'kill' } }).done;
+    assert.equal(crashed.signal, 'SIGKILL', crashed.stderr);
+    assert.equal(kept(), 1, 'the first recovery kept the edit before it died');
+    const retried = await startCli(f, ['sync', ...own]).done;
+    assert.equal(retried.code, 0, retried.stdout + retried.stderr);
+    assert.equal(kept(), 1, 'the retried recovery does not keep the same edit twice');
+    assert.equal(JSON.parse(retried.stdout).receipt?.kind, 'restored', 'the retry still reports the restore');
+    assert.equal(count(assertRecovered(f).text, 'SENTINEL'), 1);
+  } finally {
+    await stopGroup(owner);
+  }
+});
+
+test('[CORE-005] a file renamed over the Working Context while a stale edit is logged is kept too', { timeout: 30_000 }, async () => {
+  const f = fixture();
+  const owner = ownerProcess();
+  const sig = tempDir('relook-sig');
+  try {
+    const own = [...opening, '--owner-pid', String(owner.pid)];
+    assert.equal((await startCli(f, ['record', ...own], { input: event('BASE') }).done).code, 0);
+    const halted = await startCli(f, ['record', ...own], { input: event('SENTINEL'), fault: { call: 'renameSync', path: '/HEAD$', at: 'after', action: 'kill' } }).done;
+    assert.equal(halted.signal, 'SIGKILL', halted.stderr);
+    const l = layout(f.projectRoot, 'S1', f.stateDir);
+    const base = readFileSync(l.workingContext, 'utf8');
+    writeFileSync(l.workingContext, `${base}\n[[CTX_TURN 2 role=notes]]\nFIRST_STALE\n`);
+
+    const recovering = startCli(f, ['sync', ...own], { fault: { call: 'fsyncSync', path: '/events\\.jsonl$', contains: '"type":"restored"', at: 'after', action: 'block', dir: sig } });
+    await waitForFile(join(sig, 'blocked'));
+    const replacement = join(dirname(l.workingContext), 'editor-save');
+    writeFileSync(replacement, `${base}\n[[CTX_TURN 2 role=notes]]\nRENAMED_IN\n`);
+    renameSync(replacement, l.workingContext);
+    writeFileSync(join(sig, 'release'), '');
+    const r = await recovering.done;
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const rejected = eventLog(l.events).filter((row) => row.type === 'restored').map((row) => String(row.rejected));
+    assert.equal(rejected.filter((t) => t.includes('FIRST_STALE')).length, 1);
+    assert.equal(rejected.filter((t) => t.includes('RENAMED_IN')).length, 1, 'the check after the append saw the renamed file');
+    assert.equal(count(assertRecovered(f).text, 'SENTINEL'), 1);
+  } finally {
+    await stopGroup(owner);
+  }
+});
+
+test('[CORE-005] a Working Context directory swapped for a link during a kept edit refuses with the link error', { timeout: 30_000 }, async () => {
+  const f = fixture();
+  const owner = ownerProcess();
+  const sig = tempDir('swap-sig');
+  try {
+    const own = [...opening, '--owner-pid', String(owner.pid)];
+    assert.equal((await startCli(f, ['record', ...own], { input: event('BASE') }).done).code, 0);
+    const halted = await startCli(f, ['record', ...own], { input: event('SENTINEL'), fault: { call: 'renameSync', path: '/HEAD$', at: 'after', action: 'kill' } }).done;
+    assert.equal(halted.signal, 'SIGKILL', halted.stderr);
+    const l = layout(f.projectRoot, 'S1', f.stateDir);
+    writeFileSync(l.workingContext, `${readFileSync(l.workingContext, 'utf8')}\n[[CTX_TURN 2 role=notes]]\nSTALE_EDIT\n`);
+
+    const recovering = startCli(f, ['sync', ...own], { fault: { call: 'fsyncSync', path: '/events\\.jsonl$', contains: '"type":"restored"', at: 'after', action: 'block', dir: sig } });
+    await waitForFile(join(sig, 'blocked'));
+    const dir = dirname(l.workingContext);
+    renameSync(dir, `${dir}-moved`);
+    symlinkSync(`${dir}-moved`, dir);
+    writeFileSync(join(sig, 'release'), '');
+    const r = await recovering.done;
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(JSON.parse(r.stdout).error, /symbolic link/, 'the refusal names the link, not a descriptor error from cleanup');
+  } finally {
+    await stopGroup(owner);
+  }
+});
+
+test('[CORE-001] a first open killed between creating and writing the managed .gitignore does not wedge the project', { timeout: 30_000 }, async () => {
+  const f = fixture();
+  const ignore = join(f.projectRoot, '.context-engine', '.gitignore');
+  const killed = await startCli(f, ['record', ...opening], { input: event('FIRST'), fault: { call: 'writeFileSync', path: '/\\.context-engine/\\.gitignore$', at: 'before', action: 'kill' } }).done;
+  assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+  assert.equal(readFileSync(ignore, 'utf8'), '', 'the kill left an empty managed .gitignore');
+
+  const next = await startCli(f, ['record', ...opening], { input: event('SECOND') }).done;
+  assert.equal(next.code, 0, next.stdout + next.stderr);
+  assert.equal(readFileSync(ignore, 'utf8').trim().split('\n').at(-1), '*');
+  assert.equal(count(readFileSync(layout(f.projectRoot, 'S1', f.stateDir).workingContext, 'utf8'), 'SECOND'), 1);
+
+  // Only an empty, single-name file of this user is repaired. Anything else still refuses unchanged.
+  for (const [label, prepare, refusal] of [
+    ['foreign rules', (path: string) => writeFileSync(path, 'node_modules\n'), /blanket \* rule/],
+    ['a hard link', (path: string) => { const other = join(tempDir('ignore-link'), 'other'); writeFileSync(other, ''); linkSync(other, path); }, /regular, unlinked/],
+  ] as const) {
+    const g = fixture();
+    mkdirSync(join(g.projectRoot, '.context-engine'), { mode: 0o700 });
+    const path = join(g.projectRoot, '.context-engine', '.gitignore');
+    prepare(path);
+    const before = readFileSync(path);
+    const refused = await startCli(g, ['record', ...opening], { input: event('REFUSED') }).done;
+    assert.equal(refused.code, 1, `${label}: ${refused.stdout}`);
+    assert.match(JSON.parse(refused.stdout).error, refusal, label);
+    assert.deepEqual(readFileSync(path), before, `${label} is left unchanged`);
+  }
 });
