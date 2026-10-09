@@ -62,3 +62,24 @@ jobs:
       - name: Verify pure operations and no-write refusal on the actual host
         if: runner.os != 'Linux'
         run: node --test --test-concurrency=1 core/platform.test.ts
+      - name: Prepare the pinned Codex offline test runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          runtime="$RUNNER_TEMP/ce-codex-runtime"
+          mkdir -p "$runtime"
+          printf '{"private":true}\n' > "$runtime/package.json"
+          pnpm --dir "$runtime" add --lockfile-only --ignore-scripts --save-exact @openai/codex@0.161.0-linux-x64
+          pnpm --dir "$runtime" install --frozen-lockfile --ignore-scripts
+          binary="$runtime/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
+          printf '9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c  %s\n' "$binary" | sha256sum --check
+      - name: Run the native Codex hook contract without network access
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          binary="$RUNNER_TEMP/ce-codex-runtime/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
+          home="$RUNNER_TEMP/ce-codex-home"
+          mkdir -p "$home"
+          sudo -n unshare --net -- runuser --user "$(id -un)" -- env -i \
+            PATH="$PATH" HOME="$home" CONTEXT_ENGINE_NATIVE_CODEX="$binary" \
+            node --test --test-concurrency=1 setup/native-codex.test.ts
