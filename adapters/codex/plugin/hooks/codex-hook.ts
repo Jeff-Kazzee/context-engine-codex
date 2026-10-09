@@ -286,7 +286,10 @@ async function main(input: HookInput): Promise<void> {
     const observed = core(input, 'sync');
     const delivery = observed.delivery;
     let pending: Extract<ReadNoticeState, { kind: 'pending' }> | undefined;
-    if (observed.revisionKind === 'model-edit' && delivery && delivery.revision === observed.revision
+    // A notice still owed from an earlier hook moves to the current revision, which still holds the
+    // edit after a prompt committed past it. Its digest must be the current one for the read to work.
+    const owed = previous.kind !== 'idle';
+    if ((observed.revisionKind === 'model-edit' || owed) && delivery && delivery.revision === observed.revision
         && delivery.revision > previous.lastNotifiedRevision && /^[a-f0-9]{64}$/.test(delivery.sha256)) {
       pending = { kind: 'pending', lastNotifiedRevision: previous.lastNotifiedRevision,
         revision: delivery.revision, sha256: delivery.sha256 };
