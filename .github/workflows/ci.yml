@@ -73,7 +73,7 @@ jobs:
           pnpm --dir "$runtime" install --frozen-lockfile --ignore-scripts
           binary="$runtime/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
           printf '9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c  %s\n' "$binary" | sha256sum --check
-      - name: Run the native Codex hook contract without network access
+      - name: Run the native Codex hook trust and status check without network access
         if: runner.os == 'Linux'
         shell: bash
         run: |

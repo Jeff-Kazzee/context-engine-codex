@@ -1,7 +1,8 @@
 // The pinned native Codex binary, offline: it lists the installed plugin's five hooks, trusts them
 // through its own app-server, and renders Context Engine guidance only in the enabled project.
 // CI runs this file under `unshare --net` with CONTEXT_ENGINE_NATIVE_CODEX set (.github/workflows/ci.yml).
-// Without that variable it is skipped.
+// Without that variable it is skipped. It runs no hook event, so it is setup and status evidence,
+// not delivery evidence.
 import '../adapters/codex/testing/private-tmp.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,7 +15,7 @@ import { world } from './testing/world.ts';
 const NATIVE = process.env.CONTEXT_ENGINE_NATIVE_CODEX;
 const VERSION = 'codex-cli 0.161.0';
 
-test('[LIFE-017] the pinned native Codex trusts all five hooks offline and changes only the enabled project', {
+test('[CDX-023] the pinned native Codex reports the reset mode only after it trusts all five hooks, and other projects keep their input', {
   skip: NATIVE ? false : 'CONTEXT_ENGINE_NATIVE_CODEX does not name a pinned native Codex binary',
 }, () => {
   const codex = NATIVE!;
