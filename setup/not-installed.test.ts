@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tree, world } from './testing/world.ts';
+
+const read = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8') : null);
 
 test('[LIFE-002] Codex uninstall with no install record changes nothing', () => {
   const w = world();
@@ -15,4 +17,20 @@ test('[LIFE-002] Codex uninstall with no install record changes nothing', () => 
   assert.deepEqual(tree(w.project), project);
   // The setup lock needs its private directory. Nothing else is written there.
   assert.deepEqual(Object.entries(tree(w.stateDir)).filter(([, kind]) => kind !== 'dir'), []);
+});
+
+test('[LIFE-002] Codex uninstall with a missing install record reports or refuses project reverts', () => {
+  const w = world();
+  assert.equal(w.ce(['install']).status, 0);
+  assert.equal(w.ce(['enable']).status, 0);
+  rmSync(join(w.stateDir, 'setup', 'codex.json'));
+  const projectConfig = join(w.project, '.codex', 'config.toml');
+  const pointers = join(w.stateDir, 'setup', 'projects');
+  const config = read(projectConfig), pointerTree = tree(pointers);
+
+  const r = w.ce(['uninstall']);
+  assert.notEqual(r.status, 0, r.stdout);
+  assert.match(r.stderr, /not installed by Context Engine/);
+  const unchanged = read(projectConfig) === config && JSON.stringify(tree(pointers)) === JSON.stringify(pointerTree);
+  assert.ok(unchanged || r.stdout.includes(projectConfig), `project files changed without a report. stdout: ${JSON.stringify(r.stdout)}, config now: ${JSON.stringify(read(projectConfig))}`);
 });
