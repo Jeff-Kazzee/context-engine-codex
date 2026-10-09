@@ -343,3 +343,23 @@ test('[CDX-008] a Stop refused by completion debt that appears while it waits le
   assert.ok(stoppedContinuation(stopped), stopped.stdout);
   assert.deepEqual(intents(), [planted], 'only the debt that refused the Stop remains');
 });
+
+test('[PERF-010] a Stop that waits out most of its lease and then stalls in the core answers before the 30 s hook timeout', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  const stall = join(f.projectRoot, 'stall-cli.mjs');
+  writeFileSync(stall, "if(process.argv[1]?.endsWith('/core/cli.ts'))await new Promise(resolve=>setTimeout(resolve,60000));");
+  const lease = holdPromptLease(f, SID);
+  let stopping: ReturnType<typeof startBounded> | undefined;
+  try {
+    await waitUntil(() => existsSync(lease.ready), 'the lease holder started');
+    stopping = startBounded([process.execPath, HOOK], { cwd: f.projectRoot, env: hookEnv(f, { NODE_OPTIONS: `--import=${stall}` }), input: JSON.stringify(event(f, SID, stop('SLOW_REPLY'))), timeoutMs: 40_000 });
+    await delay(9_500);
+  } finally { lease.release(); }
+  const stopped = await stopping!.done;
+  await lease.done;
+  assert.ok(stoppedContinuation(stopped), stopped.stdout);
+  assert.match(stopped.stderr, /ETIMEDOUT|timed out/);
+  assert.ok(stopped.ms > 24_000, `the 9.5 s lease wait and the 15 s record timeout both elapsed: ${Math.round(stopped.ms)} ms`);
+  assert.ok(stopped.ms < 29_000, `${Math.round(stopped.ms)} ms`);
+});

@@ -1,6 +1,6 @@
 # Codex adapter contract
 
-Start with the [agent setup prompt and workflow](../../README.md). Baseline: codex-cli 0.160.0, Node 24+, Linux `/proc`.
+Start with the [agent setup prompt and workflow](../../README.md). Baseline: codex-cli 0.161.0, Node 24+, Linux `/proc`.
 
 The plugin is hooks-only. Install with `context-engine-codex install`; review its five hooks through `/hooks`, or explicitly approve `install --trust-hooks`. Enabling a project writes marked and backed-up `developer_instructions` and `[features.token_budget]` blocks only to its `.codex/config.toml`. Codex must trust the project; an existing incompatible block is left alone and reported.
 
@@ -29,5 +29,7 @@ Completed-tool retries use the host's `tool_use_id`, plus `turn_id` when present
 If an earlier pending marker has no verifiable host identity, an identified event cannot be proved distinct from that debt. This includes markers left by older hook versions. The adapter refuses before recording or syncing the event and preserves the marker, Event Log, HEAD and Working Context. Preserve the session data and continue with Context Engine disabled in the native conversation.
 
 Stop events have no unique completion ID in Codex 0.161.0. The host can emit multiple Stops during one turn, so `turn_id` alone cannot identify a retry. Successful Stops record independently. After an ambiguous failed Stop recording, Context Engine preserves the pending intent and refuses an unidentified retry. Preserve the session data and continue with Context Engine disabled in the native conversation. Do not delete the marker to force a retry.
+
+Hook time is bounded by Codex's 30-second hook timeout. The worst cases before any output write are 25 s for Stop (a 10-second lease wait plus a 15-second record call), 25 s for a completed tool (a 10-second lease wait plus two 7.5-second calls), 21 s for a prompt or the reset gate and 16 s for PreCompact. A test holds the lease for 9.5 s and stalls the core to check the Stop case. The completed-tool case needs its first call to succeed just before its own timeout, which a shared CI runner cannot time reliably, so it is not tested. A blocked output write can add up to 5 s to any hook, so a Stop or a completed tool can reach the 30-second limit.
 
 Managed-file classification resolves tool paths against the project root. A path outside that root or under another directory's `.context-engine` remains ordinary tool output. Setup can remove its final managed instruction block when the file has no trailing newline.
