@@ -135,8 +135,9 @@ export function safeWrite(path: string, data: string | Buffer, expected?: Buffer
     fsyncSync(fd);
   } catch(error) {
     if(candidate&&moved) {
+      const kept=join(parent,targetBasename(candidate));
       try {linkSync(candidate,childTarget(anchor(fd),basename(path)));unlinkSync(candidate);candidate=undefined;moved=false;fsyncSync(fd);}
-      catch {throw new Error(`setup replacement refused; a newer destination was retained and the captured candidate remains at ${candidate}`,{cause:error});}
+      catch {throw new Error(`setup replacement refused; a newer destination was retained and the captured candidate remains at ${kept}`,{cause:error});}
     }
     throw error;
   } finally {
@@ -153,7 +154,8 @@ export function safeRemoveTree(path: string): void {
   try {parentFd=openSync(parent,'directory');}
   catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
   const budget={paths:0,bytes:0};
-  const remove=(fd:number,expected:string,depth:number):void=>{
+  // A first pass with apply false walks the whole namespace, so a budget refusal removes nothing.
+  const remove=(fd:number,expected:string,depth:number,apply:boolean):void=>{
     assertOwner(fstatSync(fd),expected);
     if(depth>64||realpathSync(anchor(fd))!==expected)throw new Error('setup namespace changed; retained');
     const dir=opendirSync(anchor(fd));
@@ -163,12 +165,12 @@ export function safeRemoveTree(path: string): void {
       const target=childTarget(anchor(fd),entry.name),st=lstatSync(target);assertOwner(st,absolute);
       if(st.isDirectory()) {
         const child=openSync(target,'directory');
-        try {remove(child,absolute,depth+1);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace child changed; retained');rmdirSync(target);}
+        try {remove(child,absolute,depth+1,apply);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace child changed; retained');if(apply)rmdirSync(target);}
         finally {closeSync(child);}
-      } else if(st.isFile()&&st.nlink===1)unlinkSync(target);
+      } else if(st.isFile()&&st.nlink===1){if(apply)unlinkSync(target);}
       else throw new Error('setup namespace contains an unsafe entry; retained');
     }} finally {dir.closeSync();}
-    fsyncSync(fd);
+    if(apply)fsyncSync(fd);
   };
   try {
     assertOwner(fstatSync(parentFd),parent);
@@ -176,7 +178,7 @@ export function safeRemoveTree(path: string): void {
     const target=childTarget(anchor(parentFd),basename(path));let child:number;
     try {child=openSync(target,'directory');}
     catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
-    try {remove(child,resolve(path),0);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace changed; retained');rmdirSync(target);fsyncSync(parentFd);}
+    try {remove(child,resolve(path),0,false);budget.paths=0;budget.bytes=0;remove(child,resolve(path),0,true);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace changed; retained');rmdirSync(target);fsyncSync(parentFd);}
     finally {closeSync(child);}
   } finally {closeSync(parentFd);}
 }

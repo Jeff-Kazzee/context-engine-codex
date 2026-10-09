@@ -102,7 +102,19 @@ export function preflightOwnership(opts: {files:string[];watch:string[];namespac
     checkOwnedDirectory(path);
   }
   for(const path of opts.namespaced)checkComponents(path);
-  for(const path of opts.files)checkOwnedFile(path);
+  for(const path of opts.files){checkOwnedFile(path);refuseInterruptedCandidate(path);}
+}
+
+/** A replacement or deletion killed midway leaves a tracked file's current bytes only under its candidate name. */
+function refuseInterruptedCandidate(path: string): void {
+  let directory;
+  try { directory = opendirSync(dirname(path)); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; throw e; }
+  try {
+    for (let entry; (entry = directory.readSync()) !== null;) {
+      if (/^\.context-engine-(replace|delete)-[0-9a-f]{32}\.tmp$/.test(entry.name)) throw new Error(`an interrupted setup write left ${join(dirname(path), entry.name)}. It may hold the only current bytes of ${path} or another tracked file in that directory. Restore or remove it, then run setup again.`);
+    }
+  } finally { directory.closeSync(); }
 }
 
 /** Backs up `files` byte for byte into a new timestamped dir under `backupRoot`, and lists `watch`. */
