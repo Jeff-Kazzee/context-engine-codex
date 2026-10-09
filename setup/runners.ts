@@ -6,7 +6,8 @@ import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveStateRoot } from '../core/store.ts';
+import { absoluteName, anchor, childTarget, closeSync, realpathSync } from '../core/platform.ts';
+import { openPrivateDirectory, resolveStateRoot } from '../core/store.ts';
 import type { Rule } from './ledger.ts';
 import { jsonRule, tomlTablesRule } from './rules.ts';
 
@@ -62,7 +63,16 @@ export function stagedCodexMarketplace(ctx: SetupContext): string {
 const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
 export function stageCodexPlugin(ctx: SetupContext): void {
-  const root = stagedCodexMarketplace(ctx);
+  // Every staging call goes through the verified setup directory's descriptor, so a path swapped
+  // while staging cannot redirect the delete or the copy outside the private state root.
+  const setup = openPrivateDirectory(ctx.setupDir, { create: true })!;
+  try {
+    stageThrough(ctx, absoluteName(childTarget(anchor(setup), 'codex-marketplace')));
+    if (realpathSync(anchor(setup)) !== resolve(ctx.setupDir)) throw new Error('setup directory changed while the Codex plugin was staged; refused');
+  } finally { closeSync(setup); }
+}
+
+function stageThrough(ctx: SetupContext, root: string): void {
   rmSync(root, { recursive: true, force: true });
   const plugin = join(root, 'plugins', 'context-engine');
   cpSync(join(ctx.checkout, 'adapters', 'codex', 'plugin'), plugin, { recursive: true });
