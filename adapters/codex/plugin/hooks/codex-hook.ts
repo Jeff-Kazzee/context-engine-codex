@@ -163,8 +163,10 @@ function requireUnambiguousCompletion(stateDir: string, own: string | undefined,
 }
 
 /**
- * Records one completed event under a durable intent marker. `beforeRecord` runs under the lease
- * before any core call. Its refusal withdraws the intent, since nothing was recorded.
+ * Records one completed event under a durable intent marker. The recheck for other completion debt
+ * and `beforeRecord` run under the lease before any core call. A refusal there withdraws an intent
+ * this call published fresh, since nothing was recorded. An earlier attempt's intent stays, because
+ * that attempt may have recorded.
  */
 function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: string) => T, afterRecorded?: (result: T) => void, beforeRecord?: () => void): T {
   const state = store.resolveStateRoot(), l = store.layout(input.cwd, input.session_id, state);
@@ -174,9 +176,11 @@ function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: st
   const name = `codex-record-pending-${operationId}.json`, path = join(l.stateDir, name);
   const hash = store.sha(text);
   requireUnambiguousCompletion(l.stateDir, stable ? name : undefined, Boolean(stable));
+  let prior = false;
   if (stable) {
     const pending = pendingPrompt(input, name);
     if (pending.hash && (pending.hash !== hash || pending.operationId !== operationId)) throw new PendingPrompt(RECORD_REFUSAL + ' The host event identity conflicts with its pending completion.');
+    prior = pending.hash !== undefined;
   }
   const hostEvent = stable ? { toolUseId: input.tool_use_id as string, turnId: typeof input.turn_id === 'string' && input.turn_id ? input.turn_id : null } : undefined;
   const marker = { hash, operationId, hostEvent, publisher: lock.holderFor(process.pid, RUNNER, 0) };
@@ -186,11 +190,14 @@ function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: st
   let cleared = false;
   try {
     return withPromptLease(input, () => {
-      requireUnambiguousCompletion(l.stateDir, name, Boolean(stable));
-      try { beforeRecord?.(); }
-      catch (refusal) {
-        store.removeDirectoryEntries(dirname(path), candidate => candidate === name);
-        cleared = true;
+      try {
+        requireUnambiguousCompletion(l.stateDir, name, Boolean(stable));
+        beforeRecord?.();
+      } catch (refusal) {
+        if (!prior) {
+          store.removeDirectoryEntries(dirname(path), candidate => candidate === name);
+          cleared = true;
+        }
         throw refusal;
       }
       const result = fn(operationId);
