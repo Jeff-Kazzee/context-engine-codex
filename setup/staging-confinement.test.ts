@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { mkdirSync, readdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { participation } from '../core/index.ts';
 import { tempDir } from '../core/testing.ts';
+import { installLocked } from './install.ts';
+import { codexSpec, setupContext } from './runners.ts';
 import { tree, world } from './testing/world.ts';
 
 test('[SAFE-012] linked project pointer dir refuses enable without outside writes', () => {
@@ -22,4 +25,28 @@ test('[SAFE-012] linked project pointer dir refuses enable without outside write
   assert.deepEqual(readdirSync(outside), ['sentinel']);
   assert.equal(participation({ projectRoot: w.project, stateDir: w.stateDir, env: {} }).active, false);
   assert.deepEqual(tree(w.project), project, 'the project config was rolled back');
+});
+
+test('[SAFE-012] swapped codex-marketplace staging dir cannot copy or delete outside the state root', () => {
+  const w = world();
+  const ctx = setupContext({ ...process.env, ...w.env });
+  const outside = tempDir('outside');
+  mkdirSync(join(outside, 'codex-marketplace'));
+  writeFileSync(join(outside, 'codex-marketplace', 'sentinel'), 'SENTINEL');
+  const before = tree(outside);
+  const native = fs.rmSync;
+  let swapped = false;
+  fs.rmSync = ((path: fs.PathLike, ...rest: any[]) => {
+    if (!swapped && String(path).endsWith('/codex-marketplace')) {
+      swapped = true;
+      renameSync(ctx.setupDir, `${ctx.setupDir}-held`);
+      symlinkSync(outside, ctx.setupDir);
+    }
+    return (native as any)(path, ...rest);
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+  try { assert.throws(() => installLocked(ctx, codexSpec(ctx))); }
+  finally { fs.rmSync = native; syncBuiltinESMExports(); }
+  assert.equal(swapped, true, 'staging removed its directory');
+  assert.deepEqual(tree(outside), before, 'nothing was copied into or deleted from the outside directory');
 });
