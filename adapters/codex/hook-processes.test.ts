@@ -5,6 +5,7 @@ import './testing/private-tmp.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { tempDir } from '../../core/testing.ts';
@@ -307,4 +308,38 @@ test('[CDX-009] the next prompt after a refused Stop delivers the pending read n
   const later = await runHook(f, SID, prompt('LATER_REQUEST'));
   assert.equal(stoppedContinuation(later), false, later.stdout);
   assert.doesNotMatch(later.stdout, /was validated/, 'the notice is delivered once');
+});
+
+/** Holds the hook's prompt lease in a separate process until `release` exists. */
+function holdPromptLease(f: Fixture, sid: string) {
+  const state = layout(f.projectRoot, sid, f.stateDir).stateDir;
+  const ready = join(f.projectRoot, 'lease-held'), release = join(f.projectRoot, 'lease-release'), holder = join(f.projectRoot, 'lease-holder.mjs');
+  const lock = new URL('../../core/lock.ts', import.meta.url).href;
+  writeFileSync(holder, `import fs from 'node:fs';import {serialized} from ${JSON.stringify(lock)};serialized(${JSON.stringify(join(state, 'codex-prompt.lock'))},()=>{fs.writeFileSync(${JSON.stringify(ready)},'ready');for(const until=Date.now()+20000;!fs.existsSync(${JSON.stringify(release)})&&Date.now()<until;)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);});`);
+  const holding = startBounded([process.execPath, holder], { cwd: f.projectRoot, env: hookEnv(f), input: '', timeoutMs: 40_000 });
+  return { ready, release: () => writeFileSync(release, 'release'), done: holding.done };
+}
+
+async function waitUntil(check: () => boolean, what: string, ms = 15_000): Promise<void> {
+  for (const until = Date.now() + ms; !check();) { assert.ok(Date.now() < until, what); await delay(10); }
+}
+
+test('[CDX-008] a Stop refused by completion debt that appears while it waits leaves no failed marker of its own', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  const state = layout(f.projectRoot, SID, f.stateDir).stateDir;
+  const intents = () => readdirSync(state).filter(name => name.startsWith('codex-record-pending-'));
+  const lease = holdPromptLease(f, SID);
+  const planted = `codex-record-pending-${randomUUID()}.json`;
+  let stopping: ReturnType<typeof startBounded> | undefined;
+  try {
+    await waitUntil(() => existsSync(lease.ready), 'the lease holder started');
+    stopping = startBounded([process.execPath, HOOK], { cwd: f.projectRoot, env: hookEnv(f), input: JSON.stringify(event(f, SID, stop('REPLY_DURING_DEBT'))), timeoutMs: 30_000 });
+    await waitUntil(() => intents().length === 1, 'the Stop published its intent and waits for the lease');
+    writeFileSync(join(state, planted), JSON.stringify({ failed: true }));
+  } finally { lease.release(); }
+  const stopped = await stopping!.done;
+  await lease.done;
+  assert.ok(stoppedContinuation(stopped), stopped.stdout);
+  assert.deepEqual(intents(), [planted], 'only the debt that refused the Stop remains');
 });
