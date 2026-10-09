@@ -1,3 +1,4 @@
+import '../testing/private-tmp.ts';
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';

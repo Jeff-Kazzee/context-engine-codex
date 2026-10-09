@@ -1,5 +1,6 @@
 // The hook's cache-local opt-in check (activation.ts) reimplements core participation without
 // importing the checkout. Both must reach the same answer for every nearest-record state.
+import './testing/private-tmp.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, linkSync, mkdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';

@@ -1,6 +1,7 @@
 // Codex hook processes under host conditions: fail-closed paths and their time bounds, runner
 // restarts and kills between hooks, IPC overflow, and state that changes under a live session.
 // Every hook runs as its own bounded process with the event JSON on stdin, as Codex runs it.
+import './testing/private-tmp.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';

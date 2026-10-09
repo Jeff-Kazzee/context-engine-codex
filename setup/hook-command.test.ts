@@ -1,5 +1,6 @@
 // Codex runs each staged hook command through `$SHELL -lc`. The command must survive the checkout
 // path's shell quoting and reach the core from Codex's cached plugin copy.
+import '../adapters/codex/testing/private-tmp.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, readFileSync } from 'node:fs';

@@ -2,6 +2,7 @@
 // through its own app-server, and renders Context Engine guidance only in the enabled project.
 // CI runs this file under `unshare --net` with CONTEXT_ENGINE_NATIVE_CODEX set (.github/workflows/ci.yml).
 // Without that variable it is skipped.
+import '../adapters/codex/testing/private-tmp.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

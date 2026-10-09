@@ -1,5 +1,6 @@
 // A setup process killed mid-run skips every in-process rollback. The next runs must finish, undo or
 // refuse the interrupted operation, never adopt half-applied runner config as a new baseline.
+import '../adapters/codex/testing/private-tmp.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
