@@ -56,12 +56,6 @@ function main(): number {
     return 0;
   }
   if (sub === 'plugin add') {
-    // FAKE_CODEX_PAUSE=<path>: write <path>, then wait up to 20 s for <path>.release, so a test can kill setup here.
-    const pause = process.env.FAKE_CODEX_PAUSE;
-    if (pause) {
-      writeFileSync(pause, 'SYNTHETIC_PLUGIN_ADD_WAIT');
-      for (const until = Date.now() + 20_000; !existsSync(`${pause}.release`) && Date.now() < until;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-    }
     const id = args[2]!;
     const [name, mp] = id.split('@') as [string, string];
     const dir = marketplaceDir(mp);

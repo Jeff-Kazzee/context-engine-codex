@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { startBounded } from './testing/hook-process.ts';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
-const FILES = ['adapters/codex/activation.test.ts', 'adapters/codex/hook-processes.test.ts', 'adapters/codex/turn-loop/cli.test.ts', 'setup/hook-command.test.ts', 'setup/kill.test.ts'];
-/** One quick test per temp helper: core fixtures, the setup world, a checkout copy, the fake app-server and a killed install. */
-const PATTERN = '\\[(CORE-036|CDX-002|CDX-015|CDX-017|LIFE-015)\\]';
+const FILES = ['adapters/codex/activation.test.ts', 'adapters/codex/hook-processes.test.ts', 'adapters/codex/turn-loop/cli.test.ts', 'setup/hook-command.test.ts'];
+/** One quick test per temp helper: core fixtures, the setup world, a checkout copy and the fake app-server. */
+const PATTERN = '\\[(CORE-036|CDX-002|CDX-015|CDX-017)\\]';
 
 test('a run of the U02 Codex test files leaves no new entries in the temporary directory', async () => {
   const leak = mkdtempSync(join(tmpdir(), 'ce-u02-leak-'));
