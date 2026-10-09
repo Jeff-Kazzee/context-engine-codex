@@ -68,7 +68,7 @@ export function stageCodexPlugin(ctx: SetupContext): void {
   const setup = openPrivateDirectory(ctx.setupDir, { create: true })!;
   try {
     stageThrough(ctx, absoluteName(childTarget(anchor(setup), 'codex-marketplace')));
-    if (realpathSync(anchor(setup)) !== resolve(ctx.setupDir)) throw new Error('setup directory changed while the Codex plugin was staged; refused');
+    if (realpathSync(anchor(setup)) !== resolve(ctx.setupDir)) throw new Error('setup directory changed while the Codex plugin was staged. Install refused.');
   } finally { closeSync(setup); }
 }
 
