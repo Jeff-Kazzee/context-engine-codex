@@ -103,10 +103,13 @@ function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string;
 
 const RECORD_REFUSAL = 'Context Engine: an earlier completed tool or assistant event could not be safely recorded. Keep the native conversation; repair storage or disable Context Engine before continuing. Resets remain blocked.';
 function requireNoticeOutput(input: HookInput): void {
-  if (readNoticeState(input).kind !== 'idle') throw new PendingPrompt('Context Engine: a Working Context read notice has not reached hook output. Keep the native conversation and retry an ordinary tool before submitting another prompt or resetting.');
+  if (readNoticeState(input).kind !== 'idle') throw new PendingPrompt('Context Engine: a Working Context read notice has not reached hook output. Keep the native conversation. The next tool call or user prompt delivers it, and a reset can follow.');
 }
 function requireRecorded(input: HookInput, own?: string): void {
   requireNoticeOutput(input);
+  requireNoCompletionDebt(input, own);
+}
+function requireNoCompletionDebt(input: HookInput, own?: string): void {
   const l = store.layout(input.cwd, input.session_id, store.resolveStateRoot());
   const parent = store.openPrivateDirectory(l.stateDir);
   if (parent === undefined) return;
@@ -235,8 +238,10 @@ async function main(input: HookInput): Promise<void> {
   // Cache-local opt-in was checked before imports; the core repeats the participation gate.
   if (lib.killSwitchOn()) return;
   if (input.hook_event_name === 'UserPromptSubmit') {
-    const result=withPromptLease(input,()=>{
-    requireRecorded(input);
+    withPromptLease(input,()=>{
+    requireNoCompletionDebt(input);
+    // A pending read notice rides on this prompt. The revision the prompt commits still holds the edit.
+    const carriesNotice = readNoticeState(input).kind !== 'idle';
     const hash=store.sha(String(input.prompt??'')),pending=pendingPrompt(input);
     if(pending.hash&&pending.hash!==hash)throw new PendingPrompt('Context Engine: an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine; resets remain blocked.');
     // Durable intent precedes the fallible CLI call. Only a fingerprint is retained, never prompt text.
@@ -247,17 +252,22 @@ async function main(input: HookInput): Promise<void> {
     // This request committed even if a newly published completed-event intent blocks return.
     const marker=JSON.stringify({hash,recorded:true,operationId});
     store.atomicWrite(pending.path,marker, 'frame-key-tmp');
-    requireRecorded(input);
+    requireNoCompletionDebt(input);
     try {store.removeDirectoryEntries(dirname(pending.path),name=>name===PENDING_PROMPT);}
     catch(error){try{store.atomicWrite(pending.path,marker,'frame-key-tmp');}catch{}throw error;}
-    return recorded;
-    });
     // The per-turn size readout, with any reminder this prompt fired (an episode may make no tool
     // call for many turns). Codex hands additionalContext to the model as a developer message, so
     // only the core's static budget text goes there: numbers and fixed wording, never the prompt or
     // any Working Context text.
-    const notices = [...(result.receipt?.kind === 'restored' ? [result.receipt.text] : []), ...(result.budget ? [result.budget.text] : [])];
+    const notices = [...(recorded.receipt?.kind === 'restored' ? [recorded.receipt.text] : []), ...(recorded.budget ? [recorded.budget.text] : [])];
+    const revision = recorded.revision ?? 0;
+    if (carriesNotice && revision > 0 && typeof recorded.workingContextText === 'string') {
+      notices.push(guidance.editedContextReadNotice(input.session_id, revision, store.sha(recorded.workingContextText)));
+    }
     if (notices.length) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
+    // As for a tool hook, this confirms hook transport output only.
+    if (carriesNotice) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: revision });
+    });
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
     // echoing it back would duplicate the file into itself, or re-add what the agent offloaded.
@@ -477,6 +487,8 @@ interface CoreResult {
   receipt?: { kind: 'committed' | 'restored' | 'stale'; text: string; stale?: { count: number } };
   budget?: Core.BudgetReport;
   turns?: Array<{ role: string; text: string }>;
+  /** The committed revision's exact text. */
+  workingContextText?: string;
 }
 
 /**

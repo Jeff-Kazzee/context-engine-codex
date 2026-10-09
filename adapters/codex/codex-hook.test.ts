@@ -689,21 +689,23 @@ test('wave49: failed public stdout retains the accepted read notice for an ordin
   assert.equal(reset.stdout, '');
 });
 
-test('wave49: an undelivered read notice blocks a prompt and reset before they can hide its revision', async () => {
+test('wave49: an undelivered read notice blocks a Stop and reset, and the next prompt carries it forward', async () => {
   const f = enabledFixture();
   assert.equal(hook(f, prompt('active task')).status, 0);
   const edited = '[[CTX_TURN role=user]]\nPENDING_EDIT_SENTINEL';
   writeFileSync(wcPath(f), edited);
   await interruptNoticeOutput(f);
-  const nextPrompt = hook(f, prompt('must wait'));
-  assert.equal(JSON.parse(nextPrompt.stdout).continue, false);
-  assert.match(nextPrompt.stdout, /read notice/);
   const stop = hook(f, { hook_event_name: 'Stop', last_assistant_message: 'must not hide the pending edit' });
   assert.equal(JSON.parse(stop.stdout).continue, false);
   assert.match(stop.stdout, /read notice/);
   const reset = hook(f, { hook_event_name: 'PreToolUse', tool_name: 'new_context' });
   assert.equal(JSON.parse(reset.stdout).hookSpecificOutput.permissionDecision, 'deny');
   assert.equal(wc(f), edited);
+  const nextPrompt = hook(f, prompt('next request'));
+  assert.equal(nextPrompt.status, 0, nextPrompt.stderr);
+  assert.match(JSON.parse(nextPrompt.stdout).hookSpecificOutput.additionalContext, /revision 3 was validated/);
+  assert.doesNotMatch(nextPrompt.stdout, /PENDING_EDIT_SENTINEL/);
+  assert.match(wc(f), /PENDING_EDIT_SENTINEL[\s\S]*next request/);
 });
 
 for (const file_path of ['vendor/.context-engine/ordinary.txt', '.context-engine/../ordinary.txt', '../another-project/.context-engine/file.txt']) {
