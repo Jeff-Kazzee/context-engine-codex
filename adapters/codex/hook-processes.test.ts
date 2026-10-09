@@ -228,3 +228,22 @@ test('[CDX-025] sub-agent events on the root session leave a pending root edit u
   const root = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ROOT_TOOL_OUTPUT'));
   assert.match(root.stdout, /revision 2 was validated/, 'the root edit was still pending and intact');
 });
+
+test('[CDX-009] an ordinary tool hook still delivers a pending read notice after a Stop was refused', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nNOTICE_EDIT_SENTINEL\n');
+  const lost = await runHook(f, SID, toolUse('Write', { file_path: wcPath(f) }, 'write completed'), {}, 30_000, true);
+  assert.notEqual(lost.status, 0, 'the notice never reached hook output');
+  assert.match(lost.stderr, /EPIPE|broken pipe/i);
+  const refused = await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'));
+  assert.ok(stoppedContinuation(refused), refused.stdout);
+  assert.match(refused.stdout, /read notice/);
+  const retry = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.equal(stoppedContinuation(retry), false, retry.stdout);
+  assert.match(retry.stdout, /revision 2 was validated/);
+  const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
+  assert.equal(stoppedContinuation(next), false, 'the session continues once the notice reached hook output');
+  assert.match(readFileSync(wcPath(f), 'utf8'), /NOTICE_EDIT_SENTINEL[\s\S]*NEXT_REQUEST/);
+});

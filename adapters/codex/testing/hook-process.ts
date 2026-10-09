@@ -32,12 +32,17 @@ export interface Started {
   done: Promise<Run>;
 }
 
-/** Starts `argv` in its own process group. Past `timeoutMs` the whole group is killed. */
-export function startBounded(argv: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; input: string; timeoutMs: number }): Started {
+/**
+ * Starts `argv` in its own process group. Past `timeoutMs` the whole group is killed. `closeStdout`
+ * closes the read end of the child's stdout at once, so its first output write fails as a lost host
+ * pipe would.
+ */
+export function startBounded(argv: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; input: string; timeoutMs: number; closeStdout?: boolean }): Started {
   const started = performance.now();
   const child = spawn(argv[0]!, argv.slice(1), { cwd: opts.cwd, env: opts.env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '', stderr = '', timedOut = false;
-  child.stdout.setEncoding('utf8').on('data', (d: string) => (stdout += d));
+  if (opts.closeStdout) child.stdout.destroy();
+  else child.stdout.setEncoding('utf8').on('data', (d: string) => (stdout += d));
   child.stderr.setEncoding('utf8').on('data', (d: string) => (stderr += d));
   child.stdin.on('error', () => {});
   child.stdin.end(opts.input);
@@ -72,8 +77,8 @@ export function event(f: Fixture, sid: string, fields: Record<string, unknown>):
   return { session_id: sid, cwd: f.projectRoot, transcript_path: null, model: 'gpt-6-luna', ...fields };
 }
 
-export function runHook(f: Fixture, sid: string, fields: Record<string, unknown>, extra: Record<string, string> = {}, timeoutMs = 30_000): Promise<Run> {
-  return startBounded([process.execPath, HOOK], { cwd: f.projectRoot, env: hookEnv(f, extra), input: JSON.stringify(event(f, sid, fields)), timeoutMs }).done;
+export function runHook(f: Fixture, sid: string, fields: Record<string, unknown>, extra: Record<string, string> = {}, timeoutMs = 30_000, closeStdout = false): Promise<Run> {
+  return startBounded([process.execPath, HOOK], { cwd: f.projectRoot, env: hookEnv(f, extra), input: JSON.stringify(event(f, sid, fields)), timeoutMs, closeStdout }).done;
 }
 
 /** Starts a stand-in Codex process that runs `fields` as hook events, in order, as its children. */
