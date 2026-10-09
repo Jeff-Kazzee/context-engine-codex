@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { acquireSetupLock } from './files.ts';
-import { installLocked as install, SetupError, uninstallLocked as uninstall } from './install.ts';
+import { installedLedger, installLocked as install, SetupError, uninstallLocked as uninstall } from './install.ts';
 import { trustCodexHooks } from './codex-trust.ts';
 import { disableProject, enableProject, revertAllCodexProjects } from './project.ts';
 import { codexSpec, type RunnerSpec, setupContext } from './runners.ts';
@@ -64,7 +64,8 @@ export async function runSetup(argv: string[]): Promise<number> {
             }
             out([`${spec.title}: installed. Delivery Mode: ${label}.`, ...lines.map((l) => `  ${l}`), '  Inert until `context-engine-codex enable` in a project (the pilot is opt-in).']);
           } else {
-            const lines = spec.id === 'codex' ? revertAllCodexProjects(ctx) : [];
+            // Project reverts belong to a recorded install. Without the record, uninstall leaves projects alone.
+            const lines = spec.id === 'codex' && installedLedger(ctx, spec.id, spec) ? revertAllCodexProjects(ctx) : [];
             lines.push(...uninstall(ctx, spec));
             out([`${spec.title}: uninstalled.`, ...lines.map((l) => `  ${l}`)]);
           }
