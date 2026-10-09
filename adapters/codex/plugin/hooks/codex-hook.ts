@@ -159,7 +159,11 @@ function requireUnambiguousCompletion(stateDir: string, own: string | undefined,
   } finally { closeSync(parent); }
 }
 
-function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: string) => T, afterRecorded?: (result: T) => void): T {
+/**
+ * Records one completed event under a durable intent marker. `beforeRecord` runs under the lease
+ * before any core call. Its refusal withdraws the intent, since nothing was recorded.
+ */
+function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: string) => T, afterRecorded?: (result: T) => void, beforeRecord?: () => void): T {
   const state = store.resolveStateRoot(), l = store.layout(input.cwd, input.session_id, state);
   store.ensureDirs(l, state);
   const stable = completedOperationId(input);
@@ -180,6 +184,12 @@ function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: st
   try {
     return withPromptLease(input, () => {
       requireUnambiguousCompletion(l.stateDir, name, Boolean(stable));
+      try { beforeRecord?.(); }
+      catch (refusal) {
+        store.removeDirectoryEntries(dirname(path), candidate => candidate === name);
+        cleared = true;
+        throw refusal;
+      }
       const result = fn(operationId);
       try { store.removeDirectoryEntries(dirname(path), candidate => candidate === name); }
       catch (error) {
@@ -309,7 +319,7 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'Stop') {
     if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) {
       const text = input.last_assistant_message;
-      recordCompleted(input, text, operationId => { requireNoticeOutput(input); return core(input, 'record', [{ role: 'assistant', text }], undefined, operationId); });
+      recordCompleted(input, text, operationId => core(input, 'record', [{ role: 'assistant', text }], undefined, operationId), undefined, () => requireNoticeOutput(input));
     }
   } else if (input.hook_event_name === 'PreCompact') {
     withPromptLease(input,()=>{
