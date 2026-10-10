@@ -70,6 +70,27 @@ test('[LIFE-015] a refused undo names the file, the record and the snapshot with
   }
 });
 
+test('[LIFE-015] a failed install still reports the undo of an interrupted one', async () => {
+  const w = world();
+  const config = join(w.codexHome, 'config.toml');
+  writeFileSync(config, CODEX_CONFIG);
+  const pause = join(tempDir('pause'), 'plugin-add');
+  const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+  try { await waitForFile(pause); } finally { killGroup(install.pid); }
+  assert.equal((await install.done).signal, 'SIGKILL');
+  rmSync(join(w.stateDir, 'setup', 'codex.setup.lock'));
+  const pending = join(w.stateDir, 'setup', 'codex.pending.json');
+  const interrupted = join(JSON.parse(readFileSync(pending, 'utf8')).dir, 'before');
+
+  const failed = w.ce(['install'], { env: { FAKE_CODEX_FAIL: 'plugin add' } });
+  assert.notEqual(failed.status, 0, failed.stdout);
+  assert.match(failed.stderr, /plugin add .* failed/);
+  assert.ok(failed.stderr.includes('An earlier install was interrupted.'), `the failure reports the undo:\n${failed.stderr}`);
+  assert.ok(failed.stderr.includes(interrupted), `the failure names the interrupted install's backups ${interrupted}:\n${failed.stderr}`);
+  assert.equal(existsSync(pending), false, 'the undo finished');
+  assert.equal(readFileSync(config, 'utf8'), CODEX_CONFIG);
+});
+
 test('[LIFE-015] a kill after a guarded replacement is published names both leftovers', () => {
   const w = world();
   const config = join(w.codexHome, 'config.toml');
