@@ -389,7 +389,7 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
     const now = current.get(f.path)?.toString('utf8') ?? null;
     const backup = before ? f.before! : undefined;
     if (now === null) {
-      reports.push({ path: f.path, outcome: 'missing', backup });
+      reports.push({ path: f.path, outcome: 'missing', backup, lost: lost?.kind === 'before' ? lost.path : undefined });
       continue;
     }
     const rule = rules[f.path];

@@ -93,7 +93,7 @@ function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   return [
     'An earlier install was interrupted. Its configuration changes were rolled back and unmanaged edits were kept.',
     // The undo never restores or deletes a file whose before copy is gone. Its report says what stayed.
-    ...describe(reports.filter((r) => r.outcome === 'before-missing')),
+    ...describe(reports.filter((r) => r.outcome === 'before-missing' || (r.outcome === 'missing' && r.lost !== undefined))),
     `Unowned new paths retained from it: ${retained.length}. Its before backups: ${join(snap.dir, 'before')}`,
   ];
 }
@@ -250,6 +250,7 @@ export function describe(reports: FileReport[]): string[] {
       case 'reverse-edited':
         return `${r.path}: changed by something else since install, so only Context Engine's entries were removed (not a byte-for-byte restore; the original is at ${r.backup ?? '(none: the file did not exist)'})`;
       case 'missing':
+        if (r.lost) return `${r.path}: missing now, and left missing. Its before backup ${r.lost} is missing too, so its original bytes cannot be restored.`;
         return `${r.path}: missing now; left missing (the original is at ${r.backup ?? '(none)'})`;
       case 'before-missing':
         return [
