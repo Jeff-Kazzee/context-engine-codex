@@ -217,3 +217,14 @@ test('[REC-014] a runner killed mid-hook keeps its tool debt until the same tool
   assert.equal(texts.filter(t => t === 'AFTER_RESTART').length, 1, 'the refused prompt is recorded once, on retry');
   assert.deepEqual(pendingMarkers(f, SID), []);
 });
+
+test('[CDX-025] sub-agent events on the root session leave a pending root edit uncommitted', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ROOT_TASK'))).status, 0);
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nROOT_TASK\nROOT_EDIT_SENTINEL\n');
+  const before = sessionBytes(f, SID);
+  for (const [, fields] of FIVE_EVENTS) assert.equal((await runHook(f, SID, { ...fields, agent_id: 'a1' })).status, 0);
+  assert.deepEqual(sessionBytes(f, SID), before, 'no sub-agent event syncs, records or restores the root session');
+  const root = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ROOT_TOOL_OUTPUT'));
+  assert.match(root.stdout, /revision 2 was validated/, 'the root edit was still pending and intact');
+});
