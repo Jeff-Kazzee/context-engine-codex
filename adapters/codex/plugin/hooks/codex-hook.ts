@@ -115,15 +115,16 @@ function requireRecorded(input: HookInput, own?: string): void {
     if (readdirSync(`/proc/self/fd/${parent}`).some(name => name !== own && (name === PENDING_RECORD || /^codex-record-pending-[0-9a-f-]+\.json$/.test(name)))) throw new PendingPrompt(RECORD_REFUSAL);
   } finally { closeSync(parent); }
 }
-/** Use host identity for retries. Equal output alone never identifies an event. */
-function completedOperationId(input: HookInput): string | undefined {
+/** Use host identity for retries. Equal output alone never identifies an event. Returns its digest. */
+function completedEventDigest(input: HookInput): string | undefined {
   const turn = typeof input.turn_id === 'string' && input.turn_id ? input.turn_id : undefined;
   const tool = typeof input.tool_use_id === 'string' && input.tool_use_id ? input.tool_use_id : undefined;
   // Stop can run repeatedly inside one continued turn, so turn_id is not an event ID.
   if (input.hook_event_name !== 'PostToolUse' || !tool) return undefined;
-  const hash = store.sha(JSON.stringify(['completed-v1', input.hook_event_name, turn ?? null, tool ?? null]));
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+  return store.sha(JSON.stringify(['completed-v1', input.hook_event_name, turn ?? null, tool ?? null]));
 }
+/** The operation ID is the event digest's prefix in UUID form. */
+const digestOperationId = (digest: string): string => `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
 
 /** Legacy or unidentified debt cannot prove that a newly identified event is distinct. */
 function requireUnambiguousCompletion(stateDir: string, own: string | undefined, identifiedCaller: boolean): void {
@@ -134,13 +135,12 @@ function requireUnambiguousCompletion(stateDir: string, own: string | undefined,
       if (name === own || !(name === PENDING_RECORD || /^codex-record-pending-[0-9a-f-]+\.json$/.test(name))) continue;
       const bytes = store.readBytes(join(stateDir, name), 4096);
       if (!bytes) continue;
-      let marker: { hash?: unknown; operationId?: unknown; failed?: unknown; publisher?: Partial<Lock.LockHolder>; hostEvent?: { toolUseId?: unknown; turnId?: unknown } };
+      let marker: { hash?: unknown; operationId?: unknown; failed?: unknown; publisher?: Partial<Lock.LockHolder>; hostEvent?: { digest?: unknown } };
       try { marker = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
       catch { throw new PendingPrompt(RECORD_REFUSAL + ' The host event has no stable identity and pending completion state is ambiguous.'); }
-      const hostEvent = marker?.hostEvent;
-      const identified = typeof hostEvent?.toolUseId === 'string' && hostEvent.toolUseId.length > 0
-        && (hostEvent.turnId === null || (typeof hostEvent.turnId === 'string' && hostEvent.turnId.length > 0))
-        && completedOperationId({ hook_event_name: 'PostToolUse', session_id: '', cwd: '', tool_use_id: hostEvent.toolUseId, turn_id: hostEvent.turnId }) === marker.operationId
+      // The marker holds a digest of the host IDs, so its size never depends on their length.
+      const digest = marker?.hostEvent?.digest;
+      const identified = typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest) && digestOperationId(digest) === marker.operationId
         && name === `codex-record-pending-${marker.operationId}.json`
         && typeof marker.hash === 'string' && /^[0-9a-f]{64}$/.test(marker.hash);
       if (identifiedCaller) {
@@ -162,7 +162,8 @@ function requireUnambiguousCompletion(stateDir: string, own: string | undefined,
 function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: string) => T, afterRecorded?: (result: T) => void): T {
   const state = store.resolveStateRoot(), l = store.layout(input.cwd, input.session_id, state);
   store.ensureDirs(l, state);
-  const stable = completedOperationId(input);
+  const digest = completedEventDigest(input);
+  const stable = digest === undefined ? undefined : digestOperationId(digest);
   const operationId = stable ?? randomUUID();
   const name = `codex-record-pending-${operationId}.json`, path = join(l.stateDir, name);
   const hash = store.sha(text);
@@ -170,7 +171,7 @@ function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: st
     const pending = pendingPrompt(input, name);
     if (pending.hash && (pending.hash !== hash || pending.operationId !== operationId)) throw new PendingPrompt(RECORD_REFUSAL + ' The host event identity conflicts with its pending completion.');
   } else requireUnambiguousCompletion(l.stateDir, undefined, false);
-  const hostEvent = stable ? { toolUseId: input.tool_use_id as string, turnId: typeof input.turn_id === 'string' && input.turn_id ? input.turn_id : null } : undefined;
+  const hostEvent = digest === undefined ? undefined : { digest };
   const marker = { hash, operationId, hostEvent, publisher: lock.holderFor(process.pid, RUNNER, 0) };
   const bytes = JSON.stringify(marker);
   // Publish independent intent before waiting for the lease. Another event cannot clear it.
