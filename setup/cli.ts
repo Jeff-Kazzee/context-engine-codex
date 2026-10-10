@@ -70,7 +70,8 @@ export async function runSetup(argv: string[]): Promise<number> {
             if (installed) interruptedInstall(ctx, spec);
             const lines = installed ? revertAllCodexProjects(ctx) : [];
             lines.push(...uninstall(ctx, spec));
-            out([`${spec.title}: uninstalled.`, ...lines.map((l) => `  ${l}`)]);
+            // Without an install record, a successful uninstall only undid an interrupted install.
+            out([installed ? `${spec.title}: uninstalled.` : `${spec.title}: not installed. The interrupted install was rolled back.`, ...lines.map((l) => `  ${l}`)]);
           }
         } catch (e) {
           process.stderr.write(refusal(e));
