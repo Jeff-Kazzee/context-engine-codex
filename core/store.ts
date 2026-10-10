@@ -531,6 +531,26 @@ function readPrivateBytes(path: FileTarget, maxBytes: number | undefined, expect
 /** Byte range of one complete Event Log record, including its newline. */
 export interface LogRange { start: number; end: number }
 
+/** Cuts a private append-only file back to its committed length, appends `data`, and flushes the file and its directory. */
+export function appendCommitted(path: string, length: number, data: Buffer): void {
+  const parent = openPrivateDirectory(dirname(resolve(path)));
+  if (parent === undefined) throw Object.assign(new Error('private state parent is unavailable'), { code: 'ENOENT' });
+  try {
+    const fd = verifiedLogDescriptor(path, true, false, parent);
+    try {
+      if (fstatSync(fd).size < length) throw new Error('private state file is shorter than its committed length');
+      ftruncateSync(fd, length);
+      for (let offset = 0; offset < data.length;) {
+        const written = writeSync(fd, data, offset, data.length - offset);
+        if (written <= 0) throw new Error('private state append made no progress');
+        offset += written;
+      }
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    fsyncSync(parent);
+  } finally { closeSync(parent); }
+}
+
 /** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. Returns the row's byte range. */
 export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number } = {}): LogRange {
   const parent = openPrivateDirectory(dirname(resolve(path)));
