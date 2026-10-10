@@ -148,11 +148,17 @@ function stillOwed(f: Fixture): boolean {
 async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
   const f = enabledFixture();
   const delivered: number[] = [];
-  /** A notice in applied output must read back, at that moment, a revision that holds the edit. */
-  const observe = async (run: Run, what: string) => {
-    const notice = NOTICE.exec(String((applied(run)?.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext ?? ''));
+  /**
+   * The newest notice in applied output must read back, at that moment, a revision that holds the
+   * edit. Codex hands the model every output of parallel hooks at once, so within such a group a newer
+   * notice supersedes an older one.
+   */
+  const observe = async (group: Run[], what: string, staleAllowed = false) => {
+    const notices = group.map(run => NOTICE.exec(String((applied(run)?.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext ?? '')));
+    const notice = notices.filter(n => n !== null).sort((a, b) => Number(b[1]) - Number(a[1]))[0];
     if (!notice) return;
     const read = await startBounded([process.execPath, CLI, 'read', '--session', SID, '--sha', notice[2]!], { cwd: f.projectRoot, env: hookEnv(f), input: '', timeoutMs: 30_000 }).done;
+    if (staleAllowed && read.status !== 0) return;
     assert.equal(read.status, 0, `${what}: the notice for revision ${notice[1]} reads back: ${read.stdout}${read.stderr}`);
     assert.match(read.stdout, new RegExp(EDIT), `${what}: revision ${notice[1]} holds the edit`);
     delivered.push(Number(notice[1]));
@@ -164,7 +170,9 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
   const faulted = runs.at(-1)!;
   if (extra.NODE_OPTIONS) assert.equal(existsSync(join(f.projectRoot, 'fault-fired')), true, `the ${fault} fault fired`);
   if (fault === 'lost') assert.notEqual(faulted.status, 0, 'the hook wrote output to the closed stdout');
-  for (const run of runs) await observe(run, 'faulted event');
+  // A parallel hook killed after its record leaves the other hook's notice stale with nothing to
+  // supersede it. Recovery must then deliver a fresh one.
+  await observe(runs, 'faulted event', runs.length > 1 && faulted.signal === 'SIGKILL');
   if (stopDebt(f)) {
     const next = await runHook(f, SID, prompt('RECOVERY_PROMPT'));
     assert.ok(stoppedContinuation(next), `a killed Stop leaves the session refused: ${next.stdout}`);
@@ -176,7 +184,7 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
   const documentedLoss = fault === 'delivered' && NOTICE.test(faulted.stdout)
     && existsSync(noticePath(f)) && JSON.parse(readFileSync(noticePath(f), 'utf8')).kind === 'idle';
   for (const [i, next] of [toolUse('Bash', { command: 'ls' }, 'RECOVERY_TOOL_OUTPUT', 'call_recovery'), prompt('RECOVERY_PROMPT')].entries()) {
-    await observe(await runHook(f, SID, next), `recovery event ${i}`);
+    await observe([await runHook(f, SID, next)], `recovery event ${i}`);
   }
   if (!documentedLoss) assert.ok(delivered.length > 0, 'the accepted edit reached applied output as a readable notice');
   const count = (output: string) => loggedEvents(f, SID).filter(e => e.event.text.includes(output)).length;

@@ -64,7 +64,7 @@ const READ_NOTICE = 'codex-read-notice.json';
  * that finds a notice owed writes it as pending before any core call that can move HEAD past the edit.
  */
 type ReadNoticeState =
-  | { kind: 'idle'; lastNotifiedRevision: number }
+  | { kind: 'idle'; lastNotifiedRevision: number; deliveredAt?: number }
   | { kind: 'pending'; lastNotifiedRevision: number; revision: number; sha256: string };
 type PendingNotice = Extract<ReadNoticeState, { kind: 'pending' }>;
 function readNoticePath(input: HookInput): string {
@@ -79,7 +79,10 @@ function readNoticeState(input: HookInput): ReadNoticeState {
       || value.lastNotifiedRevision < 0) throw new Error('invalid read notice state');
   const lastNotifiedRevision = value.lastNotifiedRevision;
   // Earlier versions wrote checking before a sync. Every hook now decides from HEAD after its own sync.
-  if (value.kind === 'idle' || value.kind === 'checking') return { kind: 'idle', lastNotifiedRevision };
+  if (value.kind === 'idle' || value.kind === 'checking') {
+    const deliveredAt = 'deliveredAt' in value && Number.isSafeInteger(value.deliveredAt) ? value.deliveredAt as number : undefined;
+    return { kind: 'idle', lastNotifiedRevision, ...(deliveredAt === undefined ? {} : { deliveredAt }) };
+  }
   if (value.kind === 'pending' && 'revision' in value && typeof value.revision === 'number'
       && Number.isSafeInteger(value.revision) && value.revision > lastNotifiedRevision
       && 'sha256' in value && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256)) {
@@ -111,6 +114,13 @@ function noticeAfterRecord(input: HookInput, state: ReadNoticeState, owed: Pendi
   const notice = noticeFor(state, recorded);
   if (!owed && notice) writeNoticeState(input, notice);
   return notice ?? owed;
+}
+/** Owes again, as pending, a delivered notice whose digest a record is about to make stale. */
+function reopenNotice(input: HookInput, state: ReadNoticeState, synced: CoreResult): PendingNotice | undefined {
+  if (state.lastNotifiedRevision < 1 || typeof synced.workingContextText !== 'string') return undefined;
+  const notice: PendingNotice = { kind: 'pending', lastNotifiedRevision: state.lastNotifiedRevision - 1, revision: state.lastNotifiedRevision, sha256: store.sha(synced.workingContextText) };
+  writeNoticeState(input, notice);
+  return notice;
 }
 function withPromptLease<T>(input: HookInput, fn:()=>T, timeoutMs = 1000): T {
   const state=store.resolveStateRoot(),l=store.layout(input.cwd,input.session_id,state);
@@ -312,7 +322,7 @@ async function main(input: HookInput): Promise<void> {
     if (delivered) notices.push(guidance.editedContextReadNotice(input.session_id, delivered.revision, delivered.sha256));
     if (notices.length) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
     // As for a tool hook, this confirms hook transport output only.
-    if (delivered) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: delivered.revision });
+    if (delivered) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: delivered.revision, deliveredAt: Date.now() });
     });
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
@@ -329,9 +339,15 @@ async function main(input: HookInput): Promise<void> {
     // Codex runs the hooks of parallel tool calls at once. Whether a notice is owed does not matter.
     const changed = observed.receipt?.kind === 'committed' || observed.receipt?.kind === 'restored';
     const ownFile = touchesWorkingContext(input) || (changed && JSON.stringify(input.tool_input ?? null).includes(lib.WORKING_CONTEXT_DIR));
+    // A parallel hook that delivered a notice after this hook started leaves that digest stale once
+    // this record lands, and the model acts on both outputs only then. The notice is owed again,
+    // durably, before the record.
+    const staled = !ownFile && !owed && previous.kind === 'idle' && (previous.deliveredAt ?? 0) >= STARTED
+      && previous.lastNotifiedRevision === observed.revision;
+    const carried = staled ? reopenNotice(input, previous, observed) : owed;
     const result = ownFile ? observed : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }], undefined, operationId);
     // The notice names the revision this hook leaves current, which still holds the edit.
-    const pending = ownFile ? owed : noticeAfterRecord(input, previous, owed, result);
+    const pending = ownFile ? owed : noticeAfterRecord(input, previous, carried, result);
     // A restore (always) and stale citations (stale-refs experiment, Working Context calls only) go
     // out as `block`, which replaces the tool result the model sees, the original output kept below
     // the notice: the agent must see them before it touches the file again. A budget reminder (a tier
@@ -357,7 +373,7 @@ async function main(input: HookInput): Promise<void> {
     }, ({ out, pending }) => {
       if (Object.keys(out).length) emit(out);
       // This confirms hook transport output only, never ingestion by a later model request.
-      if (pending) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: pending.revision });
+      if (pending) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: pending.revision, deliveredAt: Date.now() });
     });
   } else if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'new_context') {
     // The reset gate: a refusal here reaches the model as the new_context tool result, so it can
@@ -618,6 +634,8 @@ function procStat(pid: number): { comm: string; ppid: number } | null {
   }
 }
 
+/** When this hook process started. A notice delivered after it came from a parallel hook. */
+const STARTED = Math.floor(performance.timeOrigin);
 let event: HookInput | undefined;
 try {
   event = JSON.parse(readFileSync(0, 'utf8')) as HookInput;

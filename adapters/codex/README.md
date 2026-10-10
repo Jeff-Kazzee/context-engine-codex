@@ -35,7 +35,7 @@ Each accepted model edit owes a read notice until the notice reaches hook output
 An owed notice refuses a Stop and a reset, which cannot deliver it. The refused Stop ends the turn, records nothing and leaves no completion debt, so its reply stays only in the native conversation. The next prompt or tool hook delivers the notice, and a reset can follow. The notice names a revision that still holds the edit:
 
 - A tool hook that touched the managed file names the revision its sync committed.
-- An ordinary tool hook records its own output and names the revision that record produced.
+- An ordinary tool hook records its own output and names the revision that record produced. When a parallel hook delivered a notice after this hook started, this record makes that digest stale, so this hook owes the notice again and names its own revision.
 - A prompt names the revision it committed. An edit made between turns, which no tool hook saw, gets its notice this way.
 
 A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write. `notice-sweep.test.ts` checks these rules with a fault at each hook step, start state and event.
