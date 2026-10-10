@@ -186,6 +186,27 @@ const leftovers = (dir: string) => readdirSync(dir).filter((name) => name.starts
 const read = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8') : null);
 
 
+test('[LIFE-015] status names the lock and the record while a killed install still holds its lock', async () => {
+  const w = world();
+  writeFileSync(join(w.codexHome, 'config.toml'), CODEX_CONFIG);
+  const pause = join(tempDir('pause'), 'plugin-add');
+  const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+  try { await waitForFile(pause); } finally { killGroup(install.pid); }
+  assert.equal((await install.done).signal, 'SIGKILL');
+  const lock = join(w.stateDir, 'setup', 'codex.setup.lock');
+  const pending = join(w.stateDir, 'setup', 'codex.pending.json');
+  assert.ok(existsSync(lock) && existsSync(pending), 'the kill left the lock and the record');
+
+  // Status takes no lock and must keep working while an install runs, so it reports instead of refusing.
+  const text = w.ce(['status']);
+  assert.equal(text.status, 0, text.stderr);
+  assert.doesNotMatch(text.stdout, /not installed/, `status does not call a half-applied install absent:\n${text.stdout}`);
+  for (const path of [lock, pending]) assert.ok(text.stdout.includes(path), `status names ${path}:\n${text.stdout}`);
+  const json = w.ce(['status', '--json']);
+  assert.equal(json.status, 0, json.stderr);
+  assert.ok(String(JSON.parse(json.stdout).interruptedInstall).includes(pending), json.stdout);
+});
+
 test('[LIFE-015] a kill after the install record is published leaves a working install', () => {
   for (const first of ['enable', 'install']) {
     const w = world();
