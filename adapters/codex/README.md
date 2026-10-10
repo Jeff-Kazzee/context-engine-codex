@@ -30,15 +30,27 @@ Each completed tool hook syncs the Working Context before it records the tool's 
 
 The hook records every other tool's output, even when its sync commits an edit that a parallel tool made. Codex 0.161.0 runs tools that support parallel calls, such as shell commands, at the same time. Two cases follow. A shell command that names `.context-engine` while a parallel tool edits the file is treated as the editor. A script that edits the file without naming it has its command and output recorded like any other tool.
 
-Each accepted model edit owes a read notice until the notice reaches hook output. After its sync, a hook finds a notice owed when one is already pending, or HEAD or the Event Log holds a model edit above the last notified revision. It then writes a private pending marker before any call that records past the edit. A prompt syncs before it records for the same reason. The log read is bounded: the notice state keeps the byte offset each hook read to, and the next hook reads only what was appended after it. An edit that a record call commits, because the agent edited the file while the call ran, is found in the log even when the hook dies or fails right after the call. The notice therefore survives a failed hook output write, a failed core call and a hook killed between steps. A Stop killed after its record call still leaves its intent, which refuses the session as described below.
+Each accepted model edit owes a read notice until the notice reaches hook output. After its sync, a hook finds a notice owed when one is already pending, or HEAD or the Event Log holds a model edit above the last notified revision. It then writes a private pending marker before any call that records past the edit. A prompt syncs before it records for the same reason.
 
-A Stop cannot deliver a notice. It records its reply and leaves an owed notice pending, and the next prompt or tool hook delivers it. A pending notice refuses a reset until then. The notice names a revision that still holds the edit:
+A hook reads the Event Log only past the byte offset that the notice state keeps, and moves that offset past its own appends when it settles. If the agent edits the file while a record call runs, that call commits the edit, and the next hook finds it in the log even when this hook dies or fails right after the call. The notice therefore survives a failed hook output write, a failed core call and a hook killed between steps, with two exceptions:
+
+- A Stop killed after its record call leaves its intent, which refuses the session as described below. The edit stays owed in the log.
+- A hook killed after it marks its notice delivered, and before it exits, loses the notice. Codex applies none of a killed hook's output, and no hook can see whether Codex applied it.
+
+A Stop cannot deliver a notice. It records its reply and leaves an owed notice pending, and the next prompt or tool hook delivers it. Until then a pending notice refuses a reset and a compaction: the gate denies `new_context`, and PreCompact stops the compaction, which aborts the user's turn. A notice owed only through a model edit at HEAD or in the log refuses neither:
+
+- The gate allows the reset. After it, the agent reads the whole Working Context back, which holds the edit. The `new_context` tool's own PostToolUse hook also carries the notice, but Codex runs that hook before the reset, so that notice lands in history the reset discards.
+- PreCompact writes the notice as pending before its marker and lets the compaction proceed. The next prompt or tool hook delivers it.
+
+The notice names a revision that still holds the edit:
 
 - A tool hook that touched the managed file names the revision its sync committed.
 - An ordinary tool hook records its own output and names the revision that record produced. When a parallel hook delivered a notice after this hook started, this record makes that digest stale, so this hook owes the notice again and names its own revision.
 - A prompt names the revision it committed. An edit made between turns, which no tool hook saw, gets its notice this way.
 
-A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write. `notice-sweep.test.ts` checks these rules with a fault at each hook step, start state and event.
+A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write.
+
+`notice-sweep.test.ts` checks these rules. Its faults are kills at each hook step, a closed stdout, sync calls that fail with and without committing, an edit written while a record call runs, and two shell hooks at once. Every fault in a cell must fire, and `SWEEP_PRUNED=1` checks that no pruned fault fires. After a fault the sweep checks the notice and the tool outputs before it sends any event twice. It then sends a faulted tool event again to show the documented way to clear that debt, which Codex does not do on its own.
 
 Completed-tool retries use the host's `tool_use_id`, plus `turn_id` when present, as a stable operation identity. The pending intent and core recording share that identity, so a retry after a committed child loses its reply does not append the tool output twice. Distinct tool IDs remain distinct even when their output is identical.
 
