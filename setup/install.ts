@@ -23,22 +23,24 @@ function removePending(ctx: SetupContext, id: string): void {
 }
 
 /** A killed install's snapshot, accepted only when every path in it is the one this runner's policy derives. */
-function interruptedInstall(ctx: SetupContext, spec: RunnerSpec): Snapshot | null {
+export function interruptedInstall(ctx: SetupContext, spec: RunnerSpec): Snapshot | null {
   const bytes = safeRead(pendingPath(ctx, spec.id));
   if (bytes === null) return null;
+  // Setup cannot undo from a record it cannot verify, so every command refuses until the user moves it aside.
+  const unusable = (problem: string) => new SetupError(`${spec.title}: the interrupted install record ${problem}: ${pendingPath(ctx, spec.id)}. Setup cannot verify what it would undo, so it changed nothing. Compare the tracked configuration with the before backups under ${join(ctx.setupDir, 'backups')} and repair it by hand if needed, then move the record aside and run setup again.`);
   let s: Snapshot;
   try { s = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Snapshot; }
-  catch { throw new SetupError(`${spec.title}: the interrupted install record is not valid JSON: ${pendingPath(ctx, spec.id)}`); }
+  catch { throw unusable('is not valid JSON'); }
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
   const copy = (i: number) => join(s.dir, 'before', `${i}-${basename(spec.files[i]!)}`);
   if (typeof s !== 'object' || s === null || typeof s.dir !== 'string' || resolve(s.dir) !== s.dir || dirname(s.dir) !== join(ctx.setupDir, 'backups') || !basename(s.dir).startsWith(`${spec.id}-`)
     || !Array.isArray(s.files) || !same(s.files.map((f) => f.path), spec.files) || !s.files.every((f, i) => f.after === null && (f.before === null || f.before === copy(i)))
     || !Array.isArray(s.namespaced) || !same(s.namespaced.map((n) => n.path), spec.namespaced) || !s.namespaced.every((n) => typeof n.existed === 'boolean')
     || !same(s.watch, spec.watch) || !Array.isArray(s.listing) || !s.listing.every((p) => typeof p === 'string')) {
-    throw new SetupError(`${spec.title}: the interrupted install record violates confinement policy: ${pendingPath(ctx, spec.id)}`);
+    throw unusable('violates confinement policy');
   }
   const snapshot = openPrivateDirectory(s.dir);
-  if (snapshot === undefined) throw new SetupError(`${spec.title}: the snapshot named by the interrupted install record is missing: ${s.dir}. Interrupted install record: ${pendingPath(ctx, spec.id)}`);
+  if (snapshot === undefined) throw unusable(`names a snapshot that is missing (${s.dir})`);
   closeSync(snapshot);
   // A missing copy would read as a file that did not exist, and the undo would delete the live file.
   const missing = s.files.find((f) => f.before !== null && safeRead(f.before) === null);
@@ -180,6 +182,8 @@ export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
     if (recovered.length) return recovered;
     throw new SetupError(`${spec.title}: not installed by Context Engine (no install record in ${ctx.setupDir})`);
   }
+  // A record that fails validation refuses here, before any change, and not after the uninstall finished.
+  const pending = interruptedInstall(ctx, spec);
   checkOwnedDirectory(spec.home);
   preflightOwnership(spec);
   const lines: string[] = [];
@@ -192,7 +196,7 @@ export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   try { unlinkSync(childTarget(anchor(parent), `${spec.id}.json`)); fsyncSync(parent); }
   finally { closeSync(parent); }
   // A kill between pointer publication and pending removal leaves this install's own pending record.
-  if (interruptedInstall(ctx, spec)?.dir === ledger.dir) removePending(ctx, spec.id);
+  if (pending?.dir === ledger.dir) removePending(ctx, spec.id);
   lines.push(`Backups kept: ${ledger.dir}`);
   if (ledger.retainedPaths?.length) lines.push(`Unowned new paths retained: ${ledger.retainedPaths.length}`);
   return lines;
