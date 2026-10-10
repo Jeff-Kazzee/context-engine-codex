@@ -30,6 +30,19 @@ If an earlier pending marker has no verifiable host identity, an identified even
 
 Stop events have no unique completion ID in Codex 0.161.0. The host can emit multiple Stops during one turn, so `turn_id` alone cannot identify a retry. Successful Stops record independently. After an ambiguous failed Stop recording, Context Engine preserves the pending intent and refuses an unidentified retry. Preserve the session data and continue with Context Engine disabled in the native conversation. Do not delete the marker to force a retry.
 
-Hook time is bounded by Codex's 30-second hook timeout. The worst cases before any output write are 25 s for Stop (a 10-second lease wait plus a 15-second record call), 25 s for a completed tool (a 10-second lease wait plus two 7.5-second calls), 21 s for a prompt or the reset gate and 16 s for PreCompact. A test holds the lease for 9.5 s and stalls the core to check the Stop case. The completed-tool case needs its first call to succeed just before its own timeout, which a shared CI runner cannot time reliably, so it is not tested. A blocked output write can add up to 5 s to any hook, so a Stop or a completed tool can reach the 30-second limit.
+Every hook runs under the 30-second `timeout` that `hooks.json` sets. At that limit, Codex 0.161.0 kills the hook's process group, including any core CLI call in flight. It records the run as failed, so the hook's output has no effect ([command runner](https://github.com/openai/codex/blob/rust-v0.161.0/codex-rs/hooks/src/engine/command_runner.rs)). The hook's own timeouts do not keep every event under that limit. Before any output write, the worst cases are:
+
+- Stop: a 10-second lease wait and a 15-second record call, 25 s.
+- Completed tool: a 10-second lease wait, a 7.5-second sync and a 7.5-second record call, 25 s.
+- Prompt or reset gate: a 1-second lease wait and one 20-second core call, 21 s.
+- PreCompact: a 1-second lease wait and up to three 5-second core calls, 16 s.
+
+Output adds time. The hook retries a write that would block for up to 5 s. If that write fails, the hook writes a refusal under the same bound. Counting one blocked write, the Stop and completed-tool worst cases total 30 s. Process start, module imports and file I/O, which no figure here counts, push them past the limit. A prompt or the reset gate can exceed it when a refusal follows a failed write.
+
+A test holds the lease for 9.5 s and stalls the core to time the Stop case. The completed-tool case needs its first call to succeed just before its own timeout. A shared CI runner cannot time that reliably, so no test covers it.
+
+A Stop or a completed tool killed at the limit leaves its completion intent marker, as the REC-014 kill test shows for a completed tool. The marker refuses every later prompt, Stop, reset and compaction. After a killed completed tool, other tool events still record. After a killed Stop, Context Engine refuses them too.
+
+Only the same tool event, sent again with the same `tool_use_id` and `turn_id`, records once and clears a completed-tool marker. Codex 0.161.0 does not rerun a failed hook, and a Stop has no identity to retry. Either way, the session stays refused until you disable Context Engine for the project.
 
 Managed-file classification resolves tool paths against the project root. A path outside that root or under another directory's `.context-engine` remains ordinary tool output. Setup can remove its final managed instruction block when the file has no trailing newline.
