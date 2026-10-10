@@ -4,8 +4,9 @@
 // notice whose digest reads back the edit at that moment, and the recovery tool output is in the Event
 // Log once. After the documented recovery, which sends a faulted prompt or tool event again: the
 // faulted tool output is in the Event Log once and the last Stop is not refused.
-// A cell is a (start, event, fault) triple. The sweep runs every triple that PRUNED does not exclude,
-// and every fault must fire, so a new cell is one line: a value on an axis, or one less PRUNED rule.
+// A cell is a (start, event, fault) triple. The sweep runs every triple in scope that PRUNED does not
+// exclude, and every fault must fire, so a new cell is one line: a value on an axis, or one less PRUNED
+// rule. SWEEP_PRUNED=1 runs the pruned triples instead and checks that none of their faults fires.
 import './testing/private-tmp.ts';
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,14 +39,19 @@ const KINDS: Kind[] = ['prompt', 'own-file tool', 'ordinary tool', 'parallel too
 const FAULTS: Fault[] = ['none', 'state', 'sync', 'record', 'output', 'delivered', 'lost', 'sync-fail', 'sync-late', 'race', 'race-kill', 'race-late'];
 const RACES: Fault[] = ['race', 'race-kill', 'race-late'];
 
+/**
+ * Out of scope by design: the clean start has no edit at stake until a race writes one, so it runs only
+ * the race faults. In a parallel group, which hook takes the lease first decides whether the ordinary
+ * one writes notice state or output, so those faults would fire only some of the time.
+ */
+const inScope = (start: Start, kind: Kind, fault: Fault) => (start !== 'clean' || RACES.includes(fault))
+  && !(kind === 'parallel tools' && ['state', 'output', 'delivered', 'lost'].includes(fault));
 /** Triples this hook version does not reach, each with the reason. Every other fault must fire. */
 const PRUNED: Array<[Start | '*', Kind | '*', Fault[], string]> = [
-  ['clean', '*', FAULTS.filter(fault => !RACES.includes(fault)), 'the clean start has no edit at stake until a race writes one'],
   ['*', 'own-file tool', ['record', ...RACES], 'a tool that touched the managed file only syncs'],
   ['*', 'new_context', ['state', 'record', 'delivered', ...RACES], 'the reset gate writes no notice state and never records'],
   ['*', 'PreCompact', ['delivered'], 'compaction never delivers a notice'],
   ['*', 'Stop', ['sync', 'delivered', 'sync-fail', 'sync-late'], 'a Stop makes no sync call and never delivers a notice'],
-  ['*', 'parallel tools', ['state', 'output', 'delivered', 'lost'], 'which hook takes the lease first decides whether the ordinary one writes notice state or output'],
   ['idle', 'new_context', ['output', 'lost'], 'the gate allows a reset onto a valid edit and writes no output'],
   ['checking', 'new_context', ['output', 'lost'], 'the gate allows a reset over an edit owed at HEAD and writes no output'],
   ['idle', 'PreCompact', ['output', 'lost'], 'compaction onto a valid edit writes no output'],
@@ -106,17 +112,18 @@ if(process.argv[1]?.endsWith('/codex-hook.ts')){
   const point=${JSON.stringify(fault)},write=fs.writeSync,rename=fs.renameSync,spawn=cp.spawnSync;
   const die=()=>{fs.writeFileSync(${fired},point);process.kill(process.pid,'SIGKILL');};
   const fail=()=>{fs.writeFileSync(${fired},point);return {status:null,signal:'SIGTERM',stdout:'',stderr:'',output:[],pid:0,error:Object.assign(new Error('synthetic core timeout'),{code:'ETIMEDOUT'})};};
-  let idle=false;
+  // A delivery write marks this hook's own notice delivered, after this process started.
+  let delivery=false;const started=Math.floor(performance.timeOrigin);
   fs.writeSync=function(fd,data,...rest){
     if(point==='state'&&String(data).includes('"lastNotifiedRevision"'))die();
-    if(fd!==1&&fd!==2)idle=String(data).includes('"kind":"idle"');
+    if(fd!==1&&fd!==2){try{const v=JSON.parse(String(data));delivery=v.kind==='idle'&&typeof v.deliveredAt==='number'&&v.deliveredAt>=started;}catch{delivery=false;}}
     const n=write.call(this,fd,data,...rest);
     if(point==='output'&&fd===1)die();
     return n;
   };
   fs.renameSync=function(from,to,...rest){
     const r=rename.call(this,from,to,...rest);
-    if(point==='delivered'&&idle&&String(to).endsWith('codex-read-notice.json'))die();
+    if(point==='delivered'&&delivery&&String(to).endsWith('codex-read-notice.json'))die();
     return r;
   };
   let raced=false;
@@ -160,7 +167,7 @@ function stillOwed(f: Fixture): boolean {
   return rows.some(row => row.type === 'revision' && row.kind === 'model-edit' && row.rev > state.lastNotifiedRevision);
 }
 
-async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
+async function runCell(start: Start, kind: Kind, fault: Fault, checkPrune = false): Promise<void> {
   const f = enabledFixture();
   const delivered: number[] = [], readBacks: string[] = [];
   /**
@@ -184,6 +191,11 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
   const extra: Record<string, string> = fault === 'none' || fault === 'lost' ? {} : { NODE_OPTIONS: `--import=${faultPreload(f, fault)}` };
   const runs = await Promise.all(group.map((fields, i) => i === group.length - 1 ? runHook(f, SID, fields, extra, 40_000, fault === 'lost') : runHook(f, SID, fields)));
   const faulted = runs.at(-1)!;
+  if (checkPrune) {
+    if (extra.NODE_OPTIONS) assert.equal(existsSync(join(f.projectRoot, 'fault-fired')), false, `the pruned ${fault} fault does not fire`);
+    if (fault === 'lost') assert.equal(faulted.status, 0, 'the pruned hook writes no output');
+    return;
+  }
   if (extra.NODE_OPTIONS) assert.equal(existsSync(join(f.projectRoot, 'fault-fired')), true, `the ${fault} fault fired`);
   if (fault === 'lost') assert.notEqual(faulted.status, 0, 'the hook wrote output to the closed stdout');
   // A faulted parallel hook can record and then fail to write the notice that supersedes the other
@@ -225,9 +237,10 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
   assert.equal(last!.stdout, '', 'the session ends usable: the last Stop is not refused');
 }
 
-describe('[CDX-009] read-notice fault sweep', { concurrency: 4 }, () => {
+const CHECK_PRUNED = process.env.SWEEP_PRUNED === '1';
+describe(CHECK_PRUNED ? '[CDX-009] read-notice fault sweep, pruned triples' : '[CDX-009] read-notice fault sweep', { concurrency: 4 }, () => {
   for (const start of STARTS) for (const kind of KINDS) for (const fault of FAULTS) {
-    if (pruned(start, kind, fault)) continue;
-    test(`${start} | ${kind} | ${fault}`, () => runCell(start, kind, fault));
+    if (!inScope(start, kind, fault) || pruned(start, kind, fault) !== CHECK_PRUNED) continue;
+    test(`${start} | ${kind} | ${fault}`, () => runCell(start, kind, fault, CHECK_PRUNED));
   }
 });
