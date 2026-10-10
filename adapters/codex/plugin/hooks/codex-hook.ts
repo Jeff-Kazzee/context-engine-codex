@@ -17,6 +17,7 @@ import type * as Core from '../../../../core/index.ts';
 import type * as Guidance from '../../guidance.ts';
 import type * as Store from '../../../../core/store.ts';
 import type * as Lock from '../../../../core/lock.ts';
+import type * as Platform from '../../../../core/platform.ts';
 
 interface HookInput {
   hook_event_name: string;
@@ -55,17 +56,20 @@ let budgetTokens: number;
 let confirmedParticipation = false;
 let store: typeof Store;
 let lock: typeof Lock;
+let platform: typeof Platform;
 const PENDING_PROMPT = 'codex-prompt-pending.json';
 const PENDING_RECORD = 'codex-record-pending.json';
 const READ_NOTICE = 'codex-read-notice.json';
 /**
  * Whether a read notice for an accepted model edit still has to reach hook output. A notice is owed
- * when one is pending or, after a sync, HEAD is a model edit above the last notified revision. A hook
- * that finds a notice owed writes it as pending before any core call that can move HEAD past the edit.
+ * when one is pending or, after a sync, HEAD or a revision the Event Log holds past `logOffset` is a
+ * model edit above the last notified revision. A hook that finds a notice owed writes it as pending
+ * before any core call that can move HEAD past the edit. `logOffset` bounds that log read: every
+ * model-edit revision before it is notified or covered by a pending notice.
  */
 type ReadNoticeState =
-  | { kind: 'idle'; lastNotifiedRevision: number; deliveredAt?: number }
-  | { kind: 'pending'; lastNotifiedRevision: number; revision: number; sha256: string };
+  | { kind: 'idle'; lastNotifiedRevision: number; deliveredAt?: number; logOffset?: number }
+  | { kind: 'pending'; lastNotifiedRevision: number; revision: number; sha256: string; logOffset?: number };
 type PendingNotice = Extract<ReadNoticeState, { kind: 'pending' }>;
 function readNoticePath(input: HookInput): string {
   return join(store.layout(input.cwd, input.session_id, store.resolveStateRoot()).stateDir, READ_NOTICE);
@@ -78,15 +82,16 @@ function readNoticeState(input: HookInput): ReadNoticeState {
       || typeof value.lastNotifiedRevision !== 'number' || !Number.isSafeInteger(value.lastNotifiedRevision)
       || value.lastNotifiedRevision < 0) throw new Error('invalid read notice state');
   const lastNotifiedRevision = value.lastNotifiedRevision;
-  // Earlier versions wrote checking before a sync. Every hook now decides from HEAD after its own sync.
+  const offset = 'logOffset' in value && Number.isSafeInteger(value.logOffset) && (value.logOffset as number) >= 0 ? { logOffset: value.logOffset as number } : {};
+  // Earlier versions wrote checking before a sync. Every hook now decides from HEAD and the log.
   if (value.kind === 'idle' || value.kind === 'checking') {
-    const deliveredAt = 'deliveredAt' in value && Number.isSafeInteger(value.deliveredAt) ? value.deliveredAt as number : undefined;
-    return { kind: 'idle', lastNotifiedRevision, ...(deliveredAt === undefined ? {} : { deliveredAt }) };
+    const deliveredAt = 'deliveredAt' in value && Number.isSafeInteger(value.deliveredAt) ? { deliveredAt: value.deliveredAt as number } : {};
+    return { kind: 'idle', lastNotifiedRevision, ...deliveredAt, ...offset };
   }
   if (value.kind === 'pending' && 'revision' in value && typeof value.revision === 'number'
       && Number.isSafeInteger(value.revision) && value.revision > lastNotifiedRevision
       && 'sha256' in value && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256)) {
-    return { kind: 'pending', lastNotifiedRevision, revision: value.revision, sha256: value.sha256 };
+    return { kind: 'pending', lastNotifiedRevision, revision: value.revision, sha256: value.sha256, ...offset };
   }
   throw new Error('invalid read notice state');
 }
@@ -101,24 +106,89 @@ function noticeFor(state: ReadNoticeState, result: CoreResult): PendingNotice | 
   if (revision <= state.lastNotifiedRevision || typeof result.workingContextText !== 'string') return undefined;
   return { kind: 'pending', lastNotifiedRevision: state.lastNotifiedRevision, revision, sha256: store.sha(result.workingContextText) };
 }
+const REVISION_ROW = Buffer.from('{"type":"revision",');
+/**
+ * Reads the Event Log from `from` to its last complete line for a model-edit revision above `floor`.
+ * Only revision rows are parsed. A log shorter than `from` is read from the start. Hooks run one at a
+ * time under the prompt lease and each one moves the offset past its own appends, so a hook reads
+ * only what was appended since the last one. A state with no offset, from a new session or an
+ * earlier hook version, is read from the start once.
+ */
+function scanLog(input: HookInput, from: number, floor: number): { editAbove: boolean; end: number } {
+  const parent = store.openPrivateDirectory(store.layout(input.cwd, input.session_id, store.resolveStateRoot()).stateDir);
+  if (parent === undefined) return { editAbove: false, end: 0 };
+  let fd: number | undefined;
+  try {
+    try { fd = platform.openSync(platform.childTarget(platform.anchor(parent), 'events.jsonl'), 'read'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { editAbove: false, end: 0 }; throw error; }
+    const st = platform.fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1 || st.owner !== 'current' || platform.openedPath(fd) !== join(platform.openedPath(parent), 'events.jsonl')) {
+      throw new Error('Event Log is not a verified unlinked owned regular file');
+    }
+    const chunk = Buffer.alloc(65536);
+    let position = from <= st.size ? from : 0, end = position, editAbove = false;
+    let line: Buffer[] = [], length = 0, candidate = true;
+    while (position < st.size) {
+      const read = platform.readSync(fd, chunk, 0, Math.min(chunk.length, st.size - position), position);
+      if (read <= 0) break;
+      const bytes = chunk.subarray(0, read);
+      for (let i = 0; i < read;) {
+        const newline = bytes.indexOf(0x0a, i), stop = newline < 0 ? read : newline;
+        if (candidate) {
+          line.push(Buffer.from(bytes.subarray(i, stop)));
+          length += stop - i;
+          if (length >= REVISION_ROW.length && !Buffer.concat(line, length).subarray(0, REVISION_ROW.length).equals(REVISION_ROW)) { candidate = false; line = []; length = 0; }
+        }
+        if (newline < 0) break;
+        if (candidate && length >= REVISION_ROW.length) {
+          const row = JSON.parse(Buffer.concat(line, length).toString('utf8')) as { kind?: unknown; rev?: unknown };
+          if (row.kind === 'model-edit' && typeof row.rev === 'number' && row.rev > floor) editAbove = true;
+        }
+        line = []; length = 0; candidate = true;
+        i = newline + 1;
+        end = position + i;
+      }
+      position += read;
+    }
+    return { editAbove, end };
+  } finally {
+    if (fd !== undefined) platform.closeSync(fd);
+    platform.closeSync(parent);
+  }
+}
 /** The notice owed after a sync, made durable before anything can record past the edit. */
 function settleNotice(input: HookInput, state: ReadNoticeState, synced: CoreResult): PendingNotice | undefined {
-  if (state.kind !== 'pending' && !unreportedEdit(state, synced)) return undefined;
+  const scan = state.kind === 'pending' ? undefined : scanLog(input, state.logOffset ?? 0, state.lastNotifiedRevision);
+  if (scan && !scan.editAbove && !unreportedEdit(state, synced)) return undefined;
   const owed = noticeFor(state, synced);
-  if (owed && state.kind !== 'pending') writeNoticeState(input, owed);
+  if (owed && scan) writeNoticeState(input, { ...owed, logOffset: scan.end });
   return owed;
 }
 /** A record whose own sync committed an edit moved HEAD past it, so its notice is written at once. */
 function noticeAfterRecord(input: HookInput, state: ReadNoticeState, owed: PendingNotice | undefined, recorded: CoreResult): PendingNotice | undefined {
   if (!owed && recorded.receipt?.kind !== 'committed') return undefined;
   const notice = noticeFor(state, recorded);
-  if (!owed && notice) writeNoticeState(input, notice);
+  if (!owed && notice) writeNoticeState(input, { ...notice, ...(state.logOffset === undefined ? {} : { logOffset: state.logOffset }) });
   return notice ?? owed;
+}
+/** Marks the notice for `revision` delivered, and moves the log offset past this hook's appends. */
+function markDelivered(input: HookInput, revision: number): void {
+  const state = readNoticeState(input);
+  const scan = scanLog(input, state.logOffset ?? 0, revision);
+  const logOffset = scan.editAbove ? state.logOffset : scan.end;
+  writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: revision, deliveredAt: Date.now(), ...(logOffset === undefined ? {} : { logOffset }) });
+}
+/** Moves the log offset past this hook's appends, unless an idle state owes an edit logged there. */
+function advanceLogOffset(input: HookInput): void {
+  const state = readNoticeState(input), from = state.logOffset ?? 0;
+  const scan = scanLog(input, from, state.lastNotifiedRevision);
+  if (scan.end === from || (state.kind === 'idle' && scan.editAbove)) return;
+  writeNoticeState(input, { ...state, logOffset: scan.end });
 }
 /** Owes again, as pending, a delivered notice whose digest a record is about to make stale. */
 function reopenNotice(input: HookInput, state: ReadNoticeState, synced: CoreResult): PendingNotice | undefined {
   if (state.lastNotifiedRevision < 1 || typeof synced.workingContextText !== 'string') return undefined;
-  const notice: PendingNotice = { kind: 'pending', lastNotifiedRevision: state.lastNotifiedRevision - 1, revision: state.lastNotifiedRevision, sha256: store.sha(synced.workingContextText) };
+  const notice: PendingNotice = { kind: 'pending', lastNotifiedRevision: state.lastNotifiedRevision - 1, revision: state.lastNotifiedRevision, sha256: store.sha(synced.workingContextText), ...(state.logOffset === undefined ? {} : { logOffset: state.logOffset }) };
   writeNoticeState(input, notice);
   return notice;
 }
@@ -142,12 +212,13 @@ function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string;
 
 const RECORD_REFUSAL = 'Context Engine: an earlier completed tool or assistant event could not be safely recorded. Keep the native conversation; repair storage or disable Context Engine before continuing. Resets remain blocked.';
 /**
- * Refuses while a notice is pending. With `atHead`, also while HEAD is an unreported model edit, for a
- * Stop, whose record would move HEAD past the edit with no notice to carry.
+ * Refuses while a notice is pending. With `atHead`, also while HEAD or the log holds an unreported model
+ * edit, for a Stop, whose record would move HEAD past the edit with no notice to carry.
  */
 function requireNoticeOutput(input: HookInput, atHead = false): void {
   const state = readNoticeState(input);
-  if (state.kind === 'pending' || (atHead && unreportedEdit(state, lib.inspectSession({ projectRoot: input.cwd, sessionId: input.session_id })))) {
+  if (state.kind === 'pending' || (atHead && (unreportedEdit(state, lib.inspectSession({ projectRoot: input.cwd, sessionId: input.session_id }))
+      || scanLog(input, state.logOffset ?? 0, state.lastNotifiedRevision).editAbove))) {
     throw new PendingPrompt('Context Engine: a Working Context read notice has not reached hook output. Keep the native conversation. The next tool call or user prompt delivers it, and a reset can follow.');
   }
 }
@@ -286,6 +357,7 @@ async function main(input: HookInput): Promise<void> {
   lib = await loadFromCheckout<typeof Core>('core/index.ts', '../../../../core/index.ts');
   store = await loadFromCheckout<typeof Store>('core/store.ts', '../../../../core/store.ts');
   lock = await loadFromCheckout<typeof Lock>('core/lock.ts', '../../../../core/lock.ts');
+  platform = await loadFromCheckout<typeof Platform>('core/platform.ts', '../../../../core/platform.ts');
   const guidance = await loadFromCheckout<typeof Guidance>('adapters/codex/guidance.ts', '../../guidance.ts');
   budgetTokens = guidance.codexWorkingContextBudget(process.env.CONTEXT_ENGINE_BUDGET_TOKENS);
   // Cache-local opt-in was checked before imports; the core repeats the participation gate.
@@ -322,7 +394,8 @@ async function main(input: HookInput): Promise<void> {
     if (delivered) notices.push(guidance.editedContextReadNotice(input.session_id, delivered.revision, delivered.sha256));
     if (notices.length) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
     // As for a tool hook, this confirms hook transport output only.
-    if (delivered) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: delivered.revision, deliveredAt: Date.now() });
+    if (delivered) markDelivered(input, delivered.revision);
+    advanceLogOffset(input);
     });
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
@@ -373,7 +446,8 @@ async function main(input: HookInput): Promise<void> {
     }, ({ out, pending }) => {
       if (Object.keys(out).length) emit(out);
       // This confirms hook transport output only, never ingestion by a later model request.
-      if (pending) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: pending.revision, deliveredAt: Date.now() });
+      if (pending) markDelivered(input, pending.revision);
+      advanceLogOffset(input);
     });
   } else if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'new_context') {
     // The reset gate: a refusal here reaches the model as the new_context tool result, so it can
@@ -383,6 +457,7 @@ async function main(input: HookInput): Promise<void> {
     if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: the context window was NOT reset. An earlier user request was not recorded; retry that exact request after repairing storage, or disable Context Engine.');
       const refusal = resetRefusal(input);
       requireRecorded(input);
+      advanceLogOffset(input);
       return refusal;
     });
     if (refusal) denyReset(refusal);
@@ -396,7 +471,7 @@ async function main(input: HookInput): Promise<void> {
         const recorded = core(input, 'record', [{ role: 'assistant', text }], undefined, operationId);
         noticeAfterRecord(input, readNoticeState(input), undefined, recorded);
         return recorded;
-      }, undefined, () => requireNoticeOutput(input, true));
+      }, () => advanceLogOffset(input), () => requireNoticeOutput(input, true));
     }
   } else if (input.hook_event_name === 'PreCompact') {
     withPromptLease(input,()=>{
@@ -431,6 +506,7 @@ async function main(input: HookInput): Promise<void> {
     }
     // Completion debt can appear while compaction waits. A notice this hook made pending is carried.
     requireNoCompletionDebt(input);
+    advanceLogOffset(input);
     });
   }
 }

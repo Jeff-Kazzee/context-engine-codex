@@ -439,7 +439,7 @@ test('[CDX-009] a tool hook after a failed notice check owes no notice without a
   writeFileSync(failSync, `import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const spawn=cp.spawnSync;cp.spawnSync=function(file,args,...rest){if(Array.isArray(args)&&args.includes('sync'))return {status:null,signal:null,stdout:'',stderr:'',output:[],pid:0,error:Object.assign(new Error('synthetic stalled sync'),{code:'ETIMEDOUT'})};return spawn.call(this,file,args,...rest);};syncBuiltinESMExports();`);
   const stalled = await runHook(f, SID, toolUse('Bash', { command: 'make' }, 'STALLED_OUTPUT'), { NODE_OPTIONS: `--import=${failSync}` });
   assert.ok(stoppedContinuation(stalled), stalled.stdout);
-  assert.equal(existsSync(noticePath(f)), false, 'a failed check with no model edit writes no notice state');
+  assert.equal(JSON.parse(readFileSync(noticePath(f), 'utf8')).kind, 'idle', 'a failed check with no model edit owes no notice');
   const after = await runHook(f, SID, toolUse('Bash', { command: 'echo after' }, 'AFTER_OUTPUT'));
   assert.equal(after.status, 0, after.stderr);
   assert.doesNotMatch(after.stdout, /was validated/, 'no model edit, so no notice');
