@@ -151,7 +151,14 @@ export function codexSpec(ctx: SetupContext): RunnerSpec {
     files: [config],
     watch: [join(h, 'plugins'), join(h, '.tmp')],
     namespaced: [join(h, 'plugins', 'cache', MARKETPLACE), join(h, 'plugins', 'data', CODEX_PLUGIN_ID.replace('@', '-')), stagedCodexMarketplace(ctx)],
-    rules: { [config]: tomlTablesRule(CODEX_OUR_TABLES, /^\[(hooks|hooks\.state|marketplaces|plugins)\]$/) },
+    rules: { [config]: tomlTablesRule(CODEX_OUR_TABLES, /^\[(hooks|hooks\.state|marketplaces|plugins)\]$/, (key, body) => {
+      // The exact tables this install writes, so a file without its before copy loses only those. Hook trust
+      // tables hold hashes that setup cannot recompute here, so they stay and are listed.
+      const lines = body.map((line) => line.trim()).filter((line) => line !== '');
+      if (key.length === 2 && key[0] === 'plugins' && key[1] === CODEX_PLUGIN_ID) return lines.length === 1 && lines[0] === 'enabled = true';
+      if (key.length === 2 && key[0] === 'marketplaces' && key[1] === MARKETPLACE) return lines.length === 2 && lines[0] === 'source_type = "local"' && lines[1] === `source = ${JSON.stringify(stagedCodexMarketplace(ctx))}`;
+      return false;
+    }) },
     install: [
       ['plugin', 'marketplace', 'add', stagedCodexMarketplace(ctx)],
       ['plugin', 'add', CODEX_PLUGIN_ID],

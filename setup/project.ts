@@ -58,7 +58,7 @@ const recordedPointer = (ctx: SetupContext, root: string) => {
 function codexConfigRule(): Rule {
   const top = blockRule(TOML_TOP_MARKERS);
   const table = blockRule(TOML_MARKERS);
-  return { strip: (text, before) => table.strip(top.strip(text, before), before), canon: table.canon, empty: (text) => text.trim() === '' };
+  return { strip: (text, before) => table.strip(top.strip(text, before), before), stripWritten: (text) => ({ text: table.strip(top.strip(text, null), null), kept: [] }), canon: table.canon, empty: (text) => text.trim() === '' };
 }
 
 function projectRules(root: string): Record<string, Rule> {

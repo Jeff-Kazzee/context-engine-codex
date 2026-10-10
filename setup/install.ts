@@ -77,14 +77,13 @@ export function interruptedInstallStatus(ctx: SetupContext, spec: RunnerSpec): s
 function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   const snap = interruptedInstall(ctx, spec);
   if (!snap) return [];
-  let retained: string[], lost: FileReport[];
+  let retained: string[];
+  const reports: FileReport[] = [];
   try {
     checkOwnedDirectory(spec.home);
     preflightOwnership(spec);
     checkBackupCopies(snap.files);
-    // The undo never restores or deletes a file whose before copy is gone. It removes our entries and says so.
-    lost = snap.files.filter((f) => f.before !== null && safeRead(f.before) === null).map((f): FileReport => ({ path: f.path, outcome: 'before-missing', lost: f.before! }));
-    retained = rollbackSnapshot(snap, spec.rules);
+    retained = rollbackSnapshot(snap, spec.rules, reports);
   } catch (e) {
     // The record stays, so the next install or uninstall repeats the undo once the cause is repaired.
     const cause = (e instanceof Error ? e.message : String(e)).replace(/\.$/, '');
@@ -93,7 +92,8 @@ function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   removePending(ctx, spec.id);
   return [
     'An earlier install was interrupted. Its configuration changes were rolled back and unmanaged edits were kept.',
-    ...describe(lost),
+    // The undo never restores or deletes a file whose before copy is gone. Its report says what stayed.
+    ...describe(reports.filter((r) => r.outcome === 'before-missing')),
     `Unowned new paths retained from it: ${retained.length}. Its before backups: ${join(snap.dir, 'before')}`,
   ];
 }
@@ -241,7 +241,7 @@ export function checkInstallBackups(spec: RunnerSpec, ledger: Ledger): void {
 }
 
 export function describe(reports: FileReport[]): string[] {
-  return reports.map((r) => {
+  return reports.flatMap((r) => {
     switch (r.outcome) {
       case 'restored':
         return `${r.path}: restored byte for byte`;
@@ -252,7 +252,10 @@ export function describe(reports: FileReport[]): string[] {
       case 'missing':
         return `${r.path}: missing now; left missing (the original is at ${r.backup ?? '(none)'})`;
       case 'before-missing':
-        return `${r.path}: not restored, because its before backup ${r.lost} is missing. Only Context Engine's entries were removed.`;
+        return [
+          `${r.path}: not restored, because its before backup ${r.lost} is missing. Only entries that match what Context Engine's install writes were removed.`,
+          ...(r.kept ?? []).map((key) => `${r.path}: ${key} left in place because the backup copy is missing`),
+        ];
       case 'after-missing':
         return `${r.path}: only Context Engine's entries were removed, because its after backup ${r.lost} is missing and setup cannot tell whether something else changed the file (the original is at ${r.backup ?? '(none: the file did not exist)'})`;
       default:

@@ -30,6 +30,12 @@ export interface Rule {
   canon(text: string): string;
   /** Whether stripped text has no unmanaged content when the original file was absent. */
   empty?(text: string): boolean;
+  /**
+   * For a file whose before copy is gone: remove only entries whose value is exactly what the install
+   * writes, keep every container, and name each entry at one of our keys that stays. A rule without it
+   * removes nothing from such a file.
+   */
+  stripWritten?(text: string): { text: string; kept: string[] };
 }
 
 export interface Ledger {
@@ -63,6 +69,8 @@ export interface FileReport {
   backup?: string;
   /** The backup copy that is gone. */
   lost?: string;
+  /** Entries at our keys left in place because the before copy is gone. */
+  kept?: string[];
 }
 
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
@@ -291,11 +299,11 @@ export function readLedger(dir: string, policy: LedgerPolicy): Ledger {
 }
 
 /** Reverse known managed fields; preserve concurrent changes without post-edit ownership proof. */
-export function rollbackSnapshot(s: Snapshot, rules: Record<string, Rule>): string[] {
+export function rollbackSnapshot(s: Snapshot, rules: Record<string, Rule>, reports: FileReport[] = []): string[] {
   const before = new Set(s.listing);
   const l: Ledger = { ...s, files: s.files.map(f => ({ ...f, after: f.before })), createdFiles: [], createdDirs: [] };
   const unchanged = assess(l, rules);
-  revert(l, rules, unchanged);
+  reports.push(...revert(l, rules, unchanged));
   const owned = (path: string) => s.namespaced.some(n => path === n.path || path.startsWith(`${n.path}/`));
   for (const path of list(s.watch).filter(p => !before.has(p) && p.endsWith('/') && owned(p)).sort((a, b) => b.length - a.length)) {
     try { safeRemoveEmptyDirectory(path.slice(0, -1)); } catch { /* Retain nonempty/unavailable paths. */ }
@@ -385,9 +393,11 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
       continue;
     }
     const rule = rules[f.path];
-    const stripped = rule ? about(f.path, () => rule.strip(now, before?.toString('utf8') ?? null)) : now;
+    // Without the before copy, a value at one of our keys may be the user's. Only exactly what the install writes goes.
+    const written = lost?.kind !== 'before' ? undefined : rule?.stripWritten ? about(f.path, () => rule.stripWritten!(now)) : { text: now, kept: [] };
+    const stripped = written ? written.text : rule ? about(f.path, () => rule.strip(now, before?.toString('utf8') ?? null)) : now;
     if (stripped !== now) safeWrite(f.path, stripped,current.get(f.path)!);
-    reports.push(lost ? { path: f.path, outcome: `${lost.kind}-missing`, backup, lost: lost.path } : { path: f.path, outcome: 'reverse-edited', backup });
+    reports.push(lost ? { path: f.path, outcome: `${lost.kind}-missing`, backup, lost: lost.path, kept: written?.kept ?? [] } : { path: f.path, outcome: 'reverse-edited', backup });
   }
   for (const n of l.namespaced) if (!n.existed) safeRemoveTree(n.path);
   for (const c of l.createdFiles) {
