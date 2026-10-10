@@ -13,7 +13,7 @@ import { CODEX_TOKEN_LIMIT_RESET, KILL_SWITCH_ENV, killSwitchOn, participation }
 import { GUIDANCE_PROBE, RESET_MODE } from '../adapters/codex/guidance.ts';
 import { MODE as TURN_LOOP_MODE } from '../adapters/codex/turn-loop/turn-loop.ts';
 import { openPrivateDirectory } from '../core/store.ts';
-import { installedLedger, refuseInterruptedInstall } from './install.ts';
+import { installedLedger } from './install.ts';
 import { safeRead } from './files.ts';
 import { tomlTableBoolean } from './rules.ts';
 import { currentCodexTrust } from './codex-trust.ts';
@@ -75,9 +75,6 @@ function onPath(env: NodeJS.ProcessEnv): string | null {
 export async function statusText(ctx: SetupContext, projectRoot: string): Promise<{ lines: string[]; json: Record<string, unknown> }> {
   const rootFd = openPrivateDirectory(dirname(ctx.setupDir));
   if (rootFd !== undefined) closeSync(rootFd);
-  // "Not installed" would hide a half-applied install, so status refuses until it is undone. Status
-  // takes no lock. A live install holds the lock and its own record, so status checks the record only without a lock.
-  if (!existsSync(join(ctx.setupDir, 'codex.setup.lock'))) refuseInterruptedInstall(ctx, codexSpec(ctx));
   const p = participation({ projectRoot, stateDir: dirname(ctx.setupDir), env: ctx.env });
   const experiments = (ctx.env.CONTEXT_ENGINE_EXPERIMENTS ?? '')
     .split(',')

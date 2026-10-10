@@ -1,9 +1,9 @@
 // Setup commands for people: install, uninstall, enable, disable, status. Text output.
 import { parseArgs } from 'node:util';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { acquireSetupLock } from './files.ts';
-import { installedLedger, installLocked as install, interruptedInstall, uninstallLocked as uninstall } from './install.ts';
+import { installedLedger, installLocked as install, interruptedInstall, refuseInterruptedInstall, uninstallLocked as uninstall } from './install.ts';
 import { trustCodexHooks } from './codex-trust.ts';
 import { disableProject, enableProject, revertAllCodexProjects } from './project.ts';
 import { codexSpec, type RunnerSpec, setupContext } from './runners.ts';
@@ -89,6 +89,9 @@ export async function runSetup(argv: string[]): Promise<number> {
       return 0;
     }
     if (command === 'status') {
+      // "Not installed" would hide a half-applied install, so status refuses until it is undone. Status
+      // takes no lock. A live install holds the lock and its own record, so status checks the record only without a lock.
+      if (!existsSync(join(ctx.setupDir, 'codex.setup.lock'))) refuseInterruptedInstall(ctx, codexSpec(ctx));
       const s = await statusText(ctx, projectRoot);
       process.stdout.write(values.json ? `${JSON.stringify(s.json)}\n` : `${s.lines.join('\n')}\n`);
       return 0;
