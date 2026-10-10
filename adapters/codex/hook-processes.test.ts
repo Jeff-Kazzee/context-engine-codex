@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { tempDir } from '../../core/testing.ts';
 import { setParticipation } from '../../core/index.ts';
 import { layout, sha } from '../../core/store.ts';
+import { isAlive, readLock } from '../../core/lock.ts';
 import { world } from '../../setup/testing/world.ts';
 import {
   CLI, denial, enabledFixture, event, HOOK, headRevision, hookEnv, killGroup, loggedEvents, newContext, pendingMarkers, preCompact, prompt,
@@ -191,7 +192,7 @@ test('[REC-014] hooks after a runner restart continue the same thread session', 
   assert.match(readFileSync(wcPath(f), 'utf8'), /BEFORE_RESTART[\s\S]*TOOL_BEFORE_RESTART[\s\S]*REPLY_BEFORE_RESTART[\s\S]*AFTER_RESTART/);
 });
 
-test('[REC-014] a runner killed mid-hook keeps its tool debt until the same tool event records once after restart', async () => {
+test('[REC-014] a hook killed mid-record keeps its tool debt until the same tool event records once after a runner restart', async () => {
   const f = enabledFixture();
   assert.equal((await startRunner(f, SID, [prompt('BEFORE_KILL')]).done).status, 0);
   const ready = join(f.projectRoot, 'record-paused');
@@ -199,11 +200,21 @@ test('[REC-014] a runner killed mid-hook keeps its tool debt until the same tool
   writeFileSync(pause, `import fs from 'node:fs';if(process.argv[1]?.endsWith('/core/cli.ts')&&process.argv.includes('record')){fs.writeFileSync(${JSON.stringify(ready)},'ready');await new Promise(resolve=>setTimeout(resolve,30000));}`);
   const killed = toolUse('Bash', { command: 'make check' }, 'KILLED_TOOL_OUTPUT', 'call_killed');
   const revision = headRevision(f, SID);
+  const lease = join(layout(f.projectRoot, SID, f.stateDir).stateDir, 'codex-prompt.lock');
   const runner = startRunner(f, SID, [killed], { NODE_OPTIONS: `--import=${pause}` }, 40_000);
+  let first: Run;
   try {
     for (const until = Date.now() + 15_000; !existsSync(ready);) { assert.ok(Date.now() < until, 'the tool hook reached its record call'); await delay(20); }
+    const hook = readLock(lease);
+    assert.ok(hook && hook !== 'unreadable' && hook.pid !== runner.pid, 'the tool hook holds the prompt lease');
+    // The runner, the hook's parent, reaps it. A hook orphaned by a group kill stays a zombie where
+    // PID 1 does not reap orphans, and a zombie still counts as a live lease holder.
+    process.kill(hook.pid, 'SIGKILL');
+    first = await runner.done;
+    assert.equal(isAlive(hook), false, 'the killed hook no longer holds the lease');
   } finally { killGroup(runner.pid); }
-  assert.equal((await runner.done).signal, 'SIGKILL');
+  assert.equal(first.status, 0, first.stderr);
+  assert.deepEqual(runnerResults(first).map(r => [r.status, r.stdout]), [[null, '']], 'the hook died by a signal and wrote nothing');
   assert.equal(headRevision(f, SID), revision, 'nothing was committed before the kill');
   assert.equal(loggedEvents(f, SID).some(e => e.event.text.includes('KILLED_TOOL_OUTPUT')), false, 'nothing was recorded before the kill');
   assert.equal(pendingMarkers(f, SID).length, 1, 'the tool intent survives the kill');
