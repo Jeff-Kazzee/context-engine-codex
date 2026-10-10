@@ -142,3 +142,27 @@ test('[SAFE-011] a hard-linked backup copy refuses uninstall before any runner c
   assert.deepEqual(tree(w.project), project, 'no project setting was reverted');
   assert.ok(existsSync(pointer), 'the install record stays');
 });
+
+test('[LIFE-015] without its before backup the undo keeps every value it did not write and lists it', async () => {
+  const w = world();
+  const config = join(w.codexHome, 'config.toml');
+  // The user's own table at a Context Engine table name, which the killed install never wrote.
+  const own = '[plugins."context-engine@context-engine"]\nenabled = false\n';
+  writeFileSync(config, `# my codex config\n${own}`);
+  const pause = join(tempDir('pause'), 'plugin-add');
+  const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+  try { await waitForFile(pause); } finally { killGroup(install.pid); }
+  assert.equal((await install.done).signal, 'SIGKILL');
+  rmSync(join(w.stateDir, 'setup', 'codex.setup.lock'));
+  const pending = join(w.stateDir, 'setup', 'codex.pending.json');
+  assert.match(readFileSync(config, 'utf8'), /\[marketplaces\.context-engine\]/, 'the kill left the marketplace table the install wrote');
+  unlinkSync(join(snapshotOf(pending), 'before', '0-config.toml'));
+
+  const r = w.ce(['uninstall']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const now = readFileSync(config, 'utf8');
+  assert.ok(now.includes(own), `the user's table stays:\n${now}`);
+  assert.doesNotMatch(now, /\[marketplaces\.context-engine\]/, 'the table the install wrote is gone');
+  assert.ok(r.stdout.includes(`${config}: [plugins."context-engine@context-engine"] left in place because the backup copy is missing`), r.stdout);
+  assert.doesNotMatch(r.stdout, /Only Context Engine's entries were removed/, 'the report claims no more than it did');
+});
