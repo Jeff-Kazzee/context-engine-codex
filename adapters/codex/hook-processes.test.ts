@@ -415,3 +415,33 @@ test('[CDX-009] a notice reaches the tool hook that waited while a prompt commit
   assert.equal(toolDone.status, 0, toolDone.stderr);
   await assertReadableNotice(f, toolDone, headRevision(f, SID));
 });
+
+const noticePath = (f: Fixture) => join(layout(f.projectRoot, SID, f.stateDir).stateDir, 'codex-read-notice.json');
+
+test('[CDX-009] a tool hook after a failed notice check owes no notice without a model edit, and records its output', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  assert.equal((await runHook(f, SID, toolUse('Bash', { command: 'ls' }, 'FIRST_OUTPUT'))).stdout, '');
+  const failSync = join(f.projectRoot, 'fail-sync.mjs');
+  writeFileSync(failSync, `import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const spawn=cp.spawnSync;cp.spawnSync=function(file,args,...rest){if(Array.isArray(args)&&args.includes('sync'))return {status:null,signal:null,stdout:'',stderr:'',output:[],pid:0,error:Object.assign(new Error('synthetic stalled sync'),{code:'ETIMEDOUT'})};return spawn.call(this,file,args,...rest);};syncBuiltinESMExports();`);
+  const stalled = await runHook(f, SID, toolUse('Bash', { command: 'make' }, 'STALLED_OUTPUT'), { NODE_OPTIONS: `--import=${failSync}` });
+  assert.ok(stoppedContinuation(stalled), stalled.stdout);
+  assert.equal(JSON.parse(readFileSync(noticePath(f), 'utf8')).kind, 'checking', 'the failed check left its state behind');
+  const after = await runHook(f, SID, toolUse('Bash', { command: 'echo after' }, 'AFTER_OUTPUT'));
+  assert.equal(after.status, 0, after.stderr);
+  assert.doesNotMatch(after.stdout, /was validated/, 'no model edit, so no notice');
+  assert.ok(loggedEvents(f, SID).some(e => e.event.text.includes('AFTER_OUTPUT')), 'the output reaches the Event Log');
+  assert.match(readFileSync(wcPath(f), 'utf8'), /AFTER_OUTPUT/);
+});
+
+test('[CDX-009] a prompt after an interrupted notice check carries no notice without a model edit', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  assert.equal((await runHook(f, SID, toolUse('Bash', { command: 'ls' }, 'FIRST_OUTPUT'))).stdout, '');
+  // A tool hook that died after it marked the check, before its sync returned.
+  writeFileSync(noticePath(f), JSON.stringify({ kind: 'checking', lastNotifiedRevision: 0 }));
+  const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
+  assert.equal(stoppedContinuation(next), false, next.stdout);
+  assert.doesNotMatch(next.stdout, /was validated/, 'no model edit, so no notice');
+  assert.equal((await runHook(f, SID, stop('REPLY_AFTER_CHECK'))).stdout, '', 'the cleared check no longer refuses a Stop');
+});
