@@ -81,5 +81,5 @@ The file `<state>/setup/<runner>.json` that names the Setup Snapshot of a finish
 _Avoid_: install pointer, ledger (in messages for people)
 
 **Interrupted Install Record**:
-The file `<state>/setup/<runner>.pending.json`. Install writes it after the before backups and before the first runner command, and removes it when it publishes the Install Record or finishes its rollback. A record left behind means a killed install. The next install or uninstall undoes that install first, and until then enable and status refuse. A record that names the same Setup Snapshot as the Install Record belongs to a finished install. It is not undone, and the next enable, install or uninstall removes it.
+The file `<state>/setup/<runner>.pending.json`. Install writes it after the before backups and before the first runner command, and removes it when it publishes the Install Record or finishes its rollback. A record left behind means a killed install. The next install or uninstall undoes that install first. Until then enable refuses, and so does status once the Setup Lock is gone. While the Setup Lock remains, status names the lock and the record. A record that names the same Setup Snapshot as the Install Record belongs to a finished install. It is not undone, and the next enable, install or uninstall removes it.
 _Avoid_: pending record (in messages for people)

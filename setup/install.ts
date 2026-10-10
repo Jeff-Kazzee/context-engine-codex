@@ -63,6 +63,19 @@ export function refuseInterruptedInstall(ctx: SetupContext, spec: RunnerSpec, lo
   throw new SetupError(`${spec.title}: an install did not finish, and its configuration changes are not undone. Run \`context-engine-${spec.id} uninstall\` to undo them, or \`context-engine-${spec.id} install\` to undo them and install again. Interrupted install record: ${pendingPath(ctx, spec.id)}. Its before backups: ${join(snap.dir, 'before')}`);
 }
 
+/**
+ * Status takes no lock. Without a setup lock, an interrupted install record that is not a finished install's
+ * means a killed install, and status refuses as enable does. With the lock present an install may still be
+ * running, so status gets a line that names the lock and the record instead of "not installed".
+ */
+export function interruptedInstallStatus(ctx: SetupContext, spec: RunnerSpec): string | null {
+  const lock = join(ctx.setupDir, `${spec.id}.setup.lock`);
+  if (!existsSync(lock)) { refuseInterruptedInstall(ctx, spec, false); return null; }
+  const snap = interruptedInstall(ctx, spec);
+  if (!snap || installedLedger(ctx, spec.id, spec)?.dir === snap.dir) return null;
+  return `an install is running, or was killed and left its setup lock. Setup lock: ${lock}. Interrupted install record: ${pendingPath(ctx, spec.id)}`;
+}
+
 /** A SIGKILL skips the rollback in installLocked, so the next run finishes it before anything else. */
 function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   const snap = interruptedInstall(ctx, spec);
