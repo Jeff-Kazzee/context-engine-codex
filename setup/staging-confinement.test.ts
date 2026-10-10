@@ -44,6 +44,31 @@ test('[SAFE-012] a linked staging directory refuses install by name without a st
   assert.equal(fs.readFileSync(config, 'utf8'), '# my codex config\n');
 });
 
+test('[SAFE-012] a staging directory that becomes a link after its removal cannot redirect the copy', () => {
+  const w = world();
+  const ctx = setupContext({ ...process.env, ...w.env });
+  const outside = tempDir('outside');
+  writeFileSync(join(outside, 'sentinel'), 'SENTINEL');
+  const before = tree(outside);
+  const native = fs.rmSync;
+  let planted = false, error: unknown;
+  fs.rmSync = ((path: fs.PathLike, ...rest: any[]) => {
+    const result = (native as any)(path, ...rest);
+    if (!planted && String(path).endsWith('/codex-marketplace')) {
+      planted = true;
+      symlinkSync(outside, join(ctx.setupDir, 'codex-marketplace'));
+    }
+    return result;
+  }) as typeof fs.rmSync;
+  syncBuiltinESMExports();
+  try { installLocked(ctx, codexSpec(ctx)); }
+  catch (e) { error = e; }
+  finally { fs.rmSync = native; syncBuiltinESMExports(); }
+  assert.equal(planted, true, 'staging removed its directory');
+  assert.deepEqual(tree(outside), before, 'nothing was copied into the outside directory');
+  assert.ok(error, 'install refused the linked staging directory');
+});
+
 test('[SAFE-012] swapped codex-marketplace staging dir cannot copy or delete outside the state root', () => {
   const w = world();
   const ctx = setupContext({ ...process.env, ...w.env });
