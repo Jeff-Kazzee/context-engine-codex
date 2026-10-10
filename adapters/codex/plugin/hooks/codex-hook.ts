@@ -416,7 +416,9 @@ async function main(input: HookInput): Promise<void> {
     // Mark the reset in the file, as a new_context call is marked, unless that marker is already the
     // last turn (a new_context reset reaches PreCompact too, also as `auto`). This reset is the
     // runner's, not the agent's: the marker and its Event Log entry carry the Compaction-only label.
-    else if (!lastTurnIsReset) {
+    // After a failed sync the marker is omitted: its record would commit and bury an edit whose notice
+    // this hook could not settle.
+    else if (lastSync && !lastTurnIsReset) {
       const manual = input.trigger === 'manual';
       const delivery = manual ? lib.CODEX_MANUAL_COMPACTION.label : lib.CODEX_TOKEN_LIMIT_RESET.label;
       try {core(input, 'record', [{ role: 'tool', text: backstopMarker(delivery, manual), delivery }],lib.READ_MAX_FILE_BYTES);}
