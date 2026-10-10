@@ -323,6 +323,14 @@ function about<T>(path: string, action: () => T): T {
   }
 }
 
+/**
+ * Every backup copy that exists must be a private regular file with one link. Callers check this before any
+ * runner command or file change. A copy that is gone is not an error here: revert handles it.
+ */
+export function checkBackupCopies(files: Ledger['files']): void {
+  for (const f of files) for (const p of [f.before, f.after]) if (p !== null) checkOwnedFile(p);
+}
+
 /** The first backup copy of `f` that the ledger names but that is gone. */
 function lostCopy(f: Ledger['files'][number]): { kind: 'before' | 'after'; path: string } | undefined {
   if (f.before !== null && safeRead(f.before) === null) return { kind: 'before', path: f.before };

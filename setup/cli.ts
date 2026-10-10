@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { acquireSetupLock } from './files.ts';
-import { installedLedger, installLocked as install, interruptedInstall, interruptedInstallStatus, uninstallLocked as uninstall } from './install.ts';
+import { checkInstallBackups, installedLedger, installLocked as install, interruptedInstall, interruptedInstallStatus, uninstallLocked as uninstall } from './install.ts';
 import { trustCodexHooks } from './codex-trust.ts';
 import { disableProject, enableProject, revertAllCodexProjects } from './project.ts';
 import { codexSpec, type RunnerSpec, setupContext } from './runners.ts';
@@ -65,9 +65,11 @@ export async function runSetup(argv: string[]): Promise<number> {
             out([`${spec.title}: installed. Delivery Mode: ${label}.`, ...lines.map((l) => `  ${l}`), '  Inert until `context-engine-codex enable` in a project (the pilot is opt-in).']);
           } else {
             // Project reverts belong to a recorded install. Without the record, uninstall leaves projects alone.
-            // An interrupted install record that fails validation refuses before any project is reverted.
-            const installed = spec.id === 'codex' && !!installedLedger(ctx, spec.id, spec);
-            if (installed) interruptedInstall(ctx, spec);
+            // An interrupted install record that fails validation, or a backup copy that cannot be used,
+            // refuses before any project is reverted.
+            const ledger = spec.id === 'codex' ? installedLedger(ctx, spec.id, spec) : null;
+            const installed = !!ledger;
+            if (ledger) { interruptedInstall(ctx, spec); checkInstallBackups(spec, ledger); }
             const lines = installed ? revertAllCodexProjects(ctx) : [];
             lines.push(...uninstall(ctx, spec));
             // Without an install record, a successful uninstall only undid an interrupted install.

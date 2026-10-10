@@ -4,7 +4,7 @@ import { anchor, childTarget } from '../core/platform.ts';
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirPrivateSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '../core/platform.ts';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
-import { assess, completeLedger, type FileReport, type Ledger, preflightOwnership, readLedger, revert, rollbackSnapshot, type Snapshot, takeSnapshot } from './ledger.ts';
+import { assess, checkBackupCopies, completeLedger, type FileReport, type Ledger, preflightOwnership, readLedger, revert, rollbackSnapshot, type Snapshot, takeSnapshot } from './ledger.ts';
 import { checkOwnedDirectory, safeRead, safeWrite, withSetupLock } from './files.ts';
 import { openPrivateDirectory } from '../core/store.ts';
 import { codexSpec, runBinary, type RunnerSpec, type SetupContext } from './runners.ts';
@@ -77,12 +77,13 @@ export function interruptedInstallStatus(ctx: SetupContext, spec: RunnerSpec): s
 function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   const snap = interruptedInstall(ctx, spec);
   if (!snap) return [];
-  // The undo never restores or deletes a file whose before copy is gone. It removes our entries and says so.
-  const lost = snap.files.filter((f) => f.before !== null && safeRead(f.before) === null).map((f): FileReport => ({ path: f.path, outcome: 'before-missing', lost: f.before! }));
-  let retained: string[];
+  let retained: string[], lost: FileReport[];
   try {
     checkOwnedDirectory(spec.home);
     preflightOwnership(spec);
+    checkBackupCopies(snap.files);
+    // The undo never restores or deletes a file whose before copy is gone. It removes our entries and says so.
+    lost = snap.files.filter((f) => f.before !== null && safeRead(f.before) === null).map((f): FileReport => ({ path: f.path, outcome: 'before-missing', lost: f.before! }));
     retained = rollbackSnapshot(snap, spec.rules);
   } catch (e) {
     // The record stays, so the next install or uninstall repeats the undo once the cause is repaired.
@@ -211,6 +212,7 @@ export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   }
   // A record that fails validation refuses here, before any change, and not after the uninstall finished.
   const pending = interruptedInstall(ctx, spec);
+  checkInstallBackups(spec, ledger);
   checkOwnedDirectory(spec.home);
   preflightOwnership(spec);
   const lines: string[] = [];
@@ -227,6 +229,15 @@ export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   lines.push(`Backups kept: ${ledger.dir}`);
   if (ledger.retainedPaths?.length) lines.push(`Unowned new paths retained: ${ledger.retainedPaths.length}`);
   return lines;
+}
+
+/** Uninstall checks every backup copy that exists before any runner command or file change. */
+export function checkInstallBackups(spec: RunnerSpec, ledger: Ledger): void {
+  try { checkBackupCopies(ledger.files); }
+  catch (e) {
+    const cause = (e instanceof Error ? e.message : String(e)).replace(/\.$/, '');
+    throw new SetupError(`${spec.title}: uninstall changed nothing, because a backup copy of this install cannot be used: ${cause}. Make that copy a private file with a single link, then run \`context-engine-${spec.id} uninstall\` again.`, { cause: e });
+  }
 }
 
 export function describe(reports: FileReport[]): string[] {
