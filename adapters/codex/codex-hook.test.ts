@@ -744,3 +744,16 @@ test('wave52: a symlinked cwd avoids self-copy through canonical and notice path
   assert.equal(ordinary.status, 0, ordinary.stderr);
   assert.match(wc(f), /ORDINARY_THROUGH_LINK/);
 });
+
+test('wave52: a symlink into the session directory followed by .. still avoids self-copy', () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('ORIGINAL_TASK')).status, 0);
+  const sub = join(f.projectRoot, '.context-engine', SID, 'sub');
+  mkdirSync(sub);
+  symlinkSync(sub, join(f.projectRoot, 'link'));
+  const before = wc(f);
+  // The shell resolves link before .., so this reads the Working Context itself.
+  const result = hook(f, toolUse('Bash', { command: 'cat link/../context.md' }, 'SELF_COPY_RESULT'));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(wc(f), before);
+});
