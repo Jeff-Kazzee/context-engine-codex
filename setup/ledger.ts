@@ -19,7 +19,7 @@ import { existsSync, lstatSync, mkdirPrivateSync, opendirSync, readFileSync, rmd
 import { basename, dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { closeSync, fstatSync, fsyncSync, openSync } from '../core/platform.ts';
 import { openPrivateDirectory } from '../core/store.ts';
-import { checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeRemoveEmptyDirectory, safeRemoveTree, safeWrite } from './files.ts';
+import { candidateDigest, checkComponents, checkOwnedDirectory, checkOwnedFile, safeRead, safeRemove, safeRemoveEmptyDirectory, safeRemoveTree, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
 
 /** How to recognise and remove our entries in one file. */
@@ -118,12 +118,23 @@ function refuseInterruptedWrites(files: string[]): void {
     try {
       for (let entry; (entry = directory.readSync()) !== null;) {
         const left = join(dir, entry.name);
-        if (/^\.context-engine-setup-[0-9a-f]{16}\.tmp$/.test(entry.name)) steps.push(`Remove ${left}. Setup writes there first, and it never holds the only copy of a file.`);
-        else if (/^\.context-engine-(replace|delete)-[0-9a-f]{32}\.tmp$/.test(entry.name)) steps.push(`${left} may hold the only current bytes of a tracked file in ${dir}. Move it back to that file's name if that file is missing, or remove it.`);
+        if (/^\.context-engine-setup-[0-9a-f]{16}\.tmp$/.test(entry.name)) { steps.push(`Remove ${left}. Setup writes there first, and it never holds the only copy of a file.`); continue; }
+        const candidate = /^\.context-engine-(?:replace|delete)-[0-9a-f]{32}(?:-([0-9a-f]{16}))?\.tmp$/.exec(entry.name);
+        if (!candidate) continue;
+        // The name's digest says which tracked file the candidate came from. Whether that file exists says what to do.
+        const target = files.find((path) => dirname(path) === dir && candidate[1] === candidateDigest(path));
+        if (target === undefined) steps.push(`${left} may hold the only current bytes of a tracked file in ${dir}. Move it back to that file's name if that file is missing, or remove it.`);
+        else if (present(target)) steps.push(`Remove ${left}. ${target} exists, and the candidate holds only its earlier bytes or nothing.`);
+        else steps.push(`Move ${left} back to ${target}. It holds the only current bytes of that file.`);
       }
     } finally { directory.closeSync(); }
     if (steps.length) throw new Error(`an interrupted setup write left files beside tracked configuration. ${steps.join(' ')} Then run setup again.`);
   }
+}
+
+function present(path: string): boolean {
+  try { lstatSync(path); return true; }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e; }
 }
 
 /** Backs up `files` byte for byte into a new timestamped dir under `backupRoot`, and lists `watch`. */

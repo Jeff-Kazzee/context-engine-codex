@@ -4,8 +4,14 @@ import { anchor, childTarget, requireSupportedPlatform, targetBasename, type Fil
 // is required, like the core's confined file reads.
 import { closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirPrivateSync, openSync, opendirSync, readSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from '../core/platform.ts';
 import { openPrivateDirectory } from '../core/store.ts';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, join, parse, resolve, sep } from 'node:path';
+
+/** A replace or delete candidate's name ends with this digest of its target's name, so a refusal can name the target. */
+export function candidateDigest(path: string): string {
+  return createHash('sha256').update(basename(path)).digest('hex').slice(0, 16);
+}
+const candidateName = (kind: 'replace' | 'delete', path: string) => `.context-engine-${kind}-${randomBytes(16).toString('hex')}-${candidateDigest(path)}.tmp`;
 
 export function checkComponents(path: string): void {
   requireSupportedPlatform();
@@ -116,7 +122,7 @@ export function safeWrite(path: string, data: string | Buffer, expected?: Buffer
     if(expected===undefined)renameSync(tmp,target);
     else {
       if(expected!==null) {
-        candidate=childTarget(anchored,`.context-engine-replace-${randomBytes(16).toString('hex')}.tmp`);
+        candidate=childTarget(anchored,candidateName('replace',path));
         closeSync(openSync(candidate,'exclusive-nofollow'));
         renameSync(target,candidate);moved=true;fsyncSync(fd);
         const old=openSync(candidate,'read');
@@ -201,7 +207,7 @@ export function safeRemove(path: string, expected: Buffer | null): void {
     }
     // Reserve a random exclusive candidate, then inspect what rename actually removed.
     // A replacement at the original basename is never deleted based on an earlier read.
-    candidate = childTarget(anchor(dir), `.context-engine-delete-${randomBytes(16).toString('hex')}.tmp`);
+    candidate = childTarget(anchor(dir), candidateName('delete', path));
     closeSync(openSync(candidate, 'exclusive-nofollow')); reserved = true;
     renameSync(anchored, candidate); moved = true; fsyncSync(dir);
     const file = openSync(candidate, 'read');
