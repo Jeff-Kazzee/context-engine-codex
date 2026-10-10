@@ -166,3 +166,33 @@ test('[LIFE-015] without its before backup the undo keeps every value it did not
   assert.ok(r.stdout.includes(`${config}: [plugins."context-engine@context-engine"] left in place because the backup copy is missing`), r.stdout);
   assert.doesNotMatch(r.stdout, /Only Context Engine's entries were removed/, 'the report claims no more than it did');
 });
+
+async function killedInstallFor(w: ReturnType<typeof world>): Promise<string> {
+  const pause = join(tempDir('pause'), 'plugin-add');
+  const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+  try { await waitForFile(pause); } finally { killGroup(install.pid); }
+  assert.equal((await install.done).signal, 'SIGKILL');
+  rmSync(join(w.stateDir, 'setup', 'codex.setup.lock'));
+  return join(w.stateDir, 'setup', 'codex.pending.json');
+}
+
+for (const run of ['undo', 'uninstall']) {
+  test(`[LIFE-015] a tracked file and its before backup both gone are reported by the copy (${run})`, async () => {
+    const w = world();
+    const tracked = join(w.codexHome, 'config.toml');
+    writeFileSync(tracked, '# my codex config\n');
+    let record: string;
+    if (run === 'undo') record = await killedInstallFor(w);
+    else { assert.equal(w.ce(['install']).status, 0); record = join(w.stateDir, 'setup', 'codex.json'); }
+    const copy = join(snapshotOf(record), 'before', '0-config.toml');
+    unlinkSync(copy);
+    unlinkSync(tracked);
+
+    const r = w.ce(['uninstall']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const line = r.stdout.split('\n').find((l) => l.includes(`${tracked}:`)) ?? '';
+    assert.ok(line.includes(copy), `the report names the lost copy ${copy}:\n${r.stdout}`);
+    assert.doesNotMatch(line, /removed/, `nothing is claimed removed from a file that is gone:\n${line}`);
+    assert.equal(existsSync(tracked), false, 'config.toml stays missing');
+  });
+}
