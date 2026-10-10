@@ -19,6 +19,7 @@ import {
   layout,
   readBytes,
   readLog,
+  readLogRows,
   readWorkingContextFile,
   assertWorkingContextDir,
   removeTemps,
@@ -28,6 +29,7 @@ import {
   sha,
   truncateTornTail,
   type Layout,
+  type LogRange,
 } from './store.ts';
 import { countHeaders, parseTurns, renderTurns, type Turn } from './turns.ts';
 import { checkRefs, experimentOn, staleText, type StaleReport } from './refs.ts';
@@ -160,6 +162,26 @@ interface Replacement {
 
 type Pending = { seq: number; event: RunnerEvent; replace?: Replacement };
 
+/**
+ * The operation index lists the first identified runner-events row of each record operation ID.
+ * It is derived from the Event Log and complete through byte `through` of it. A lookup searches
+ * the index bytes, scans only log rows after `through`, checks a hit against its own row, and
+ * rebuilds a missing, damaged or disagreeing index from the whole log.
+ */
+type IndexedOperation = { sha: string; start: number; end: number };
+type OperationLookup = { hit?: IndexedOperation; through: number; writable: boolean };
+const OPERATION_INDEX = 'operations.jsonl';
+
+function loggedOperation(entry: Record<string, unknown>): { id: string; sha: string } | undefined {
+  if (entry.type !== 'runner-events' || !entry.operation || typeof entry.operation !== 'object') return undefined;
+  const { id, sha: digest } = entry.operation as { id?: unknown; sha?: unknown };
+  return typeof id === 'string' && typeof digest === 'string' ? { id, sha: digest } : undefined;
+}
+
+function indexLine(operation: { id: string; sha: string }, row: LogRange): Record<string, unknown> {
+  return { id: operation.id, sha: operation.sha, start: row.start, end: row.end, through: row.end };
+}
+
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
 function decode(bytes: Buffer): string | null {
@@ -278,6 +300,8 @@ class Core {
   private unloggedCommit: { head: Head; text: string } | undefined;
   private appendUncertain=false;
   private recoveryReceiptHeads: Array<{rev:number;sha:string}> = [];
+  /** The operation index as of this call's lookup, extended by the row the call appends. */
+  private operationIndex: OperationLookup | undefined;
   // Acknowledgements are confirmed only on a later call, after the result returned.
   private returnedReceiptHeads: Array<{rev:number;sha:string}> = [];
   private readonly l: Layout;
@@ -588,10 +612,8 @@ class Core {
     const synced = this.retainReceipt(this.sync());
     if (operation) {
       // Identity and events share one durable row, including during replay after a failed return.
-      for (const entry of readLog(this.l.events)) {
-        if (entry.type !== 'runner-events' || !entry.operation || typeof entry.operation !== 'object') continue;
-        const recorded = entry.operation as { id?: unknown; sha?: unknown };
-        if (recorded.id !== operation.id) continue;
+      const recorded = this.findOperation(operation.id);
+      if (recorded) {
         if (recorded.sha !== operation.sha) throw new Error('record operation identifier was used for different input');
         return this.result(this.apply(), synced.receipt);
       }
@@ -609,16 +631,121 @@ class Core {
     const previewHead=this.head();
     const prospective = this.renderPending([...this.unapplied, ...preview].filter(p=>p.seq>(previewHead?.through??0)),previewHead);
     if (Buffer.byteLength(prospective.text, 'utf8') > maxBytes) throw new Error(`revision snapshot exceeds the ${maxBytes === SNAPSHOT_MAX_BYTES ? '64 MiB' : maxBytes+' byte'} publication limit`);
-    try {appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(operation ? { operation } : {}), ...(replacement ? { replace: replacement } : {}) });}
+    let row: LogRange;
+    try {row=appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(operation ? { operation } : {}), ...(replacement ? { replace: replacement } : {}) });}
     catch(e) {if((e as NodeJS.ErrnoException).code==='CE_LOG_APPEND_AMBIGUOUS')this.appendUncertain=true;throw e;}
     this.lastSeq += numbered.length;
     if (replacement) numbered[0]!.replace = replacement;
     this.unapplied.push(...numbered);
     crashPoint('after-log');
+    if (operation) this.indexOperation(operation, row);
     const head = this.apply();
     const r = this.result(head);
     if (synced.receipt) r.receipt = synced.receipt;
     return r;
+  }
+
+  private operationIndexPath(): string { return join(this.l.stateDir, OPERATION_INDEX); }
+
+  private logIdentity(): { dev: string; ino: string; size: number } | undefined {
+    try {
+      const st = statSync(this.l.events, { bigint: true });
+      return { dev: String(st.dev), ino: String(st.ino), size: Number(st.size) };
+    } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
+  }
+
+  /** Finds the first row of an operation ID without reading the whole Event Log in the normal path. */
+  private findOperation(id: string): IndexedOperation | undefined {
+    let found = this.searchOperationIndex(id);
+    if (found?.hit && !this.operationRowMatches(id, found.hit)) found = undefined;
+    found ??= this.rebuildOperationIndex(id);
+    this.operationIndex = found;
+    return found.hit;
+  }
+
+  /** Searches the persisted index, then indexes log rows after it. Undefined when it is missing or damaged. */
+  private searchOperationIndex(id: string): OperationLookup | undefined {
+    try {
+      const log = this.logIdentity();
+      const bytes = log && readBytes(this.operationIndexPath());
+      if (!log || !bytes) return undefined;
+      // A torn final line is not part of the index. The next append cuts it.
+      const index = bytes.subarray(0, bytes.lastIndexOf(0x0a) + 1);
+      const line = (start: number) => {
+        const end = index.indexOf(0x0a, start);
+        return end < 0 ? undefined : JSON.parse(decoder.decode(index.subarray(start, end))) as Record<string, unknown>;
+      };
+      const header = line(0), last = line(index.lastIndexOf(0x0a, index.length - 2) + 1);
+      if (!header || header.type !== 'operation-index' || header.dev !== log.dev || header.ino !== log.ino || header.through !== 0) return undefined;
+      if (!last || !Number.isSafeInteger(last.through) || (last.through as number) > log.size) return undefined;
+      let through = last.through as number, hit: IndexedOperation | undefined;
+      const at = index.indexOf(`\n{"id":"${id}"`);
+      if (at >= 0) {
+        const entry = line(at + 1);
+        if (!entry || entry.id !== id || typeof entry.sha !== 'string' || !Number.isSafeInteger(entry.start) || !Number.isSafeInteger(entry.end)
+            || (entry.end as number) <= (entry.start as number) || entry.through !== entry.end || (entry.end as number) > through) return undefined;
+        hit = { sha: entry.sha, start: entry.start as number, end: entry.end as number };
+      }
+      const found: OperationLookup = { through, writable: true };
+      if (through < log.size) {
+        for (const row of readLogRows(this.l.events, through)) {
+          const operation = loggedOperation(row.entry);
+          if (operation) {
+            if (!hit && !found.hit && operation.id === id) found.hit = { sha: operation.sha, start: row.start, end: row.end };
+            if (found.writable) {
+              try { appendLog(this.operationIndexPath(), indexLine(operation, row)); }
+              catch { found.writable = false; }
+            }
+          }
+          through = row.end;
+        }
+      }
+      found.through = through;
+      if (hit) found.hit = hit;
+      return found;
+    } catch { return undefined; }
+  }
+
+  /** A hit must name its own complete row, so the index never stands in for log data. */
+  private operationRowMatches(id: string, hit: IndexedOperation): boolean {
+    try {
+      for (const row of readLogRows(this.l.events, hit.start)) {
+        const operation = loggedOperation(row.entry);
+        return row.end === hit.end && operation?.id === id && operation.sha === hit.sha;
+      }
+    } catch { /* A range that does not start a record disagrees with the log. */ }
+    return false;
+  }
+
+  /** Recovery path: one full Event Log scan, then an atomic replacement of the index. */
+  private rebuildOperationIndex(id: string): OperationLookup {
+    const log = this.logIdentity();
+    if (!log) return { through: 0, writable: false };
+    const lines = [JSON.stringify({ type: 'operation-index', dev: log.dev, ino: log.ino, through: 0 })];
+    const seen = new Set<string>();
+    const found: OperationLookup = { through: 0, writable: true };
+    for (const row of readLogRows(this.l.events)) {
+      const operation = loggedOperation(row.entry);
+      if (operation && !seen.has(operation.id)) {
+        seen.add(operation.id);
+        if (operation.id === id) found.hit = { sha: operation.sha, start: row.start, end: row.end };
+        lines.push(JSON.stringify(indexLine(operation, row)));
+      }
+      found.through = row.end;
+    }
+    lines.push(JSON.stringify({ through: found.through }));
+    try { atomicWrite(this.operationIndexPath(), lines.join('\n') + '\n', 'operation-index-tmp'); }
+    catch { found.writable = false; }
+    return found;
+  }
+
+  /** Extends the index with this call's own row when the index reaches exactly to its start. */
+  private indexOperation(operation: { id: string; sha: string }, row: LogRange): void {
+    const index = this.operationIndex;
+    this.operationIndex = undefined;
+    if (!index?.writable || index.through !== row.start) return;
+    try { appendLog(this.operationIndexPath(), indexLine(operation, row)); }
+    catch { /* The next lookup scans the Event Log from the last indexed offset. */ }
   }
 
   /**
