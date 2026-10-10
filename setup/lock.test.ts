@@ -26,7 +26,7 @@ test('[CLI-008] a stale lock from a killed setup names the exact lock', async ()
     const r = w.ce([command]);
     assert.notEqual(r.status, 0, `${command} ran past the stale lock`);
     assert.ok(r.stderr.includes(lock), `${command} names ${lock}:\n${r.stderr}`);
-    assert.match(r.stderr, /verify no setup process is running before removing this lock/);
+    assert.match(r.stderr, /verify no setup process is running, including a runner plugin command it started, before removing this lock/);
   }
   assert.deepEqual(tree(w.project), project);
   assert.equal(w.ce(['status', '--json']).status, 0, 'status takes no lock');

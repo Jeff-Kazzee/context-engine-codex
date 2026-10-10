@@ -258,7 +258,7 @@ export function acquireSetupLock(path: string): () => void {
     if (!fstatSync(dir).isDirectory() || realpathSync(anchor(dir)) !== parent) throw new Error(`setup cannot verify directory: ${parent}`);
     try { lock = openSync(anchored, 'exclusive-nofollow'); }
     catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`setup transaction already locked: ${path}; wait for the active setup to finish. If interrupted, verify no setup process is running before removing this lock.`);
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`setup transaction already locked: ${path}; wait for the active setup to finish. If interrupted, verify no setup process is running, including a runner plugin command it started, before removing this lock.`);
       throw e;
     }
     writeFileSync(lock, `${JSON.stringify({ pid: process.pid })}\n`);
