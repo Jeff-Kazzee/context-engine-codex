@@ -152,15 +152,17 @@ export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
       `New paths outside Context Engine namespaces retained: ${ledger.retainedPaths?.length ?? 0} (ownership unverified; uninstall will leave them alone)`,
     ];
   } catch (e) {
+    // The undo of an interrupted install already finished, so a failure report keeps its lines.
+    const report = (message: string) => [message, ...recovered].join('\n');
     let retained: string[];
     try { retained = rollbackSnapshot(snap, spec.rules); removePending(ctx, spec.id); }
-    catch (rollbackError) { throw new AggregateError([e, rollbackError], `${spec.title}: install failed and rollback was incomplete; before backups are preserved at ${join(snap.dir, 'before')}`); }
+    catch (rollbackError) { throw new AggregateError([e, rollbackError], report(`${spec.title}: install failed and rollback was incomplete; before backups are preserved at ${join(snap.dir, 'before')}`)); }
     // A rename may publish before its directory flush throws. Remove only our pointer.
     if (publication && safeRead(pointerPath(ctx, spec.id))?.equals(Buffer.from(publication))) {
       try { removeFailedPointer(ctx, spec.id, publication); }
-      catch (cleanupError) { throw new AggregateError([e, cleanupError], `${spec.title}: install failed; pointer cleanup was incomplete; configuration rollback completed and backups are preserved`); }
+      catch (cleanupError) { throw new AggregateError([e, cleanupError], report(`${spec.title}: install failed; pointer cleanup was incomplete; configuration rollback completed and backups are preserved`)); }
     }
-    throw new SetupError(`${e instanceof Error ? e.message : String(e)}; tracked configuration rollback completed with unmanaged edits preserved; ${retained.length} unowned new paths retained; before backups: ${join(snap.dir, 'before')}`, { cause: e });
+    throw new SetupError(report(`${e instanceof Error ? e.message : String(e)}; tracked configuration rollback completed with unmanaged edits preserved; ${retained.length} unowned new paths retained; before backups: ${join(snap.dir, 'before')}`), { cause: e });
   }
 }
 
