@@ -10,7 +10,7 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, readFileSync, readdirSync, realpathSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { locallyEnabled } from './activation.ts';
 import type * as Core from '../../../../core/index.ts';
@@ -402,12 +402,13 @@ function touchesWorkingContext(input: HookInput): boolean {
   const data = input.tool_input as Record<string, unknown> | undefined;
   if (!data || typeof data !== 'object') return false;
   // The core keeps the Working Context under the canonical project root, and the host cwd can be a
-  // symlinked alias of it. Compare each path as given and in canonical form.
+  // symlinked alias of it. Compare each path as given, in canonical form, and as the filesystem
+  // resolves it, which follows a symlink before any later `..`.
   const managedRoot = resolve(input.cwd, lib.WORKING_CONTEXT_DIR), canonicalRoot = canonicalPath(managedRoot);
   const within = (root: string, candidate: string) => candidate === root || candidate.startsWith(root + '/');
   const managedPath = (path: string) => {
     const candidate = resolve(input.cwd, path);
-    return within(managedRoot, candidate) || within(canonicalRoot, canonicalPath(candidate));
+    return within(managedRoot, candidate) || within(canonicalRoot, canonicalPath(candidate)) || within(canonicalRoot, physicalPath(input.cwd, path));
   };
   for (const key of ['file_path', 'path', 'filename']) {
     if (typeof data[key] === 'string' && managedPath(data[key] as string)) return true;
@@ -434,6 +435,22 @@ function canonicalPath(path: string): string {
       missing.unshift(basename(current));
     }
   }
+}
+
+/** A path resolved component by component from the real cwd, following each symlink where it appears. */
+function physicalPath(cwd: string, path: string): string {
+  const parts = path.split('/');
+  let current = isAbsolute(path) ? '/' : canonicalPath(resolve(cwd));
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!;
+    if (part === '' || part === '.') continue;
+    if (part === '..') { current = dirname(current); continue; }
+    const next = join(current, part);
+    try { current = realpathSync(next); }
+    // Nothing below a missing component can be a symlink, so the rest resolves lexically.
+    catch { return resolve(next, ...parts.slice(i + 1)); }
+  }
+  return current;
 }
 
 function emit(output: Record<string, unknown>): void {
