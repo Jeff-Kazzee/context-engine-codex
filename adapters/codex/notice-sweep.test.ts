@@ -24,11 +24,11 @@ const stateDir = (f: Fixture) => layout(f.projectRoot, SID, f.stateDir).stateDir
 const noticePath = (f: Fixture) => join(stateDir(f), 'codex-read-notice.json');
 
 type Start = 'idle' | 'checking' | 'pending' | 'clean';
-type Kind = 'prompt' | 'own-file tool' | 'ordinary tool' | 'parallel tools' | 'Stop' | 'new_context' | 'PreCompact';
+type Kind = 'prompt' | 'own-file tool' | 'ordinary tool' | 'parallel, edit first' | 'parallel, edit last' | 'Stop' | 'new_context' | 'PreCompact';
 type Fault = 'none' | 'state' | 'sync' | 'record' | 'output' | 'delivered' | 'lost' | 'sync-fail' | 'sync-late' | 'race' | 'race-kill' | 'race-late';
 
 const STARTS: Start[] = ['idle', 'checking', 'pending', 'clean'];
-const KINDS: Kind[] = ['prompt', 'own-file tool', 'ordinary tool', 'parallel tools', 'Stop', 'new_context', 'PreCompact'];
+const KINDS: Kind[] = ['prompt', 'own-file tool', 'ordinary tool', 'parallel, edit first', 'parallel, edit last', 'Stop', 'new_context', 'PreCompact'];
 // state: killed before the first notice state write. sync, record: killed as that core call returns.
 // output: killed after the first hook output write, so Codex applies none of it. delivered: killed
 // after the hook marked its notice delivered. lost: stdout closed, so every output write fails.
@@ -39,13 +39,8 @@ const KINDS: Kind[] = ['prompt', 'own-file tool', 'ordinary tool', 'parallel too
 const FAULTS: Fault[] = ['none', 'state', 'sync', 'record', 'output', 'delivered', 'lost', 'sync-fail', 'sync-late', 'race', 'race-kill', 'race-late'];
 const RACES: Fault[] = ['race', 'race-kill', 'race-late'];
 
-/**
- * Out of scope by design: the clean start has no edit at stake until a race writes one, so it runs only
- * the race faults. In a parallel group, which hook takes the lease first decides whether the ordinary
- * one writes notice state or output, so those faults would fire only some of the time.
- */
-const inScope = (start: Start, kind: Kind, fault: Fault) => (start !== 'clean' || RACES.includes(fault))
-  && !(kind === 'parallel tools' && ['state', 'output', 'delivered', 'lost'].includes(fault));
+/** Out of scope by design: the clean start has no edit at stake until a race writes one. */
+const inScope = (start: Start, fault: Fault) => start !== 'clean' || RACES.includes(fault);
 /** Triples this hook version does not reach, each with the reason. Every other fault must fire. */
 const PRUNED: Array<[Start | '*', Kind | '*', Fault[], string]> = [
   ['*', 'own-file tool', ['record', ...RACES], 'a tool that touched the managed file only syncs'],
@@ -67,16 +62,19 @@ const ordinaryTool = toolUse('Bash', { command: 'make' }, 'FAULT_TOOL_OUTPUT', '
 const shellEdit = toolUse('Bash', { command: `sed -i 's/^/ /' .context-engine/${SID}/context.md` }, 'SHELL_EDIT_OUTPUT', 'call_shell_edit');
 
 /**
- * The faulted event, as hooks started at once. The fault applies to the last one. Tool events keep one
- * tool_use_id, so a resend is the same host event.
+ * The faulted event, as hooks run one after the other. The fault applies to the last one. Tool events
+ * keep one tool_use_id, so a resend is the same host event.
  */
 const EVENTS: Record<Kind, (f: Fixture) => Array<Record<string, unknown>>> = {
   prompt: () => [prompt('FAULT_PROMPT')],
   'own-file tool': f => [toolUse('Write', { file_path: wcPath(f) }, 'OWN_FILE_OUTPUT', 'call_fault_own')],
   'ordinary tool': () => [ordinaryTool],
-  // Codex 0.161.0 runs tools that support parallel calls, such as shell commands, at the same time,
-  // with their PostToolUse hooks. apply_patch and other tools without that support run alone.
-  'parallel tools': () => [shellEdit, ordinaryTool],
+  // Codex 0.161.0 runs tools that support parallel calls, such as shell commands, at the same time.
+  // Each tool's PostToolUse hook runs when that tool finishes, and the model reads every result after
+  // the last one (codex-rs/core/src/tools/registry.rs and parallel.rs at rust-v0.161.0). apply_patch
+  // and other tools without that support run alone.
+  'parallel, edit first': () => [shellEdit, ordinaryTool],
+  'parallel, edit last': () => [ordinaryTool, shellEdit],
   Stop: () => [stop('FAULT_REPLY')],
   new_context: () => [newContext],
   PreCompact: () => [preCompact],
@@ -189,7 +187,10 @@ async function runCell(start: Start, kind: Kind, fault: Fault, checkPrune = fals
   await SETUP[start](f);
   const group = EVENTS[kind](f);
   const extra: Record<string, string> = fault === 'none' || fault === 'lost' ? {} : { NODE_OPTIONS: `--import=${faultPreload(f, fault)}` };
-  const runs = await Promise.all(group.map((fields, i) => i === group.length - 1 ? runHook(f, SID, fields, extra, 40_000, fault === 'lost') : runHook(f, SID, fields)));
+  const runs: Run[] = [];
+  for (const [i, fields] of group.entries()) {
+    runs.push(i === group.length - 1 ? await runHook(f, SID, fields, extra, 40_000, fault === 'lost') : await runHook(f, SID, fields));
+  }
   const faulted = runs.at(-1)!;
   if (checkPrune) {
     if (extra.NODE_OPTIONS) assert.equal(existsSync(join(f.projectRoot, 'fault-fired')), false, `the pruned ${fault} fault does not fire`);
@@ -222,7 +223,7 @@ async function runCell(start: Start, kind: Kind, fault: Fault, checkPrune = fals
   // prompt. Codex does not send a failed tool hook again, so a killed tool hook otherwise leaves the
   // session refused until Context Engine is disabled.
   const intents = readdirSync(stateDir(f)).filter(name => name === 'codex-prompt-pending.json' || name.startsWith('codex-record-pending-'));
-  const resend = intents.length && (kind === 'prompt' || kind.endsWith('tool') || kind.endsWith('tools')) ? group : [];
+  const resend = intents.length && (kind === 'prompt' || kind.endsWith('tool') || kind.startsWith('parallel')) ? group : [];
   let last: Run | undefined;
   for (const next of [...resend, prompt('LATER_PROMPT'), stop('RECOVERY_REPLY')]) {
     last = await runHook(f, SID, next);
@@ -240,7 +241,7 @@ async function runCell(start: Start, kind: Kind, fault: Fault, checkPrune = fals
 const CHECK_PRUNED = process.env.SWEEP_PRUNED === '1';
 describe(CHECK_PRUNED ? '[CDX-009] read-notice fault sweep, pruned triples' : '[CDX-009] read-notice fault sweep', { concurrency: 4 }, () => {
   for (const start of STARTS) for (const kind of KINDS) for (const fault of FAULTS) {
-    if (!inScope(start, kind, fault) || pruned(start, kind, fault) !== CHECK_PRUNED) continue;
+    if (!inScope(start, fault) || pruned(start, kind, fault) !== CHECK_PRUNED) continue;
     test(`${start} | ${kind} | ${fault}`, () => runCell(start, kind, fault, CHECK_PRUNED));
   }
 });
