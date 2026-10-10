@@ -445,3 +445,16 @@ test('[CDX-009] a prompt after an interrupted notice check carries no notice wit
   assert.doesNotMatch(next.stdout, /was validated/, 'no model edit, so no notice');
   assert.equal((await runHook(f, SID, stop('REPLY_AFTER_CHECK'))).stdout, '', 'the cleared check no longer refuses a Stop');
 });
+
+test('[CDX-009] a prompt after an interrupted notice check carries the notice when the check left a model edit at HEAD', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nNOTICE_EDIT_SENTINEL\n');
+  // The interrupted tool hook's sync committed the edit as revision 2, then the hook died.
+  const sync = await startBounded([process.execPath, CLI, 'sync', '--session', SID, '--project', f.projectRoot, '--runner', 'codex', '--hard-limit', '960000'], { cwd: f.projectRoot, env: hookEnv(f), input: '', timeoutMs: 30_000 }).done;
+  assert.equal(sync.status, 0, sync.stdout + sync.stderr);
+  writeFileSync(noticePath(f), JSON.stringify({ kind: 'checking', lastNotifiedRevision: 0 }));
+  const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
+  assert.equal(stoppedContinuation(next), false, next.stdout);
+  await assertReadableNotice(f, next, 3);
+});

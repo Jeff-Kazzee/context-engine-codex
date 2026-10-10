@@ -248,7 +248,10 @@ async function main(input: HookInput): Promise<void> {
     withPromptLease(input,()=>{
     requireNoCompletionDebt(input);
     // A pending read notice rides on this prompt. The revision the prompt commits still holds the edit.
-    const carriesNotice = readNoticeState(input).kind !== 'idle';
+    // An interrupted check owes one only through an unreported model edit at HEAD.
+    const notice = readNoticeState(input);
+    const head = notice.kind === 'checking' ? lib.inspectSession({ projectRoot: input.cwd, sessionId: input.session_id }) : undefined;
+    let carriesNotice = notice.kind === 'pending' || (head?.revisionKind === 'model-edit' && head.revision > notice.lastNotifiedRevision);
     const hash=store.sha(String(input.prompt??'')),pending=pendingPrompt(input);
     if(pending.hash&&pending.hash!==hash)throw new PendingPrompt('Context Engine: an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine; resets remain blocked.');
     // Durable intent precedes the fallible CLI call. Only a fingerprint is retained, never prompt text.
@@ -268,12 +271,14 @@ async function main(input: HookInput): Promise<void> {
     // any Working Context text.
     const notices = [...(recorded.receipt?.kind === 'restored' ? [recorded.receipt.text] : []), ...(recorded.budget ? [recorded.budget.text] : [])];
     const revision = recorded.revision ?? 0;
+    // The record's own sync can commit the edit that the interrupted check never reported.
+    if (notice.kind === 'checking' && recorded.receipt?.kind === 'committed') carriesNotice = true;
     if (carriesNotice && revision > 0 && typeof recorded.workingContextText === 'string') {
       notices.push(guidance.editedContextReadNotice(input.session_id, revision, store.sha(recorded.workingContextText)));
     }
     if (notices.length) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
     // As for a tool hook, this confirms hook transport output only.
-    if (carriesNotice) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: revision });
+    if (notice.kind !== 'idle') writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: carriesNotice ? revision : notice.lastNotifiedRevision });
     });
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
@@ -286,10 +291,10 @@ async function main(input: HookInput): Promise<void> {
     const observed = core(input, 'sync');
     const delivery = observed.delivery;
     let pending: Extract<ReadNoticeState, { kind: 'pending' }> | undefined;
-    // A notice still owed from an earlier hook moves to the current revision, which still holds the
-    // edit after a prompt committed past it. Its digest must be the current one for the read to work.
-    const owed = previous.kind !== 'idle';
-    if ((observed.revisionKind === 'model-edit' || owed) && delivery && delivery.revision === observed.revision
+    // A pending notice from an earlier hook moves to the current revision, which still holds the edit
+    // after a prompt committed past it. Its digest must be the current one for the read to work.
+    // An interrupted check owes a notice only through a model edit at HEAD, as any other hook does.
+    if ((observed.revisionKind === 'model-edit' || previous.kind === 'pending') && delivery && delivery.revision === observed.revision
         && delivery.revision > previous.lastNotifiedRevision && /^[a-f0-9]{64}$/.test(delivery.sha256)) {
       pending = { kind: 'pending', lastNotifiedRevision: previous.lastNotifiedRevision,
         revision: delivery.revision, sha256: delivery.sha256 };
