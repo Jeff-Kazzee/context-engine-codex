@@ -469,3 +469,21 @@ test('[CDX-009] a prompt after an interrupted notice check carries the notice wh
   assert.equal(stoppedContinuation(next), false, next.stdout);
   await assertReadableNotice(f, next, 3);
 });
+
+test('[CDX-009] a pending notice survives a tool hook killed in its notice check after a prompt committed past the edit', async () => {
+  const f = enabledFixture();
+  await loseNoticeThenRefuseStop(f);
+  assert.notEqual((await runHook(f, SID, prompt('NEXT_REQUEST'), {}, 30_000, true)).status, 0, 'the prompt committed revision 3, but its output never reached Codex');
+  assert.equal(headRevision(f, SID), 3);
+  const ready = join(f.projectRoot, 'sync-paused'), pause = join(f.projectRoot, 'pause-sync.mjs');
+  writeFileSync(pause, `import fs from 'node:fs';if(process.argv[1]?.endsWith('/core/cli.ts')&&process.argv.includes('sync')){fs.writeFileSync(${JSON.stringify(ready)},'ready');await new Promise(resolve=>setTimeout(resolve,30000));}`);
+  const killed = startBounded([process.execPath, HOOK], { cwd: f.projectRoot, env: hookEnv(f, { NODE_OPTIONS: `--import=${pause}` }), input: JSON.stringify(event(f, SID, toolUse('Bash', { command: 'make' }, 'KILLED_OUTPUT', 'call_killed'))), timeoutMs: 40_000 });
+  try {
+    await waitUntil(() => existsSync(ready), 'the tool hook reached its notice check');
+    process.kill(killed.pid, 'SIGKILL');
+    assert.equal((await killed.done).signal, 'SIGKILL');
+  } finally { killGroup(killed.pid); }
+  const next = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
+  assert.equal(next.status, 0, next.stderr);
+  await assertReadableNotice(f, next, 3);
+});
