@@ -102,19 +102,28 @@ export function preflightOwnership(opts: {files:string[];watch:string[];namespac
     checkOwnedDirectory(path);
   }
   for(const path of opts.namespaced)checkComponents(path);
-  for(const path of opts.files){checkOwnedFile(path);refuseInterruptedCandidate(path);}
+  // An interrupted write explains a tracked file that is missing or has two links, so its leftovers are named first.
+  for(const path of opts.files)checkComponents(path);
+  refuseInterruptedWrites(opts.files);
+  for(const path of opts.files)checkOwnedFile(path);
 }
 
-/** A replacement or deletion killed midway leaves a tracked file's current bytes only under its candidate name. */
-function refuseInterruptedCandidate(path: string): void {
-  let directory;
-  try { directory = opendirSync(dirname(path)); }
-  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; throw e; }
-  try {
-    for (let entry; (entry = directory.readSync()) !== null;) {
-      if (/^\.context-engine-(replace|delete)-[0-9a-f]{32}\.tmp$/.test(entry.name)) throw new Error(`an interrupted setup write left ${join(dirname(path), entry.name)}. It may hold the only current bytes of ${path} or another tracked file in that directory. Restore or remove it, then run setup again.`);
-    }
-  } finally { directory.closeSync(); }
+/** A write or deletion killed midway leaves setup files beside tracked files. The refusal names every one. */
+function refuseInterruptedWrites(files: string[]): void {
+  for (const dir of new Set(files.map((path) => dirname(path)))) {
+    let directory;
+    try { directory = opendirSync(dir); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue; throw e; }
+    const steps: string[] = [];
+    try {
+      for (let entry; (entry = directory.readSync()) !== null;) {
+        const left = join(dir, entry.name);
+        if (/^\.context-engine-setup-[0-9a-f]{16}\.tmp$/.test(entry.name)) steps.push(`Remove ${left}. Setup writes there first, and it never holds the only copy of a file.`);
+        else if (/^\.context-engine-(replace|delete)-[0-9a-f]{32}\.tmp$/.test(entry.name)) steps.push(`${left} may hold the only current bytes of a tracked file in ${dir}. Move it back to that file's name if that file is missing, or remove it.`);
+      }
+    } finally { directory.closeSync(); }
+    if (steps.length) throw new Error(`an interrupted setup write left files beside tracked configuration. ${steps.join(' ')} Then run setup again.`);
+  }
 }
 
 /** Backs up `files` byte for byte into a new timestamped dir under `backupRoot`, and lists `watch`. */
