@@ -91,6 +91,21 @@ test('[LIFE-015] a failed install still reports the undo of an interrupted one',
   assert.equal(readFileSync(config, 'utf8'), CODEX_CONFIG);
 });
 
+test('[LIFE-015] an uninstall that only undoes an interrupted install does not claim an uninstall', async () => {
+  const w = world();
+  writeFileSync(join(w.codexHome, 'config.toml'), CODEX_CONFIG);
+  const pause = join(tempDir('pause'), 'plugin-add');
+  const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+  try { await waitForFile(pause); } finally { killGroup(install.pid); }
+  assert.equal((await install.done).signal, 'SIGKILL');
+  rmSync(join(w.stateDir, 'setup', 'codex.setup.lock'));
+
+  const r = w.ce(['uninstall']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, /uninstalled/, `nothing was installed:\n${r.stdout}`);
+  assert.match(r.stdout, /^Codex: not installed\. The interrupted install was rolled back\.$/m);
+});
+
 test('[LIFE-015] a kill after a guarded replacement is published names both leftovers', () => {
   const w = world();
   const config = join(w.codexHome, 'config.toml');
