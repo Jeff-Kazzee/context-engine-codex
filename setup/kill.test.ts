@@ -3,11 +3,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { tempDir } from '../core/testing.ts';
 import { killGroup, startSetup, waitForFile } from './testing/process.ts';
-import { world } from './testing/world.ts';
+import { world, type World } from './testing/world.ts';
 
 const CODEX_CONFIG = '# my codex config\nmodel = "gpt-6-luna"\n';
 
@@ -128,4 +128,80 @@ test('[LIFE-015] enable and status refuse until an interrupted install is undone
   const enabled = w.ce(['enable']);
   assert.equal(enabled.status, 0, enabled.stderr);
   assert.equal(w.ce(['status']).status, 0, 'status works again after the undo');
+});
+
+/** Runs uninstallLocked in a child process that the given fs patch kills. */
+function killedUninstall(w: World, patch: string): void {
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const { uninstallLocked } = await import(${JSON.stringify(new URL('./install.ts', import.meta.url).href)});
+    const { codexSpec, setupContext } = await import(${JSON.stringify(new URL('./runners.ts', import.meta.url).href)});
+    ${patch}
+    syncBuiltinESMExports();
+    const ctx = setupContext(process.env);
+    uninstallLocked(ctx, codexSpec(ctx));
+  `], { env: { ...process.env, ...w.env }, encoding: 'utf8' });
+  assert.equal(child.signal, 'SIGKILL', child.stderr);
+}
+const leftovers = (dir: string) => readdirSync(dir).filter((name) => name.startsWith('.context-engine-')).map((name) => join(dir, name));
+const read = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8') : null);
+
+test('[LIFE-009] the refusal after a killed write gives the step that recovers each leftover', async () => {
+  // Published: config.toml already holds the restored bytes, so both leftovers go.
+  {
+    const w = world();
+    const config = join(w.codexHome, 'config.toml');
+    writeFileSync(config, CODEX_CONFIG);
+    assert.equal(w.ce(['install']).status, 0);
+    killedUninstall(w, `const native = fs.linkSync; fs.linkSync = (from, to) => { native(from, to); if (String(from).includes('.context-engine-setup-') && String(to).endsWith('/config.toml')) process.kill(process.pid, 'SIGKILL'); };`);
+    const next = w.ce(['uninstall']);
+    for (const path of leftovers(w.codexHome)) {
+      assert.ok(next.stderr.includes(`Remove ${path}.`), `the refusal says to remove ${path}:\n${next.stderr}`);
+      rmSync(path);
+    }
+    const done = w.ce(['uninstall']);
+    assert.equal(done.status, 0, done.stdout + done.stderr);
+    assert.equal(read(config), CODEX_CONFIG);
+  }
+  // Not yet published: config.toml exists only under the replacement candidate, which goes back.
+  {
+    const w = world();
+    const config = join(w.codexHome, 'config.toml');
+    writeFileSync(config, CODEX_CONFIG);
+    assert.equal(w.ce(['install']).status, 0);
+    killedUninstall(w, `const native = fs.linkSync; fs.linkSync = (from, to) => { if (String(from).includes('.context-engine-setup-') && String(to).endsWith('/config.toml')) process.kill(process.pid, 'SIGKILL'); return native(from, to); };`);
+    const next = w.ce(['uninstall']);
+    for (const path of leftovers(w.codexHome)) {
+      if (basename(path).startsWith('.context-engine-replace-')) {
+        assert.ok(next.stderr.includes(`Move ${path} back to ${config}.`), `the refusal says to move ${path} back:\n${next.stderr}`);
+        renameSync(path, config);
+      } else {
+        assert.ok(next.stderr.includes(`Remove ${path}.`), `the refusal says to remove ${path}:\n${next.stderr}`);
+        rmSync(path);
+      }
+    }
+    const done = w.ce(['uninstall']);
+    assert.equal(done.status, 0, done.stdout + done.stderr);
+    assert.equal(read(config), CODEX_CONFIG);
+  }
+  // A deletion moved config.toml to its candidate during the undo of a killed install.
+  {
+    const w = world();
+    const config = join(w.codexHome, 'config.toml');
+    const pause = join(tempDir('pause'), 'plugin-add');
+    const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+    try { await waitForFile(pause); } finally { killGroup(install.pid); }
+    assert.equal((await install.done).signal, 'SIGKILL');
+    rmSync(join(w.stateDir, 'setup', 'codex.setup.lock'));
+    killedUninstall(w, `const native = fs.renameSync; fs.renameSync = (from, to) => { native(from, to); if (String(to).includes('.context-engine-delete-')) process.kill(process.pid, 'SIGKILL'); };`);
+    assert.equal(existsSync(config), false, 'the kill left config.toml only under its candidate');
+    const [candidate] = leftovers(w.codexHome);
+    const next = w.ce(['uninstall']);
+    assert.ok(next.stderr.includes(`Move ${candidate} back to ${config}.`), `the refusal says to move ${candidate} back:\n${next.stderr}`);
+    renameSync(candidate!, config);
+    const done = w.ce(['uninstall']);
+    assert.equal(done.status, 0, done.stdout + done.stderr);
+    assert.equal(existsSync(config), false, 'the undo deletes the file that did not exist before install');
+  }
 });
