@@ -5,13 +5,15 @@ export function assertBackupSafe(path: string, bytes: Buffer | null): void {
   if(bytes===null)return;
   const format=extname(path).toLowerCase();if(!['.json','.toml'].includes(format))return;
   const refuse=()=>{throw new Error(`credential-bearing or unsafe configuration cannot be backed up: ${path}`);};
-  let text:string;try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{refuse();return;}
+  // A file setup cannot parse holds no known credential, so its refusal says what failed instead.
+  const unreadable=(format:string)=>{throw new Error(`setup cannot read ${path} as ${format}, so it refuses to back it up or change it`);};
+  let text:string;try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{unreadable('UTF-8 text');return;}
   const sensitive=(key:string)=>{
     const n=key.toLowerCase().replace(/[^a-z0-9]/g,'');
     return /(apikey|accesskey|secretkey|clientsecret|secret|password|privatekey|authorization|credentials?)$/.test(n) || n.endsWith('token') || n==='tokens' || n==='auth' || n==='bearer' || n==='cookie' || n==='setcookie';
   };
   if(format==='.json'){
-    let value:unknown;try{value=JSON.parse(text);}catch{refuse();return;}
+    let value:unknown;try{value=JSON.parse(text);}catch{unreadable('JSON');return;}
     const walk=(v:unknown):void=>{if(!v||typeof v!=='object')return;for(const [key,item] of Object.entries(v)){if(sensitive(key)&&item!==null&&item!==''&&item!==undefined)refuse();walk(item);}};
     walk(value);return;
   }

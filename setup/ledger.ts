@@ -281,9 +281,18 @@ export function rollbackSnapshot(s: Snapshot, rules: Record<string, Rule>): stri
 export function assess(l: Ledger, rules: Record<string, Rule>): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   for (const f of l.files) {
-    out[f.path] = unchangedBytes(f, rules[f.path], safeRead(f.path));
+    out[f.path] = about(f.path, () => unchangedBytes(f, rules[f.path], safeRead(f.path)));
   }
   return out;
+}
+
+/** A rule's parse error names the file it came from. */
+function about<T>(path: string, action: () => T): T {
+  try { return action(); }
+  catch (e) {
+    if (e instanceof Error && !e.message.includes(path)) e.message = `${path}: ${e.message}`;
+    throw e;
+  }
 }
 
 function unchangedBytes(f: Ledger['files'][number], rule: Rule | undefined, bytes: Buffer | null): boolean {
@@ -312,7 +321,7 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
   const reports: FileReport[] = [];
   for (const f of l.files) {
     const before = f.before ? safeRead(f.before) : null;
-    if (unchanged[f.path] && unchangedBytes(f, rules[f.path], current.get(f.path)!)) {
+    if (unchanged[f.path] && about(f.path, () => unchangedBytes(f, rules[f.path], current.get(f.path)!))) {
       if (before) {
         safeWrite(f.path, before,current.get(f.path)!);
         reports.push({ path: f.path, outcome: 'restored' });
@@ -328,7 +337,7 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
       continue;
     }
     const rule = rules[f.path];
-    const stripped = rule ? rule.strip(now, before?.toString('utf8') ?? null) : now;
+    const stripped = rule ? about(f.path, () => rule.strip(now, before?.toString('utf8') ?? null)) : now;
     if (stripped !== now) safeWrite(f.path, stripped,current.get(f.path)!);
     reports.push({ path: f.path, outcome: 'reverse-edited', backup: f.before ?? undefined });
   }

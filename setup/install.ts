@@ -26,10 +26,12 @@ function removePending(ctx: SetupContext, id: string): void {
 function interruptedInstall(ctx: SetupContext, spec: RunnerSpec): Snapshot | null {
   const bytes = safeRead(pendingPath(ctx, spec.id));
   if (bytes === null) return null;
-  const s = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Snapshot;
+  let s: Snapshot;
+  try { s = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Snapshot; }
+  catch { throw new SetupError(`${spec.title}: the interrupted install record is not valid JSON: ${pendingPath(ctx, spec.id)}`); }
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
   const copy = (i: number) => join(s.dir, 'before', `${i}-${basename(spec.files[i]!)}`);
-  if (typeof s.dir !== 'string' || resolve(s.dir) !== s.dir || dirname(s.dir) !== join(ctx.setupDir, 'backups') || !basename(s.dir).startsWith(`${spec.id}-`)
+  if (typeof s !== 'object' || s === null || typeof s.dir !== 'string' || resolve(s.dir) !== s.dir || dirname(s.dir) !== join(ctx.setupDir, 'backups') || !basename(s.dir).startsWith(`${spec.id}-`)
     || !Array.isArray(s.files) || !same(s.files.map((f) => f.path), spec.files) || !s.files.every((f, i) => f.after === null && (f.before === null || f.before === copy(i)))
     || !Array.isArray(s.namespaced) || !same(s.namespaced.map((n) => n.path), spec.namespaced) || !s.namespaced.every((n) => typeof n.existed === 'boolean')
     || !same(s.watch, spec.watch) || !Array.isArray(s.listing) || !s.listing.every((p) => typeof p === 'string')) {
@@ -50,9 +52,16 @@ export function refuseInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): v
 function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   const snap = interruptedInstall(ctx, spec);
   if (!snap) return [];
-  checkOwnedDirectory(spec.home);
-  preflightOwnership(spec);
-  const retained = rollbackSnapshot(snap, spec.rules);
+  let retained: string[];
+  try {
+    checkOwnedDirectory(spec.home);
+    preflightOwnership(spec);
+    retained = rollbackSnapshot(snap, spec.rules);
+  } catch (e) {
+    // The record stays, so the next install or uninstall repeats the undo once the cause is repaired.
+    const cause = (e instanceof Error ? e.message : String(e)).replace(/\.$/, '');
+    throw new SetupError(`${spec.title}: an earlier install was interrupted, and its undo stopped: ${cause}. Repair that, then run \`context-engine-${spec.id} install\` or \`context-engine-${spec.id} uninstall\` again. Interrupted install record: ${pendingPath(ctx, spec.id)}. Its before backups: ${join(snap.dir, 'before')}`, { cause: e });
+  }
   removePending(ctx, spec.id);
   return [
     'An earlier install was interrupted. Its configuration changes were rolled back and unmanaged edits were kept.',
