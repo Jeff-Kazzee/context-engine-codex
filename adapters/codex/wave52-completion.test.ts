@@ -137,7 +137,13 @@ for (const legacy of [true, false]) test(`wave52: identified retry refuses ${leg
   assert.match(retry.stdout, /continue.*false/);
   assert.equal(f.count(), 1);
   files.forEach((path, index) => assert.deepEqual(fs.readFileSync(path), before[index]));
-  assert.deepEqual(f.intents().map(name => [name, fs.readFileSync(join(f.state, name), 'utf8')]), markerBefore);
+  // The earlier debt stays byte for byte. The refused event adds only its own failed intent.
+  const after = f.intents().map(name => [name, fs.readFileSync(join(f.state, name), 'utf8')]);
+  const earlier = new Set(markerBefore.map(([name]) => name));
+  assert.deepEqual(after.filter(([name]) => earlier.has(name)), markerBefore);
+  const added = after.filter(([name]) => !earlier.has(name));
+  assert.equal(added.length, 1);
+  assert.equal(JSON.parse(added[0]![1]!).failed, true);
 });
 
 test('wave52: an identified completion refused beside a live Stop keeps its own debt', async () => {

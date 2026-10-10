@@ -166,11 +166,10 @@ function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: st
   const operationId = stable ?? randomUUID();
   const name = `codex-record-pending-${operationId}.json`, path = join(l.stateDir, name);
   const hash = store.sha(text);
-  requireUnambiguousCompletion(l.stateDir, stable ? name : undefined, Boolean(stable));
   if (stable) {
     const pending = pendingPrompt(input, name);
     if (pending.hash && (pending.hash !== hash || pending.operationId !== operationId)) throw new PendingPrompt(RECORD_REFUSAL + ' The host event identity conflicts with its pending completion.');
-  }
+  } else requireUnambiguousCompletion(l.stateDir, undefined, false);
   const hostEvent = stable ? { toolUseId: input.tool_use_id as string, turnId: typeof input.turn_id === 'string' && input.turn_id ? input.turn_id : null } : undefined;
   const marker = { hash, operationId, hostEvent, publisher: lock.holderFor(process.pid, RUNNER, 0) };
   const bytes = JSON.stringify(marker);
@@ -178,6 +177,8 @@ function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: st
   store.atomicWrite(path, bytes, 'frame-key-tmp');
   let cleared = false;
   try {
+    // A refused identified event keeps its own intent as debt until its exact retry records it.
+    if (stable) requireUnambiguousCompletion(l.stateDir, name, true);
     return withPromptLease(input, () => {
       requireUnambiguousCompletion(l.stateDir, name, Boolean(stable));
       const result = fn(operationId);
