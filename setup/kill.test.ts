@@ -22,9 +22,11 @@ test('[LIFE-015] SIGKILL during Codex install never becomes a silent baseline', 
   assert.match(readFileSync(config, 'utf8'), /\[marketplaces\.context-engine\]/, 'the kill left the marketplace half-applied');
 
   const lock = join(w.stateDir, 'setup', 'codex.setup.lock');
-  const blocked = w.ce(['enable']);
-  assert.notEqual(blocked.status, 0);
-  assert.ok(blocked.stderr.includes(lock), blocked.stderr);
+  for (const command of ['enable', 'disable', 'install', 'uninstall']) {
+    const blocked = w.ce([command]);
+    assert.notEqual(blocked.status, 0, `${command} ran past the stale lock`);
+    assert.ok(blocked.stderr.includes(lock), `${command} names ${lock}:\n${blocked.stderr}`);
+  }
   rmSync(lock);
 
   const again = w.ce(['install']);
