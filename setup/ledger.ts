@@ -256,8 +256,12 @@ export function readLedger(dir: string, policy: LedgerPolicy): Ledger {
   const backup = (path: unknown) => path === null || (within(dir,path) && ['before','after','before-md','after-md'].includes(dirname(path).split(sep).at(-1)!) && dirname(dirname(path)) === dir);
   const owned = (path: unknown): path is string => typeof path === 'string' && policy.namespaced.some(n => path === n || within(n,path));
   if (l.version !== 1 || l.dir !== dir || !Array.isArray(l.files) || ![policy.files,...(policy.alternativeFiles??[])].some(paths=>l.files.length===paths.length && l.files.every((f,i)=>f.path===paths[i] && backup(f.before) && backup(f.after))) || !Array.isArray(l.namespaced) || l.namespaced.length !== policy.namespaced.length || !l.namespaced.every((n,i) => n.path === policy.namespaced[i] && typeof n.existed === 'boolean') || !Array.isArray(l.createdFiles) || !l.createdFiles.every(f => owned(f.path) && /^[a-f0-9]{64}$/.test(f.sha)) || !Array.isArray(l.createdDirs) || !l.createdDirs.every(owned)) throw new Error('ledger paths or schema violate confinement policy');
-  // Validate all referenced paths before any restore or namespace removal can occur.
-  for (const f of l.files) for (const p of [f.before,f.after]) if (p !== null) { checkComponents(p); closeSync(openPrivateDirectory(dirname(p))!); }
+  // Validate all referenced paths before any restore or namespace removal can occur. A missing copy
+  // would read as a file that did not exist, so a restore from this ledger could delete a live file.
+  for (const f of l.files) for (const p of [f.before,f.after]) if (p !== null) {
+    checkComponents(p); closeSync(openPrivateDirectory(dirname(p))!);
+    if (safeRead(p) === null) throw new Error(`a backup copy named by ${join(dir, 'ledger.json')} is missing, so setup restores nothing from it. Restore ${p}, then run setup again.`);
+  }
   for (const p of [...l.files.map(f=>f.path),...l.namespaced.map(n=>n.path),...l.createdDirs,...l.createdFiles.map(f=>f.path)]) checkComponents(p);
   return l;
 }

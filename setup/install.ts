@@ -37,7 +37,12 @@ function interruptedInstall(ctx: SetupContext, spec: RunnerSpec): Snapshot | nul
     || !same(s.watch, spec.watch) || !Array.isArray(s.listing) || !s.listing.every((p) => typeof p === 'string')) {
     throw new SetupError(`${spec.title}: the interrupted install record violates confinement policy: ${pendingPath(ctx, spec.id)}`);
   }
-  closeSync(openPrivateDirectory(s.dir)!);
+  const snapshot = openPrivateDirectory(s.dir);
+  if (snapshot === undefined) throw new SetupError(`${spec.title}: the snapshot named by the interrupted install record is missing: ${s.dir}. Interrupted install record: ${pendingPath(ctx, spec.id)}`);
+  closeSync(snapshot);
+  // A missing copy would read as a file that did not exist, and the undo would delete the live file.
+  const missing = s.files.find((f) => f.before !== null && safeRead(f.before) === null);
+  if (missing) throw new SetupError(`${spec.title}: the before backup of ${missing.path} is missing, so setup cannot undo the interrupted install and changed nothing. Restore ${missing.before}, then run setup again. Interrupted install record: ${pendingPath(ctx, spec.id)}`);
   return s;
 }
 
