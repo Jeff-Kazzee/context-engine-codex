@@ -174,3 +174,23 @@ test('wave52: an identified completion refused beside a live Stop keeps its own 
   assert.deepEqual(f.intents(), []);
   assert.equal(f.call({ hook_event_name: 'PreToolUse', tool_name: 'new_context' }).stdout, '');
 });
+
+for (const length of [905, 5005]) test(`wave52: a ${length}-character tool_use_id keeps a bounded retry intent`, () => {
+  const f = setup();
+  const event = completion('PostToolUse', 'call_' + 'x'.repeat(length - 5));
+  assert.equal(String(event.tool_use_id).length, length);
+  assert.match(f.call(event, f.preload).stdout, /continue.*false/);
+  assert.equal(f.count(), 1);
+  const [name] = f.intents();
+  assert.ok(name);
+  const markerBytes = fs.statSync(join(f.state, name)).size;
+  // Another identified event reads this intent, and the exact retry reads it as its own.
+  const other = f.call(completion('PostToolUse', 'event-two'));
+  assert.doesNotMatch(other.stdout, /continue.*false/, other.stderr);
+  const retry = f.call(event);
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.doesNotMatch(retry.stdout, /continue.*false/, retry.stderr);
+  assert.equal(f.count(), 2);
+  assert.deepEqual(f.intents(), []);
+  assert.ok(markerBytes < 1024, `marker holds ${markerBytes} bytes`);
+});
