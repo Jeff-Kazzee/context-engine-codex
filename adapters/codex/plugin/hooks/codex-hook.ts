@@ -58,9 +58,15 @@ let lock: typeof Lock;
 const PENDING_PROMPT = 'codex-prompt-pending.json';
 const PENDING_RECORD = 'codex-record-pending.json';
 const READ_NOTICE = 'codex-read-notice.json';
+/**
+ * Whether a read notice for an accepted model edit still has to reach hook output. A notice is owed
+ * when one is pending or, after a sync, HEAD is a model edit above the last notified revision. A hook
+ * that finds a notice owed writes it as pending before any core call that can move HEAD past the edit.
+ */
 type ReadNoticeState =
-  | { kind: 'idle' | 'checking'; lastNotifiedRevision: number }
+  | { kind: 'idle'; lastNotifiedRevision: number }
   | { kind: 'pending'; lastNotifiedRevision: number; revision: number; sha256: string };
+type PendingNotice = Extract<ReadNoticeState, { kind: 'pending' }>;
 function readNoticePath(input: HookInput): string {
   return join(store.layout(input.cwd, input.session_id, store.resolveStateRoot()).stateDir, READ_NOTICE);
 }
@@ -72,7 +78,8 @@ function readNoticeState(input: HookInput): ReadNoticeState {
       || typeof value.lastNotifiedRevision !== 'number' || !Number.isSafeInteger(value.lastNotifiedRevision)
       || value.lastNotifiedRevision < 0) throw new Error('invalid read notice state');
   const lastNotifiedRevision = value.lastNotifiedRevision;
-  if (value.kind === 'idle' || value.kind === 'checking') return { kind: value.kind, lastNotifiedRevision };
+  // Earlier versions wrote checking before a sync. Every hook now decides from HEAD after its own sync.
+  if (value.kind === 'idle' || value.kind === 'checking') return { kind: 'idle', lastNotifiedRevision };
   if (value.kind === 'pending' && 'revision' in value && typeof value.revision === 'number'
       && Number.isSafeInteger(value.revision) && value.revision > lastNotifiedRevision
       && 'sha256' in value && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256)) {
@@ -82,6 +89,28 @@ function readNoticeState(input: HookInput): ReadNoticeState {
 }
 function writeNoticeState(input: HookInput, state: ReadNoticeState): void {
   store.atomicWrite(readNoticePath(input), JSON.stringify(state), 'frame-key-tmp');
+}
+const unreportedEdit = (state: ReadNoticeState, head: { revision?: number; revisionKind?: string | null }): boolean =>
+  head.revisionKind === 'model-edit' && (head.revision ?? 0) > state.lastNotifiedRevision;
+/** The notice for `result`'s revision, which holds every edit at or below it, with its digest. */
+function noticeFor(state: ReadNoticeState, result: CoreResult): PendingNotice | undefined {
+  const revision = result.revision ?? 0;
+  if (revision <= state.lastNotifiedRevision || typeof result.workingContextText !== 'string') return undefined;
+  return { kind: 'pending', lastNotifiedRevision: state.lastNotifiedRevision, revision, sha256: store.sha(result.workingContextText) };
+}
+/** The notice owed after a sync, made durable before anything can record past the edit. */
+function settleNotice(input: HookInput, state: ReadNoticeState, synced: CoreResult): PendingNotice | undefined {
+  if (state.kind !== 'pending' && !unreportedEdit(state, synced)) return undefined;
+  const owed = noticeFor(state, synced);
+  if (owed && state.kind !== 'pending') writeNoticeState(input, owed);
+  return owed;
+}
+/** A record whose own sync committed an edit moved HEAD past it, so its notice is written at once. */
+function noticeAfterRecord(input: HookInput, state: ReadNoticeState, owed: PendingNotice | undefined, recorded: CoreResult): PendingNotice | undefined {
+  if (!owed && recorded.receipt?.kind !== 'committed') return undefined;
+  const notice = noticeFor(state, recorded);
+  if (!owed && notice) writeNoticeState(input, notice);
+  return notice ?? owed;
 }
 function withPromptLease<T>(input: HookInput, fn:()=>T, timeoutMs = 1000): T {
   const state=store.resolveStateRoot(),l=store.layout(input.cwd,input.session_id,state);
@@ -102,8 +131,15 @@ function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string;
 }
 
 const RECORD_REFUSAL = 'Context Engine: an earlier completed tool or assistant event could not be safely recorded. Keep the native conversation; repair storage or disable Context Engine before continuing. Resets remain blocked.';
-function requireNoticeOutput(input: HookInput): void {
-  if (readNoticeState(input).kind !== 'idle') throw new PendingPrompt('Context Engine: a Working Context read notice has not reached hook output. Keep the native conversation. The next tool call or user prompt delivers it, and a reset can follow.');
+/**
+ * Refuses while a notice is pending. With `atHead`, also while HEAD is an unreported model edit, for a
+ * Stop, whose record would move HEAD past the edit with no notice to carry.
+ */
+function requireNoticeOutput(input: HookInput, atHead = false): void {
+  const state = readNoticeState(input);
+  if (state.kind === 'pending' || (atHead && unreportedEdit(state, lib.inspectSession({ projectRoot: input.cwd, sessionId: input.session_id })))) {
+    throw new PendingPrompt('Context Engine: a Working Context read notice has not reached hook output. Keep the native conversation. The next tool call or user prompt delivers it, and a reset can follow.');
+  }
 }
 function requireRecorded(input: HookInput, own?: string): void {
   requireNoticeOutput(input);
@@ -247,18 +283,20 @@ async function main(input: HookInput): Promise<void> {
   if (input.hook_event_name === 'UserPromptSubmit') {
     withPromptLease(input,()=>{
     requireNoCompletionDebt(input);
-    // A pending read notice rides on this prompt. The revision the prompt commits still holds the edit.
-    // An interrupted check owes one only through an unreported model edit at HEAD.
     const notice = readNoticeState(input);
-    const head = notice.kind === 'checking' ? lib.inspectSession({ projectRoot: input.cwd, sessionId: input.session_id }) : undefined;
-    let carriesNotice = notice.kind === 'pending' || (head?.revisionKind === 'model-edit' && head.revision > notice.lastNotifiedRevision);
     const hash=store.sha(String(input.prompt??'')),pending=pendingPrompt(input);
     if(pending.hash&&pending.hash!==hash)throw new PendingPrompt('Context Engine: an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine; resets remain blocked.');
     // Durable intent precedes the fallible CLI call. Only a fingerprint is retained, never prompt text.
     if (pending.hash && !pending.operationId && !pending.recorded) throw new PendingPrompt('Context Engine: the pending request has no operation identifier, so its committed status is ambiguous. Preserve the session and disable Context Engine before continuing in the native conversation.');
     const operationId = pending.operationId ?? randomUUID();
     if (!pending.hash) store.atomicWrite(pending.path,JSON.stringify({hash,operationId}), 'frame-key-tmp');
-    const recorded = pending.recorded ? core(input, 'sync') : core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }], undefined, operationId);
+    // The prompt syncs before it records, so its record cannot commit an unreported edit underneath.
+    // An owed notice rides on this prompt, made durable first.
+    const synced = core(input, 'sync');
+    const owed = settleNotice(input, notice, synced);
+    const recorded = pending.recorded ? synced : core(input, 'record', [{ role: 'user', text: String(input.prompt ?? '') }], undefined, operationId);
+    // It names the revision this prompt committed, which still holds the edit.
+    const delivered = noticeAfterRecord(input, notice, owed, recorded);
     // This request committed even if a newly published completed-event intent blocks return.
     const marker=JSON.stringify({hash,recorded:true,operationId});
     store.atomicWrite(pending.path,marker, 'frame-key-tmp');
@@ -269,42 +307,28 @@ async function main(input: HookInput): Promise<void> {
     // call for many turns). Codex hands additionalContext to the model as a developer message, so
     // only the core's static budget text goes there: numbers and fixed wording, never the prompt or
     // any Working Context text.
-    const notices = [...(recorded.receipt?.kind === 'restored' ? [recorded.receipt.text] : []), ...(recorded.budget ? [recorded.budget.text] : [])];
-    const revision = recorded.revision ?? 0;
-    // The record's own sync can commit the edit that the interrupted check never reported.
-    if (notice.kind === 'checking' && recorded.receipt?.kind === 'committed') carriesNotice = true;
-    if (carriesNotice && revision > 0 && typeof recorded.workingContextText === 'string') {
-      notices.push(guidance.editedContextReadNotice(input.session_id, revision, store.sha(recorded.workingContextText)));
-    }
+    const restored = [...new Set([synced, recorded])].flatMap(r => r.receipt?.kind === 'restored' ? [r.receipt.text] : []);
+    const notices = [...restored, ...(recorded.budget ? [recorded.budget.text] : [])];
+    if (delivered) notices.push(guidance.editedContextReadNotice(input.session_id, delivered.revision, delivered.sha256));
     if (notices.length) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
     // As for a tool hook, this confirms hook transport output only.
-    if (notice.kind !== 'idle') writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: carriesNotice ? revision : notice.lastNotifiedRevision });
+    if (delivered) writeNoticeState(input, { kind: 'idle', lastNotifiedRevision: delivered.revision });
     });
   } else if (input.hook_event_name === 'PostToolUse') {
     // A call that reads or edits the Working Context (or offloaded files beside it) is only synced:
     // echoing it back would duplicate the file into itself, or re-add what the agent offloaded.
     recordCompleted(input, renderToolCall(input), operationId => {
-    let ownFile = touchesWorkingContext(input);
     const previous = readNoticeState(input);
-    // Durable intent precedes the child CLI, whose receipt acknowledgement stops at its own stdout.
-    // A pending notice already owes its read, so it stays as it is and survives a hook that dies here.
-    if (previous.kind !== 'pending') writeNoticeState(input, { kind: 'checking', lastNotifiedRevision: previous.lastNotifiedRevision });
     const observed = core(input, 'sync');
-    const delivery = observed.delivery;
-    let pending: Extract<ReadNoticeState, { kind: 'pending' }> | undefined;
-    // A pending notice from an earlier hook moves to the current revision, which still holds the edit
-    // after a prompt committed past it. Its digest must be the current one for the read to work.
-    // An interrupted check owes a notice only through a model edit at HEAD, as any other hook does.
-    if ((observed.revisionKind === 'model-edit' || previous.kind === 'pending') && delivery && delivery.revision === observed.revision
-        && delivery.revision > previous.lastNotifiedRevision && /^[a-f0-9]{64}$/.test(delivery.sha256)) {
-      pending = { kind: 'pending', lastNotifiedRevision: previous.lastNotifiedRevision,
-        revision: delivery.revision, sha256: delivery.sha256 };
-    }
-    // Observe actual file effects for every tool shape, including MCP-specific path keys.
-    // An unreported edit remains the current revision until its read instruction reaches hook output.
-    if (pending || observed.receipt?.kind === 'committed' || observed.receipt?.kind === 'restored') ownFile = true;
-    writeNoticeState(input, pending ?? { kind: 'idle', lastNotifiedRevision: previous.lastNotifiedRevision });
+    // An owed notice, an earlier pending one or an edit this sync committed, is durable before the
+    // record below moves HEAD past the edit.
+    const owed = settleNotice(input, previous, observed);
+    // Observe actual file effects for every tool shape, including MCP-specific path keys. Whether a
+    // notice is owed does not change whether this tool touched the managed file.
+    const ownFile = touchesWorkingContext(input) || observed.receipt?.kind === 'committed' || observed.receipt?.kind === 'restored';
     const result = ownFile ? observed : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }], undefined, operationId);
+    // The notice names the revision this hook leaves current, which still holds the edit.
+    const pending = ownFile ? owed : noticeAfterRecord(input, previous, owed, result);
     // A restore (always) and stale citations (stale-refs experiment, Working Context calls only) go
     // out as `block`, which replaces the tool result the model sees, the original output kept below
     // the notice: the agent must see them before it touches the file again. A budget reminder (a tier
@@ -345,7 +369,14 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'Stop') {
     if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) {
       const text = input.last_assistant_message;
-      recordCompleted(input, text, operationId => core(input, 'record', [{ role: 'assistant', text }], undefined, operationId), undefined, () => requireNoticeOutput(input));
+      // A Stop cannot deliver a notice, so it refuses while one is owed. An edit its own record commits
+      // is written as pending before the intent clears. A hook killed before that write leaves its intent,
+      // which refuses the session as for any killed Stop.
+      recordCompleted(input, text, operationId => {
+        const recorded = core(input, 'record', [{ role: 'assistant', text }], undefined, operationId);
+        noticeAfterRecord(input, readNoticeState(input), undefined, recorded);
+        return recorded;
+      }, undefined, () => requireNoticeOutput(input, true));
     }
   } else if (input.hook_event_name === 'PreCompact') {
     withPromptLease(input,()=>{
@@ -358,6 +389,9 @@ async function main(input: HookInput): Promise<void> {
     // size would abort the user's turn and free nothing; and `context-engine read` pages a file of
     // up to 16 MiB; larger payloads must be offloaded (budget reminders warn earlier).
     const refusal = resetRefusal(input, { budget: false });
+    // An edit owed a notice at HEAD is made durable before the marker moves HEAD past it. The next
+    // hook after the compaction delivers it.
+    if (lastSync) settleNotice(input, readNoticeState(input), lastSync);
     if (refusal) emit({ continue: false, stopReason: refusal });
     // Mark the reset in the file, as a new_context call is marked, unless that marker is already the
     // last turn (a new_context reset reaches PreCompact too, also as `auto`). This reset is the
@@ -373,7 +407,8 @@ async function main(input: HookInput): Promise<void> {
         else if(!(e instanceof CoreUnavailable))throw e;
       }
     }
-    requireRecorded(input);
+    // Completion debt can appear while compaction waits. A notice this hook made pending is carried.
+    requireNoCompletionDebt(input);
     });
   }
 }
@@ -382,8 +417,9 @@ async function main(input: HookInput): Promise<void> {
 function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: true }): string | null {
   const notReset = NOT_RESET;
   let result: CoreResult;
+  lastSync = undefined;
   try {
-    result = core(input, 'sync');
+    result = lastSync = core(input, 'sync');
   } catch (e) {
     if (e instanceof Inactive) throw e;
     log(e);
@@ -484,6 +520,8 @@ const backstopMarker = (delivery: string, manual: boolean): string =>
   `Context window reset (${manual ? 'manual compaction' : 'token limit'}). Delivery Mode: ${delivery}. Everything above happened before this point: steps recorded as done are done. The new window holds none of it: read this file back with \`context-engine read\`, read every part, then continue from here.`;
 /** Set by resetRefusal: whether the file's last turn is already a reset marker. */
 let lastTurnIsReset = false;
+/** Set by resetRefusal: its sync result, when the core answered. */
+let lastSync: CoreResult | undefined;
 
 function renderToolCall(input: HookInput): string {
   // After a reset the recorded user request is the only request the model sees, and it reads like a
@@ -498,7 +536,6 @@ interface CoreResult {
   ok: boolean;
   revision?: number;
   revisionKind?: string;
-  delivery?: Core.WorkingContextDelivery;
   workingContext?: string;
   receipt?: { kind: 'committed' | 'restored' | 'stale'; text: string; stale?: { count: number } };
   budget?: Core.BudgetReport;
@@ -515,7 +552,6 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], 
   const cli = process.env.CONTEXT_ENGINE_CLI || 'context-engine';
   const hardLimit = process.env.CONTEXT_ENGINE_HARD_LIMIT || String(DEFAULT_HARD_LIMIT);
   const args = [command, '--session', input.session_id, '--project', input.cwd, '--runner', RUNNER, '--hard-limit', hardLimit, '--owner-pid', String(runnerPid()), '--if-enabled', '--budget', String(budgetTokens)];
-  if (command === 'sync') args.push('--delivery-max-bytes', String(lib.READ_MAX_BYTES));
   if(maxBytes!==undefined)args.push('--max-context-bytes',String(maxBytes));
   if(operationId!==undefined)args.push('--operation-id',operationId);
   const [file, argv] = /\.[cm]?[jt]s$/.test(cli) ? [process.execPath, [cli, ...args]] : [cli, args];
@@ -526,7 +562,9 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], 
   // the one-second intent wait must leave room under the host's 30-second limit.
   // Completed shell hooks may sync then record: 10s lease + two 7.5s calls is 25s, so one blocked
   // output write reaches the host's 30-second limit. The adapter README states the consequence.
-  const timeout=input.hook_event_name==='PreCompact'?5000:input.hook_event_name==='PostToolUse'?7500:input.hook_event_name==='Stop'?15_000:20_000;
+  // A prompt syncs then records: 1s lease + 5s + 15s matches the reset gate's single 20s call.
+  const timeout=input.hook_event_name==='PreCompact'?5000:input.hook_event_name==='PostToolUse'?7500:input.hook_event_name==='Stop'?15_000
+    :input.hook_event_name==='UserPromptSubmit'?(command==='sync'?5000:15_000):20_000;
   const r = spawnSync(file, argv, { maxBuffer, input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout });
   let out: CoreResult | undefined;
   try {

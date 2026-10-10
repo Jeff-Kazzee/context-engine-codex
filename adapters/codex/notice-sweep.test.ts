@@ -33,15 +33,15 @@ const FAULTS: Fault[] = ['none', 'state', 'sync', 'record', 'output', 'lost'];
 const PRUNED: Array<[Start | '*', Kind, Fault[], string]> = [
   ['*', 'own-file tool', ['record'], 'a tool that touched the managed file only syncs'],
   ['*', 'new_context', ['state', 'record'], 'the reset gate writes no notice state and never records'],
-  ['*', 'PreCompact', ['state'], 'compaction writes no notice state'],
   ['*', 'Stop', ['sync'], 'a Stop makes no sync call of its own'],
+  ['idle', 'ordinary tool', ['record'], 'its sync commits the unseen edit, so the tool counts as touching the managed file and only syncs'],
+  ['idle', 'new_context', ['output', 'lost'], 'the gate allows a reset onto a valid edit and writes no output'],
+  ['idle', 'PreCompact', ['output', 'lost'], 'compaction onto a valid edit writes no output'],
   ['idle', 'Stop', ['output', 'lost'], 'a Stop with no owed notice writes no output'],
   ['checking', 'Stop', ['state', 'record'], 'a Stop refuses an owed notice before any state write or core call'],
-  ['pending', 'Stop', ['state', 'record'], 'a Stop refuses an owed notice before any state write or core call'],
-  ['checking', 'new_context', ['sync'], 'the gate refuses an owed notice before its sync'],
-  ['pending', 'new_context', ['sync'], 'the gate refuses an owed notice before its sync'],
-  ['checking', 'PreCompact', ['sync', 'record'], 'compaction refuses an owed notice before any core call'],
-  ['pending', 'PreCompact', ['sync', 'record'], 'compaction refuses an owed notice before any core call'],
+  ['pending', 'Stop', ['state', 'record'], 'a Stop refuses a pending notice before any state write or core call'],
+  ['pending', 'new_context', ['sync'], 'the gate refuses a pending notice before its sync'],
+  ['pending', 'PreCompact', ['state', 'sync', 'record'], 'compaction refuses a pending notice before any state write or core call'],
 ];
 const pruned = (start: Start, kind: Kind, fault: Fault) => PRUNED.some(([s, k, faults]) => (s === '*' || s === start) && k === kind && faults.includes(fault));
 

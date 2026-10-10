@@ -677,9 +677,9 @@ test('wave49: failed public stdout retains the accepted read notice for an ordin
   assert.equal(wc(f), edited);
   const retry = hook(f, toolUse('Read', { file_path: 'ordinary.txt' }, 'ordinary output'));
   assert.equal(retry.status, 0, retry.stderr);
-  assert.match(retry.stdout, /revision 2 was validated/);
+  assert.match(retry.stdout, /revision 3 was validated/, 'the notice names the revision the tool record produced');
   assert.doesNotMatch(retry.stdout, /RETRY_EDIT_SENTINEL/);
-  assert.equal(wc(f), edited);
+  assert.match(wc(f), /RETRY_EDIT_SENTINEL[\s\S]*ordinary output/, 'the ordinary tool output is recorded after the edit');
   const subsequent = hook(f, toolUse('Read', { file_path: 'ordinary.txt' }, 'NEXT_OUTPUT_SENTINEL'));
   assert.equal(subsequent.status, 0, subsequent.stderr);
   assert.doesNotMatch(subsequent.stdout, /was validated/);

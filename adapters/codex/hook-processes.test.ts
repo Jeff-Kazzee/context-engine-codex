@@ -255,10 +255,10 @@ test('[CDX-009] an ordinary tool hook still delivers a pending read notice after
   const retry = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
   assert.equal(retry.status, 0, retry.stderr);
   assert.equal(stoppedContinuation(retry), false, retry.stdout);
-  assert.match(retry.stdout, /revision 2 was validated/);
+  assert.match(retry.stdout, /revision 3 was validated/, 'the notice names the revision the tool record produced');
   const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
   assert.equal(stoppedContinuation(next), false, 'the session continues once the notice reached hook output');
-  assert.match(readFileSync(wcPath(f), 'utf8'), /NOTICE_EDIT_SENTINEL[\s\S]*NEXT_REQUEST/);
+  assert.match(readFileSync(wcPath(f), 'utf8'), /NOTICE_EDIT_SENTINEL[\s\S]*ORDINARY_OUTPUT[\s\S]*NEXT_REQUEST/);
 });
 
 test('[CORE-005] a PostToolUse record racing an apply_patch of the Working Context keeps the patch', {
@@ -393,7 +393,7 @@ async function assertReadableNotice(f: Fixture, run: Run, revision: number): Pro
   assert.match(read.stdout, /NOTICE_EDIT_SENTINEL/);
 }
 
-test('[CDX-009] a notice whose prompt lost its output reaches the next tool hook for the revision that prompt committed', async () => {
+test('[CDX-009] a notice whose prompt lost its output reaches the next tool hook for the revision its record produced', async () => {
   const f = enabledFixture();
   await loseNoticeThenRefuseStop(f);
   const lostPrompt = await runHook(f, SID, prompt('NEXT_REQUEST'), {}, 30_000, true);
@@ -401,7 +401,8 @@ test('[CDX-009] a notice whose prompt lost its output reaches the next tool hook
   assert.equal(headRevision(f, SID), 3);
   const tool = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
   assert.equal(tool.status, 0, tool.stderr);
-  await assertReadableNotice(f, tool, 3);
+  await assertReadableNotice(f, tool, 4);
+  assert.ok(loggedEvents(f, SID).some(e => e.event.text.includes('ORDINARY_OUTPUT')), 'the tool output reaches the Event Log');
   const later = await runHook(f, SID, prompt('LATER_REQUEST'));
   assert.equal(stoppedContinuation(later), false, later.stdout);
   assert.doesNotMatch(later.stdout, /was validated/, 'the notice is delivered once');
@@ -437,7 +438,7 @@ test('[CDX-009] a tool hook after a failed notice check owes no notice without a
   writeFileSync(failSync, `import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const spawn=cp.spawnSync;cp.spawnSync=function(file,args,...rest){if(Array.isArray(args)&&args.includes('sync'))return {status:null,signal:null,stdout:'',stderr:'',output:[],pid:0,error:Object.assign(new Error('synthetic stalled sync'),{code:'ETIMEDOUT'})};return spawn.call(this,file,args,...rest);};syncBuiltinESMExports();`);
   const stalled = await runHook(f, SID, toolUse('Bash', { command: 'make' }, 'STALLED_OUTPUT'), { NODE_OPTIONS: `--import=${failSync}` });
   assert.ok(stoppedContinuation(stalled), stalled.stdout);
-  assert.equal(JSON.parse(readFileSync(noticePath(f), 'utf8')).kind, 'checking', 'the failed check left its state behind');
+  assert.equal(existsSync(noticePath(f)), false, 'a failed check with no model edit writes no notice state');
   const after = await runHook(f, SID, toolUse('Bash', { command: 'echo after' }, 'AFTER_OUTPUT'));
   assert.equal(after.status, 0, after.stderr);
   assert.doesNotMatch(after.stdout, /was validated/, 'no model edit, so no notice');
@@ -485,5 +486,16 @@ test('[CDX-009] a pending notice survives a tool hook killed in its notice check
   } finally { killGroup(killed.pid); }
   const next = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
   assert.equal(next.status, 0, next.stderr);
-  await assertReadableNotice(f, next, 3);
+  await assertReadableNotice(f, next, 4);
+});
+
+test('[CDX-009] a reset onto an edit its own gate committed delivers the notice with the reset marker', async () => {
+  const f = enabledFixture();
+  assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
+  writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nNOTICE_EDIT_SENTINEL\n');
+  assert.equal((await runHook(f, SID, newContext)).stdout, '', 'the gate commits the edit and allows the reset');
+  const reset = await runHook(f, SID, toolUse('new_context', {}, 'A new context window will start.', 'call_nc'));
+  assert.equal(reset.status, 0, reset.stderr);
+  await assertReadableNotice(f, reset, headRevision(f, SID));
+  assert.match(readFileSync(wcPath(f), 'utf8'), /NOTICE_EDIT_SENTINEL[\s\S]*Context window reset \(new_context\)/);
 });
