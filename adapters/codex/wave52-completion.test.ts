@@ -153,12 +153,14 @@ test('wave52: an identified completion refused beside a live Stop keeps its own 
   // The Stop passes its checks, then waits inside its core record call until the test releases it.
   fs.writeFileSync(hold, `import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const native=cp.spawnSync;cp.spawnSync=function(cmd,args,...rest){if(args.includes('record')){fs.writeFileSync(${JSON.stringify(recording)},'');while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return native(cmd,args,...rest);};syncBuiltinESMExports();`);
   const stop = f.start(completion('Stop'), hold);
-  await until(recording);
   const event = completion('PostToolUse', 'event-beside-stop');
-  const refused = f.call(event);
+  let refused: ReturnType<typeof f.call>;
+  try {
+    await until(recording);
+    refused = f.call(event);
+  } finally { fs.writeFileSync(release, ''); }
   assert.match(refused.stdout, /continue.*false/);
   assert.match(refused.stderr, /no stable identity/);
-  fs.writeFileSync(release, '');
   const stopped = await stop;
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.doesNotMatch(stopped.stdout, /continue.*false/);
