@@ -219,6 +219,8 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
     assert.equal(last.status, 0, last.stderr);
   }
   if (group.includes(ordinaryTool)) assert.equal(count('FAULT_TOOL_OUTPUT'), 1, 'the ordinary tool output is in the Event Log once');
+  // A Stop that ran to the end records its reply, whatever notice is owed.
+  if (kind === 'Stop' && (fault === 'none' || fault === 'race')) assert.equal(count('FAULT_REPLY'), 1, 'the Stop reply is in the Event Log once');
   assert.equal(count('OWN_FILE_OUTPUT'), 0, 'a tool that wrote the managed file never echoes into it');
   // A shell edit whose hook runs second finds the edit already committed, so it reads as ordinary.
   assert.ok(count('SHELL_EDIT_OUTPUT') <= 1, 'a shell edit is never recorded twice');
