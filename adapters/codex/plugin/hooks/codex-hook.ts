@@ -8,9 +8,9 @@
 // checkout itself (tests, the regression), the core is found relative to this file. Session work
 // goes through the `context-engine` CLI, which also serializes concurrent hooks of one session.
 import { spawnSync } from 'node:child_process';
-import { closeSync, readFileSync, readdirSync, writeSync } from 'node:fs';
+import { closeSync, readFileSync, readdirSync, realpathSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { locallyEnabled } from './activation.ts';
 import type * as Core from '../../../../core/index.ts';
@@ -399,10 +399,13 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
 function touchesWorkingContext(input: HookInput): boolean {
   const data = input.tool_input as Record<string, unknown> | undefined;
   if (!data || typeof data !== 'object') return false;
-  const managedRoot = resolve(input.cwd, lib.WORKING_CONTEXT_DIR);
+  // The core keeps the Working Context under the canonical project root, and the host cwd can be a
+  // symlinked alias of it. Compare each path as given and in canonical form.
+  const managedRoot = resolve(input.cwd, lib.WORKING_CONTEXT_DIR), canonicalRoot = canonicalPath(managedRoot);
+  const within = (root: string, candidate: string) => candidate === root || candidate.startsWith(root + '/');
   const managedPath = (path: string) => {
     const candidate = resolve(input.cwd, path);
-    return candidate === managedRoot || candidate.startsWith(managedRoot + '/');
+    return within(managedRoot, candidate) || within(canonicalRoot, canonicalPath(candidate));
   };
   for (const key of ['file_path', 'path', 'filename']) {
     if (typeof data[key] === 'string' && managedPath(data[key] as string)) return true;
@@ -417,6 +420,18 @@ function touchesWorkingContext(input: HookInput): boolean {
   const cli = process.env.CONTEXT_ENGINE_CLI || fileURLToPath(new URL('../../../../core/cli.ts', import.meta.url));
   const directRead = !!nodeRead && resolve(input.cwd, nodeRead[1] ?? nodeRead[2] ?? nodeRead[3]!) === resolve(cli);
   return (!!read && managedPath(read[2]!)) || (!!truncate && managedPath(truncate[2]!)) || coreRead || directRead;
+}
+
+/** An absolute path with its nearest existing ancestor resolved through symlinks. */
+function canonicalPath(path: string): string {
+  const missing: string[] = [];
+  for (let current = path; ; current = dirname(current)) {
+    try { return join(realpathSync(current), ...missing); }
+    catch {
+      if (dirname(current) === current) return path;
+      missing.unshift(basename(current));
+    }
+  }
 }
 
 function emit(output: Record<string, unknown>): void {
