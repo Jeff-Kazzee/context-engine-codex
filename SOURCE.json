@@ -50,8 +50,8 @@
     "core/wave29-regressions.test.ts": "85b4613e12f0c17b668cbfdd660763cd65b4ab6123fe3cc63b1c584c7248842b",
     "core/wave31-regressions.test.ts": "b0ea38a4079238e77561e53e1b4f165dfbc5af994b1a66b04e7c0de8b6596632",
     "core/wave51-regressions.test.ts": "dd90041b97d2e6e94ed49100c26877ff6a4b29f4fcda6b497a6dd03518d1183a",
-    "core/wave52-cli-bound.test.ts": "22c6b203bbb4a6b65fc81639db7e1aa94b5cafabb446383f055819a5239cc2bb",
-    "core/wave52-head-integrity.test.ts": "c3494305502b8f9dddf04779acafb8bffd52681ba8bfa4c5c6d6fd21dcb27777",
+    "core/wave52-cli-bound.test.ts": "0939f1752fc7d62907bb6cbfe81c2a817b34b0fd37a906b6ab1847c33c74cb6f",
+    "core/wave52-head-integrity.test.ts": "f128395a63b1de9d3b62a0aad5c96fc31718b30a0d403f2a03525d225adf78f1",
     "core/wave52-ownership.test.ts": "c86b9135d3089d269d865c3aa15c72e1aefeaad936a42ebf41ede95a482ffc82",
     "core/wave7-regressions.test.ts": "402201e4eeb86637e522069feeb2f07a6835c18aa73a635c2bfc571ec4cb07e0",
     "core/wave8-regressions.test.ts": "67f5a78fc0a2e4c2f995d9e735262b5c421d93067c7e1598785055545b7ccdac",
@@ -125,7 +125,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "2e0633e44257c1b024920e12246ad14dfa0c1ca5",
+  "corePatchCommit": "c2494793188441c263489556553deabedf598bdf",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
