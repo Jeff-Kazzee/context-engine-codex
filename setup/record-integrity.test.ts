@@ -1,5 +1,6 @@
-// Setup restores runner config from records it wrote earlier. A record or backup that is gone or
-// foreign cannot say what to restore, so setup refuses before it changes anything.
+// Setup restores runner config from records it wrote earlier. A foreign record cannot say what to
+// restore, so setup refuses before it changes anything. A backup copy that is gone is never read as
+// an absent file: uninstall removes only Context Engine's entries from that file and names the copy.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -10,7 +11,7 @@ import { tree, world } from './testing/world.ts';
 
 const snapshotOf = (record: string) => JSON.parse(readFileSync(record, 'utf8')).dir as string;
 
-test('[LIFE-015] a missing before backup of an interrupted install refuses the undo', async () => {
+test('[LIFE-015] a missing before backup of an interrupted install is reported, never read as an absent file', async () => {
   const w = world();
   const config = join(w.codexHome, 'config.toml');
   writeFileSync(config, '');
@@ -22,31 +23,39 @@ test('[LIFE-015] a missing before backup of an interrupted install refuses the u
   const pending = join(w.stateDir, 'setup', 'codex.pending.json');
   const copy = join(snapshotOf(pending), 'before', '0-config.toml');
   unlinkSync(copy);
-  const afterKill = readFileSync(config, 'utf8');
 
   const r = w.ce(['uninstall']);
-  assert.notEqual(r.status, 0, `uninstall refuses an undo without its before backup. It said:\n${r.stdout}`);
-  for (const name of [copy, pending]) assert.ok(r.stderr.includes(name), `the refusal names ${name}:\n${r.stderr}`);
-  assert.equal(existsSync(config) ? readFileSync(config, 'utf8') : null, afterKill, 'config.toml is left as the kill left it');
-  assert.ok(existsSync(pending), 'the interrupted install record stays');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(existsSync(config), 'config.toml is never deleted on the word of a missing backup');
+  assert.doesNotMatch(readFileSync(config, 'utf8'), /context-engine/, 'only Context Engine entries were removed');
+  assert.ok(r.stdout.includes(`because its before backup ${copy} is missing`), `uninstall names the copy it could not use:\n${r.stdout}`);
+  assert.equal(existsSync(pending), false, 'the undo finished');
 });
 
-test('[LIFE-004] uninstall refuses an install whose before backup is missing', () => {
-  const w = world();
-  const config = join(w.codexHome, 'config.toml');
-  writeFileSync(config, '');
-  assert.equal(w.ce(['install']).status, 0);
-  const pointer = join(w.stateDir, 'setup', 'codex.json');
-  const copy = join(snapshotOf(pointer), 'before', '0-config.toml');
-  unlinkSync(copy);
-  const installed = readFileSync(config, 'utf8');
+test('[LIFE-004] a missing backup copy blocks no command, and uninstall names the file it could not restore', () => {
+  for (const which of ['before', 'after']) {
+    const w = world();
+    const config = join(w.codexHome, 'config.toml');
+    writeFileSync(config, '');
+    assert.equal(w.ce(['install']).status, 0);
+    const pointer = join(w.stateDir, 'setup', 'codex.json');
+    const copy = join(snapshotOf(pointer), which, '0-config.toml');
+    unlinkSync(copy);
 
-  const r = w.ce(['uninstall']);
-  assert.notEqual(r.status, 0, `uninstall refuses without the before backup. It said:\n${r.stdout}`);
-  assert.ok(r.stderr.includes(copy), `the refusal names ${copy}:\n${r.stderr}`);
-  assert.doesNotMatch(r.stdout, /did not exist before install/);
-  assert.equal(existsSync(config) ? readFileSync(config, 'utf8') : null, installed, 'config.toml is unchanged');
-  assert.ok(existsSync(pointer), 'the install record stays');
+    for (const command of ['status', 'enable']) {
+      const r = w.ce([command]);
+      assert.equal(r.status, 0, `${which}: ${command} does not read backup copies:\n${r.stderr}`);
+    }
+    assert.match(w.ce(['install']).stderr, /already installed/, `${which}: install still says it is installed`);
+    const r = w.ce(['uninstall']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(existsSync(config), `${which}: config.toml is never deleted on the word of a missing backup`);
+    assert.doesNotMatch(readFileSync(config, 'utf8'), /context-engine/, `${which}: only Context Engine entries were removed`);
+    const line = r.stdout.split('\n').find((l) => l.includes(`${config}:`)) ?? '';
+    assert.ok(line.includes(copy), `${which}: uninstall names the copy it could not use:\n${r.stdout}`);
+    assert.doesNotMatch(line, /did not exist before install|restored byte for byte/, `${which}: no restore is claimed`);
+    assert.equal(existsSync(pointer), false, `${which}: the install record is retired`);
+  }
 });
 
 test('[LIFE-015] a foreign interrupted install record refuses uninstall before any change', () => {
