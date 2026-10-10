@@ -20,12 +20,12 @@ import { dirname, join } from 'node:path';
 import { experimentOn, findRecord, killSwitchOn, participation, setParticipation } from '../core/index.ts';
 import { projectKey, projectKeyForCanonicalPath } from '../core/store.ts';
 import { projectCodexToml } from '../adapters/codex/guidance.ts';
-import { describe, installedLedger, SetupError } from './install.ts';
+import { describe, installedLedger, refuseInterruptedInstall, SetupError } from './install.ts';
 import { assess, completeLedger, discardSnapshot, readLedger, revert, rollbackSnapshot, takeSnapshot, type Ledger, type Rule } from './ledger.ts';
 import { safeRead, safeWrite } from './files.ts';
 import { assertBackupSafe } from './config-safety.ts';
 import { appendBlock, blockRule, prependBlock, tomlTableScalar, type Markers } from './rules.ts';
-import type { SetupContext } from './runners.ts';
+import { codexSpec, type SetupContext } from './runners.ts';
 
 export const TOML_MARKERS: Markers = {
   begin: '# >>> context-engine: written by `context-engine enable`; `context-engine disable` removes it',
@@ -240,6 +240,8 @@ export function revertAllCodexProjects(ctx: SetupContext): string[] {
 }
 
 export function enableProject(ctx: SetupContext, projectRoot: string): string[] {
+  // A half-applied install could already be loaded by Codex, so enable changes nothing until it is undone.
+  refuseInterruptedInstall(ctx, codexSpec(ctx));
   const config = codexConfig(projectRoot), ptr = pointer(ctx, projectRoot);
   let priorPointer: Buffer | null = null;
   let snap: ReturnType<typeof takeSnapshot> | undefined;

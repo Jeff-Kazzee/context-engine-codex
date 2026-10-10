@@ -39,6 +39,13 @@ function interruptedInstall(ctx: SetupContext, spec: RunnerSpec): Snapshot | nul
   return s;
 }
 
+/** Enable and status refuse while a killed install is not undone. Only install and uninstall undo it. */
+export function refuseInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): void {
+  const snap = interruptedInstall(ctx, spec);
+  if (!snap) return;
+  throw new SetupError(`${spec.title}: an install did not finish, and its configuration changes are not undone. Run \`context-engine-${spec.id} uninstall\` to undo them, or \`context-engine-${spec.id} install\` to undo them and install again. Interrupted install record: ${pendingPath(ctx, spec.id)}. Its before backups: ${join(snap.dir, 'before')}`);
+}
+
 /** A SIGKILL skips the rollback in installLocked, so the next run finishes it before anything else. */
 function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   const snap = interruptedInstall(ctx, spec);
