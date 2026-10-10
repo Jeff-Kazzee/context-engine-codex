@@ -2,7 +2,8 @@
 // refuse the interrupted operation, and never adopt half-applied runner config as a new baseline.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../core/testing.ts';
 import { killGroup, startSetup, waitForFile } from './testing/process.ts';
@@ -67,6 +68,38 @@ test('[LIFE-015] a refused undo names the file, the record and the snapshot with
     assert.ok(r.stderr.includes(pending), `${command} names ${pending}:\n${r.stderr}`);
     assert.doesNotMatch(r.stderr, /^\s+at /m, `${command} prints no stack trace`);
   }
+});
+
+test('[LIFE-015] a kill after a guarded replacement is published names both leftovers', () => {
+  const w = world();
+  const config = join(w.codexHome, 'config.toml');
+  writeFileSync(config, CODEX_CONFIG);
+  assert.equal(w.ce(['install']).status, 0);
+
+  // A child uninstall is killed right after the restored bytes are linked into place, before the temporary name is removed.
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const { uninstallLocked } = await import(${JSON.stringify(new URL('./install.ts', import.meta.url).href)});
+    const { codexSpec, setupContext } = await import(${JSON.stringify(new URL('./runners.ts', import.meta.url).href)});
+    const native = fs.linkSync;
+    fs.linkSync = (from, to) => {
+      native(from, to);
+      if (String(from).includes('.context-engine-setup-') && String(to).endsWith('/config.toml')) process.kill(process.pid, 'SIGKILL');
+    };
+    syncBuiltinESMExports();
+    const ctx = setupContext(process.env);
+    uninstallLocked(ctx, codexSpec(ctx));
+  `], { env: { ...process.env, ...w.env }, encoding: 'utf8' });
+  assert.equal(child.signal, 'SIGKILL', child.stderr);
+  const left = readdirSync(w.codexHome).filter((name) => name.startsWith('.context-engine-')).map((name) => join(w.codexHome, name));
+  assert.equal(left.length, 2, `the kill left a temporary copy and a replacement candidate: ${left.join(', ')}`);
+  assert.equal(lstatSync(config).nlink, 2, 'config.toml shares its inode with the temporary copy');
+
+  const next = w.ce(['uninstall']);
+  assert.notEqual(next.status, 0, next.stdout);
+  for (const path of left) assert.ok(next.stderr.includes(path), `the refusal names ${path}:\n${next.stderr}`);
+  assert.doesNotMatch(next.stderr, /unverified or linked file/, `the leftovers explain the refusal, not the link count:\n${next.stderr}`);
 });
 
 test('[LIFE-015] enable and status refuse until an interrupted install is undone', async () => {
