@@ -243,23 +243,22 @@ test('[CDX-025] sub-agent events on the root session leave a pending root edit u
   assert.match(readFileSync(wcPath(f), 'utf8'), /ROOT_EDIT_SENTINEL[\s\S]*ROOT_TOOL_OUTPUT/);
 });
 
-test('[CDX-009] an ordinary tool hook still delivers a pending read notice after a Stop was refused', async () => {
+test('[CDX-009] an ordinary tool hook delivers a pending read notice after a Stop recorded its reply', async () => {
   const f = enabledFixture();
   assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
   writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nNOTICE_EDIT_SENTINEL\n');
   const lost = await runHook(f, SID, toolUse('Write', { file_path: wcPath(f) }, 'write completed'), {}, 30_000, true);
   assert.notEqual(lost.status, 0, 'the notice never reached hook output');
   assert.match(lost.stderr, /EPIPE|broken pipe/i);
-  const refused = await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'));
-  assert.ok(stoppedContinuation(refused), refused.stdout);
-  assert.match(refused.stdout, /read notice/);
+  const stopped = await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'));
+  assert.equal(stopped.stdout, '', 'the Stop records its reply and carries the notice');
   const retry = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
   assert.equal(retry.status, 0, retry.stderr);
   assert.equal(stoppedContinuation(retry), false, retry.stdout);
-  assert.match(retry.stdout, /revision 3 was validated/, 'the notice names the revision the tool record produced');
+  assert.match(retry.stdout, /revision 4 was validated/, 'the notice names the revision the tool record produced');
   const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
   assert.equal(stoppedContinuation(next), false, 'the session continues once the notice reached hook output');
-  assert.match(readFileSync(wcPath(f), 'utf8'), /NOTICE_EDIT_SENTINEL[\s\S]*ORDINARY_OUTPUT[\s\S]*NEXT_REQUEST/);
+  assert.match(readFileSync(wcPath(f), 'utf8'), /NOTICE_EDIT_SENTINEL[\s\S]*REPLY_WHILE_NOTICE_PENDING[\s\S]*ORDINARY_OUTPUT[\s\S]*NEXT_REQUEST/);
 });
 
 test('[CORE-005] a PostToolUse record racing an apply_patch of the Working Context keeps the patch', {
@@ -298,13 +297,13 @@ if(process.argv[1]?.endsWith('/core/cli.ts')&&process.argv.includes('record')){
   assert.ok(stored.some(text => text.includes('PATCH_SENTINEL')), 'the patch is in the file, a revision or the Event Log');
 });
 
-test('[CDX-009] the next prompt after a refused Stop delivers the pending read notice and the session recovers', async () => {
+test('[CDX-009] the next prompt after a Stop delivers the pending read notice and the session recovers', async () => {
   const f = enabledFixture();
   assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
   writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nNOTICE_EDIT_SENTINEL\n');
   const lost = await runHook(f, SID, toolUse('Write', { file_path: wcPath(f) }, 'write completed'), {}, 30_000, true);
   assert.notEqual(lost.status, 0, 'the notice never reached hook output');
-  assert.ok(stoppedContinuation(await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'))), 'the Stop cannot hide the edit');
+  assert.equal((await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'))).stdout, '', 'the Stop records its reply and carries the notice');
   const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
   assert.equal(next.status, 0, next.stderr);
   assert.equal(stoppedContinuation(next), false, next.stdout);
@@ -376,12 +375,12 @@ test('[PERF-010] a Stop that waits out most of its lease and then stalls in the 
   assert.ok(stopped.ms < 29_000, `${Math.round(stopped.ms)} ms`);
 });
 
-/** Loses a read notice for an accepted edit, then has a Stop refused for it, as in a real turn. */
-async function loseNoticeThenRefuseStop(f: Fixture): Promise<void> {
+/** Loses a read notice for an accepted edit, then ends the turn with a Stop that carries it. */
+async function loseNoticeThenStop(f: Fixture): Promise<void> {
   assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
   writeFileSync(wcPath(f), '[[CTX_TURN 1 role=user]]\nNOTICE_EDIT_SENTINEL\n');
   assert.notEqual((await runHook(f, SID, toolUse('Write', { file_path: wcPath(f) }, 'write completed'), {}, 30_000, true)).status, 0);
-  assert.ok(stoppedContinuation(await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'))));
+  assert.equal((await runHook(f, SID, stop('REPLY_WHILE_NOTICE_PENDING'))).stdout, '', 'the Stop records its reply as revision 3');
 }
 
 /** The notice in `run`, checked by reading its digest-bound command against the current revision. */
@@ -396,13 +395,13 @@ async function assertReadableNotice(f: Fixture, run: Run, revision: number): Pro
 
 test('[CDX-009] a notice whose prompt lost its output reaches the next tool hook for the revision its record produced', async () => {
   const f = enabledFixture();
-  await loseNoticeThenRefuseStop(f);
+  await loseNoticeThenStop(f);
   const lostPrompt = await runHook(f, SID, prompt('NEXT_REQUEST'), {}, 30_000, true);
-  assert.notEqual(lostPrompt.status, 0, 'the prompt committed revision 3, but its output never reached Codex');
-  assert.equal(headRevision(f, SID), 3);
+  assert.notEqual(lostPrompt.status, 0, 'the prompt committed revision 4, but its output never reached Codex');
+  assert.equal(headRevision(f, SID), 4);
   const tool = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
   assert.equal(tool.status, 0, tool.stderr);
-  await assertReadableNotice(f, tool, 4);
+  await assertReadableNotice(f, tool, 5);
   assert.ok(loggedEvents(f, SID).some(e => e.event.text.includes('ORDINARY_OUTPUT')), 'the tool output reaches the Event Log');
   const later = await runHook(f, SID, prompt('LATER_REQUEST'));
   assert.equal(stoppedContinuation(later), false, later.stdout);
@@ -411,7 +410,7 @@ test('[CDX-009] a notice whose prompt lost its output reaches the next tool hook
 
 test('[CDX-009] a notice reaches the tool hook that waited while a prompt committed and was then refused', async () => {
   const f = enabledFixture();
-  await loseNoticeThenRefuseStop(f);
+  await loseNoticeThenStop(f);
   const state = layout(f.projectRoot, SID, f.stateDir).stateDir;
   const ready = join(f.projectRoot, 'prompt-paused'), release = join(f.projectRoot, 'prompt-release'), pause = join(f.projectRoot, 'pause-prompt.mjs');
   // Holds the prompt hook inside its lease, before its record call, until the tool hook is waiting.
@@ -474,9 +473,9 @@ test('[CDX-009] a prompt after an interrupted notice check carries the notice wh
 
 test('[CDX-009] a pending notice survives a tool hook killed in its notice check after a prompt committed past the edit', async () => {
   const f = enabledFixture();
-  await loseNoticeThenRefuseStop(f);
-  assert.notEqual((await runHook(f, SID, prompt('NEXT_REQUEST'), {}, 30_000, true)).status, 0, 'the prompt committed revision 3, but its output never reached Codex');
-  assert.equal(headRevision(f, SID), 3);
+  await loseNoticeThenStop(f);
+  assert.notEqual((await runHook(f, SID, prompt('NEXT_REQUEST'), {}, 30_000, true)).status, 0, 'the prompt committed revision 4, but its output never reached Codex');
+  assert.equal(headRevision(f, SID), 4);
   const ready = join(f.projectRoot, 'sync-paused'), pause = join(f.projectRoot, 'pause-sync.mjs');
   writeFileSync(pause, `import fs from 'node:fs';if(process.argv[1]?.endsWith('/core/cli.ts')&&process.argv.includes('sync')){fs.writeFileSync(${JSON.stringify(ready)},'ready');await new Promise(resolve=>setTimeout(resolve,30000));}`);
   const killed = startBounded([process.execPath, HOOK], { cwd: f.projectRoot, env: hookEnv(f, { NODE_OPTIONS: `--import=${pause}` }), input: JSON.stringify(event(f, SID, toolUse('Bash', { command: 'make' }, 'KILLED_OUTPUT', 'call_killed'))), timeoutMs: 40_000 });
@@ -487,7 +486,7 @@ test('[CDX-009] a pending notice survives a tool hook killed in its notice check
   } finally { killGroup(killed.pid); }
   const next = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_OUTPUT'));
   assert.equal(next.status, 0, next.stderr);
-  await assertReadableNotice(f, next, 4);
+  await assertReadableNotice(f, next, 5);
 });
 
 test('[CDX-009] a reset onto an edit its own gate committed delivers the notice with the reset marker', async () => {

@@ -50,9 +50,7 @@ const PRUNED: Array<[Start | '*', Kind | '*', Fault[], string]> = [
   ['checking', 'new_context', ['output', 'lost'], 'the gate allows a reset over an edit owed at HEAD and writes no output'],
   ['idle', 'PreCompact', ['output', 'lost'], 'compaction onto a valid edit writes no output'],
   ['checking', 'PreCompact', ['output', 'lost'], 'compaction carries an edit owed at HEAD and writes no output'],
-  ['idle', 'Stop', ['output', 'lost'], 'a Stop with no owed notice writes no output'],
-  ['checking', 'Stop', ['state', 'record', ...RACES], 'a Stop refuses an owed notice before any state write or core call'],
-  ['pending', 'Stop', ['state', 'record', ...RACES], 'a Stop refuses a pending notice before any state write or core call'],
+  ['*', 'Stop', ['output', 'lost'], 'a Stop carries an owed notice and writes no output'],
   ['pending', 'new_context', ['sync', 'sync-fail', 'sync-late'], 'the gate refuses a pending notice before its sync'],
   ['pending', 'PreCompact', ['state', 'sync', 'record', 'sync-fail', 'sync-late', ...RACES], 'compaction refuses a pending notice before any state write or core call'],
 ];

@@ -211,14 +211,9 @@ function pendingPrompt(input: HookInput, name = PENDING_PROMPT): { path: string;
 }
 
 const RECORD_REFUSAL = 'Context Engine: an earlier completed tool or assistant event could not be safely recorded. Keep the native conversation; repair storage or disable Context Engine before continuing. Resets remain blocked.';
-/**
- * Refuses while a notice is pending. With `atHead`, also while HEAD or the log holds an unreported model
- * edit, for a Stop, whose record would move HEAD past the edit with no notice to carry.
- */
-function requireNoticeOutput(input: HookInput, atHead = false): void {
-  const state = readNoticeState(input);
-  if (state.kind === 'pending' || (atHead && (unreportedEdit(state, lib.inspectSession({ projectRoot: input.cwd, sessionId: input.session_id }))
-      || scanLog(input, state.logOffset ?? 0, state.lastNotifiedRevision).editAbove))) {
+/** Refuses a reset or a compaction while a notice is pending. */
+function requireNoticeOutput(input: HookInput): void {
+  if (readNoticeState(input).kind === 'pending') {
     throw new PendingPrompt('Context Engine: a Working Context read notice has not reached hook output. Keep the native conversation. The next tool call or user prompt delivers it, and a reset can follow.');
   }
 }
@@ -464,14 +459,21 @@ async function main(input: HookInput): Promise<void> {
   } else if (input.hook_event_name === 'Stop') {
     if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) {
       const text = input.last_assistant_message;
-      // A Stop cannot deliver a notice, so it refuses while one is owed. An edit its own record commits
-      // is written as pending before the intent clears. A hook killed before that write leaves its intent,
-      // which refuses the session as for any killed Stop.
+      // A Stop cannot deliver a notice, so it records the reply and carries any notice owed. An edit
+      // logged above the last notified revision, at HEAD before the record or committed by it, is
+      // written as pending for the record's revision before the intent clears. The next prompt or tool
+      // hook delivers it. A hook killed before that write leaves its intent, which refuses the session
+      // as for any killed Stop, and the edit stays in the log.
       recordCompleted(input, text, operationId => {
         const recorded = core(input, 'record', [{ role: 'assistant', text }], undefined, operationId);
-        noticeAfterRecord(input, readNoticeState(input), undefined, recorded);
+        const state = readNoticeState(input);
+        if (state.kind === 'idle') {
+          const scan = scanLog(input, state.logOffset ?? 0, state.lastNotifiedRevision);
+          const owed = scan.editAbove ? noticeFor(state, recorded) : undefined;
+          if (owed) writeNoticeState(input, { ...owed, logOffset: scan.end });
+        }
         return recorded;
-      }, () => advanceLogOffset(input), () => requireNoticeOutput(input, true));
+      }, () => advanceLogOffset(input));
     }
   } else if (input.hook_event_name === 'PreCompact') {
     withPromptLease(input,()=>{
