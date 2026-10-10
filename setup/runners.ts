@@ -2,11 +2,11 @@
 // commands. The runner homes honour CLAUDE_CONFIG_DIR and CODEX_HOME, so tests and checks can use
 // scratch homes; the runner binaries can be swapped with CONTEXT_ENGINE_CLAUDE_BIN/_CODEX_BIN.
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { absoluteName, anchor, childTarget, closeSync, realpathSync } from '../core/platform.ts';
+import { absoluteName, anchor, childTarget, closeSync, fstatSync, lstatSync, mkdirPrivateSync, openSync, realpathSync, writeFileSync } from '../core/platform.ts';
 import { openPrivateDirectory, resolveStateRoot } from '../core/store.ts';
 import type { Rule } from './ledger.ts';
 import { jsonRule, tomlTablesRule } from './rules.ts';
@@ -63,34 +63,79 @@ export function stagedCodexMarketplace(ctx: SetupContext): string {
 const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
 export function stageCodexPlugin(ctx: SetupContext): void {
-  // Every staging call goes through the verified setup directory's descriptor, so a path swapped
-  // while staging cannot redirect the delete or the copy outside the private state root.
+  // The delete goes through the verified setup directory's descriptor. Every later write goes through
+  // descriptors of directories staging itself created, so no name swapped for a link can redirect it.
   const setup = openPrivateDirectory(ctx.setupDir, { create: true })!;
   try {
-    stageThrough(ctx, absoluteName(childTarget(anchor(setup), 'codex-marketplace')));
+    const staged = childTarget(anchor(setup), 'codex-marketplace');
+    rmSync(absoluteName(staged), { recursive: true, force: true });
+    const root = makeDirectory(setup, 'codex-marketplace', stagedCodexMarketplace(ctx));
+    try {
+      stageThrough(ctx, root);
+      // The runner reads the staged plugin by name, so the name must still be the directory written here.
+      const now = lstatSync(staged), opened = fstatSync(root);
+      if (now.dev !== opened.dev || now.ino !== opened.ino) throw new Error(`the staged Codex plugin directory changed while it was written: ${stagedCodexMarketplace(ctx)}. Install refused.`);
+    } finally { closeSync(root); }
     if (realpathSync(anchor(setup)) !== resolve(ctx.setupDir)) throw new Error('setup directory changed while the Codex plugin was staged. Install refused.');
   } finally { closeSync(setup); }
 }
 
-function stageThrough(ctx: SetupContext, root: string): void {
-  rmSync(root, { recursive: true, force: true });
-  const plugin = join(root, 'plugins', 'context-engine');
-  cpSync(join(ctx.checkout, 'adapters', 'codex', 'plugin'), plugin, { recursive: true });
-  const hooksPath = join(plugin, 'hooks', 'hooks.json');
-  const cli = join(ctx.checkout, 'core', 'cli.ts');
-  const hooks = JSON.parse(readFileSync(hooksPath, 'utf8'));
-  for (const groups of Object.values(hooks.hooks) as Array<Array<{ hooks: Array<{ command: string }> }>>) {
-    for (const group of groups) for (const hook of group.hooks) {
-      if (!hook.command.startsWith('node ')) throw new Error('unexpected Context Engine hook command; staging refused');
-      hook.command = `CONTEXT_ENGINE_CLI=${shellQuote(cli)} ${shellQuote(process.execPath)} ${hook.command.slice(5)}`;
-    }
+/** Creates a private directory through its parent's descriptor and opens it without following a link. */
+function makeDirectory(parent: number, name: string, shown: string): number {
+  const target = childTarget(anchor(parent), name);
+  try { mkdirPrivateSync(target); }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`setup refuses a staging path that appeared while the Codex plugin was staged: ${shown}`);
+    throw e;
   }
-  writeFileSync(hooksPath, `${JSON.stringify(hooks, null, 2)}\n`);
-  mkdirSync(join(root, '.agents', 'plugins'), { recursive: true });
-  writeFileSync(
-    join(root, '.agents', 'plugins', 'marketplace.json'),
-    `${JSON.stringify({ name: MARKETPLACE, plugins: [{ name: 'context-engine', source: { source: 'local', path: './plugins/context-engine' } }] }, null, 2)}\n`,
-  );
+  return openSync(target, 'directory');
+}
+
+/** Writes a new file through its parent's descriptor. An existing name, link or not, refuses. */
+function writeNew(parent: number, name: string, bytes: string | Uint8Array): void {
+  const fd = openSync(childTarget(anchor(parent), name), 'exclusive-nofollow');
+  try { writeFileSync(fd, bytes); } finally { closeSync(fd); }
+}
+
+/** Copies a source tree of plain directories and files into an open directory. */
+function copyTree(source: string, parent: number, shown: string, edit: (path: string, bytes: Buffer) => string | Uint8Array): void {
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name), to = join(shown, entry.name);
+    if (entry.isDirectory()) {
+      const child = makeDirectory(parent, entry.name, to);
+      try { copyTree(from, child, to, edit); } finally { closeSync(child); }
+    } else if (entry.isFile()) writeNew(parent, entry.name, edit(from, readFileSync(from)));
+    else throw new Error(`unexpected entry in the Codex plugin source; staging refused: ${from}`);
+  }
+}
+
+function stageThrough(ctx: SetupContext, root: number): void {
+  const source = join(ctx.checkout, 'adapters', 'codex', 'plugin');
+  const shown = stagedCodexMarketplace(ctx);
+  const cli = join(ctx.checkout, 'core', 'cli.ts');
+  const withHookCommands = (path: string, bytes: Buffer): string | Uint8Array => {
+    if (path !== join(source, 'hooks', 'hooks.json')) return bytes;
+    const hooks = JSON.parse(bytes.toString('utf8'));
+    for (const groups of Object.values(hooks.hooks) as Array<Array<{ hooks: Array<{ command: string }> }>>) {
+      for (const group of groups) for (const hook of group.hooks) {
+        if (!hook.command.startsWith('node ')) throw new Error('unexpected Context Engine hook command; staging refused');
+        hook.command = `CONTEXT_ENGINE_CLI=${shellQuote(cli)} ${shellQuote(process.execPath)} ${hook.command.slice(5)}`;
+      }
+    }
+    return `${JSON.stringify(hooks, null, 2)}\n`;
+  };
+  const plugins = makeDirectory(root, 'plugins', join(shown, 'plugins'));
+  try {
+    const plugin = makeDirectory(plugins, 'context-engine', join(shown, 'plugins', 'context-engine'));
+    try { copyTree(source, plugin, join(shown, 'plugins', 'context-engine'), withHookCommands); } finally { closeSync(plugin); }
+  } finally { closeSync(plugins); }
+  const agents = makeDirectory(root, '.agents', join(shown, '.agents'));
+  try {
+    const marketplace = makeDirectory(agents, 'plugins', join(shown, '.agents', 'plugins'));
+    try {
+      writeNew(marketplace, 'marketplace.json', `${JSON.stringify({ name: MARKETPLACE, plugins: [{ name: 'context-engine', source: { source: 'local', path: './plugins/context-engine' } }] }, null, 2)}\n`);
+    } finally { closeSync(marketplace); }
+  } finally { closeSync(agents); }
 }
 
 export const CODEX_OUR_TABLES = /^\[(marketplaces\.context-engine|plugins\."context-engine@context-engine"|hooks\.state\."context-engine@context-engine:[^"]*")\]$/;
