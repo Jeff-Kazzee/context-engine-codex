@@ -3,8 +3,8 @@
 // an absent file: uninstall removes only Context Engine's entries from that file and names the copy.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { tempDir } from '../core/testing.ts';
 import { killGroup, startSetup, waitForFile } from './testing/process.ts';
 import { tree, world } from './testing/world.ts';
@@ -85,3 +85,42 @@ test('[LIFE-015] a foreign interrupted install record refuses uninstall before a
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(readFileSync(config, 'utf8'), '# my codex config\n');
 });
+
+for (const forge of ['snapshot outside the backups directory', 'tracked file outside the runner policy']) {
+  test(`[LIFE-015] an interrupted install record naming a ${forge} is refused before any change`, async () => {
+    const w = world();
+    const tracked = join(w.codexHome, 'config.toml');
+    writeFileSync(tracked, '# my codex config\n');
+    const pause = join(tempDir('pause'), 'plugin-add');
+    const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+    try { await waitForFile(pause); } finally { killGroup(install.pid); }
+    assert.equal((await install.done).signal, 'SIGKILL');
+    rmSync(join(w.stateDir, 'setup', 'codex.setup.lock'));
+    const pending = join(w.stateDir, 'setup', 'codex.pending.json');
+    const record = JSON.parse(readFileSync(pending, 'utf8')) as { dir: string; files: Array<{ path: string; before: string | null }> };
+    if (forge.startsWith('snapshot')) {
+      // A private snapshot with copies that would pass every later check, but outside setup/backups.
+      const forged = join(tempDir('outside'), 'codex-forged');
+      mkdirSync(join(forged, 'before'), { recursive: true, mode: 0o700 });
+      record.files = record.files.map((f) => {
+        if (f.before === null) return f;
+        const copy = join(forged, 'before', basename(f.before));
+        writeFileSync(copy, 'model = \"forged\"\n', { mode: 0o600 });
+        return { ...f, before: copy };
+      });
+      record.dir = forged;
+    } else {
+      const victim = join(w.home, 'victim.json');
+      writeFileSync(victim, '{"keep": true}\n');
+      record.files[0]!.path = victim;
+    }
+    writeFileSync(pending, JSON.stringify(record));
+    const afterKill = readFileSync(tracked, 'utf8');
+
+    const r = w.ce(['uninstall']);
+    assert.notEqual(r.status, 0, `${forge}: uninstall refuses the record. It said:\n${r.stdout}`);
+    assert.ok(r.stderr.includes(pending) && r.stderr.includes('violates confinement policy'), `${forge}: the refusal names the record and the policy:\n${r.stderr}`);
+    assert.equal(readFileSync(tracked, 'utf8'), afterKill, `${forge}: config.toml is unchanged`);
+    assert.ok(existsSync(pending), `${forge}: the record stays`);
+  });
+}
