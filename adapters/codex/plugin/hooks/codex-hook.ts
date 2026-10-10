@@ -287,7 +287,8 @@ async function main(input: HookInput): Promise<void> {
     let ownFile = touchesWorkingContext(input);
     const previous = readNoticeState(input);
     // Durable intent precedes the child CLI, whose receipt acknowledgement stops at its own stdout.
-    writeNoticeState(input, { kind: 'checking', lastNotifiedRevision: previous.lastNotifiedRevision });
+    // A pending notice already owes its read, so it stays as it is and survives a hook that dies here.
+    if (previous.kind !== 'pending') writeNoticeState(input, { kind: 'checking', lastNotifiedRevision: previous.lastNotifiedRevision });
     const observed = core(input, 'sync');
     const delivery = observed.delivery;
     let pending: Extract<ReadNoticeState, { kind: 'pending' }> | undefined;
