@@ -28,7 +28,7 @@ _Avoid_: cap, quota
 
 **Revision**:
 One committed version of a Working Context, identified by its revision number and SHA-256 digest. Ordinary file writes are observed and committed at a synchronization boundary. Preparing a delivery packet or returning a notice does not prove request delivery.
-_Avoid_: version, snapshot (a snapshot is a stored copy of a revision)
+_Avoid_: version, snapshot (a revision snapshot is a stored copy of a revision. Setup's config backups are a Setup Snapshot.)
 
 ### Delivery modes
 
@@ -65,3 +65,21 @@ _Avoid_: enabled session
 **Baseline**:
 The same runner, unmodified, run on the same task, for comparison.
 _Avoid_: control, vanilla
+
+### Setup
+
+**Setup Lock**:
+The file `<state>/setup/<runner>.setup.lock` that install, uninstall, enable and disable hold for one runner. Setup never treats it as stale. Remove it by hand only after no setup process is running, including a runner plugin command that setup started.
+_Avoid_: session lock
+
+**Setup Snapshot**:
+A timestamped directory under `<state>/setup/backups/` that holds byte copies of each tracked config file from before a setup change (`before/`) and, once the change finishes, copies from after it (`after/`) and its `ledger.json`. Setup messages call the `before/` copies the before backups. An orphan snapshot belongs to an interrupted install.
+_Avoid_: revision snapshot, backup (unqualified)
+
+**Install Record**:
+The file `<state>/setup/<runner>.json` that names the Setup Snapshot of a finished install. Uninstall restores runner config from that snapshot. A runner counts as installed only while its Install Record exists.
+_Avoid_: install pointer, ledger (in messages for people)
+
+**Interrupted Install Record**:
+The file `<state>/setup/<runner>.pending.json`. Install writes it after the before backups and before the first runner command, and removes it when it publishes the Install Record or finishes its rollback. A record left behind means a killed install. The next install or uninstall undoes that install first, and until then enable and status refuse.
+_Avoid_: pending record (in messages for people)
