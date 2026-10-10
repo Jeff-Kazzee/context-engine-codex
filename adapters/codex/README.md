@@ -22,7 +22,15 @@ Prompt retries retain a durable operation ID until recording and the pending che
 
 If an older pending request has no operation ID and no successful-record marker, its committed status is ambiguous. Preserve its session data and disable Context Engine before continuing in the native conversation. Do not delete the marker to force a retry. These offline controls do not prove delivery to a model.
 
-Every completed tool is checked for a Working Context change before its output is recorded, including tools with unfamiliar path fields. A private notice marker preserves an accepted edit across a failed hook output write. Pending notice work refuses a Stop and a reset before they can hide the edited revision. The refused Stop ends the turn, records nothing and leaves no completion debt, so its reply stays only in the native conversation. The next hook that runs delivers the notice. An ordinary tool hook names the edited revision. The next prompt records itself and names the revision it committed, which still holds the edit. A reset can follow either one. A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write.
+Every completed tool is checked for a Working Context change before its output is recorded, including tools with unfamiliar path fields. Each accepted model edit owes a read notice until the notice reaches hook output. After its sync, a hook finds a notice owed when one is already pending or HEAD is a model edit above the last notified revision. It then writes a private pending marker before any call that records past the edit. A prompt syncs before it records for the same reason. The notice therefore survives a failed hook output write. A hook killed between steps leaves it durable, with two exceptions. A Stop killed after its record call leaves its intent, which refuses the session as described below. If the agent edits the file while a hook's record call runs, that call commits the edit, and a kill right after the call loses its notice.
+
+An owed notice refuses a Stop and a reset, which cannot deliver it. The refused Stop ends the turn, records nothing and leaves no completion debt, so its reply stays only in the native conversation. The next prompt or tool hook delivers the notice, and a reset can follow. The notice names a revision that still holds the edit:
+
+- A tool hook that touched the managed file names the revision its sync committed.
+- An ordinary tool hook records its own output and names the revision that record produced.
+- A prompt names the revision it committed. An edit made between turns, which no tool hook saw, gets its notice this way.
+
+A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write. `notice-sweep.test.ts` checks these rules with a fault at each hook step, start state and event.
 
 Completed-tool retries use the host's `tool_use_id`, plus `turn_id` when present, as a stable operation identity. The pending intent and core recording share that identity, so a retry after a committed child loses its reply does not append the tool output twice. Distinct tool IDs remain distinct even when their output is identical.
 
@@ -34,7 +42,8 @@ Every hook runs under the 30-second `timeout` that `hooks.json` sets. At that li
 
 - Stop: a 10-second lease wait and a 15-second record call, 25 s.
 - Completed tool: a 10-second lease wait, a 7.5-second sync and a 7.5-second record call, 25 s.
-- Prompt or reset gate: a 1-second lease wait and one 20-second core call, 21 s.
+- Prompt: a 1-second lease wait, a 5-second sync and a 15-second record call, 21 s.
+- Reset gate: a 1-second lease wait and one 20-second sync, 21 s.
 - PreCompact: a 1-second lease wait and up to three 5-second core calls, 16 s.
 
 Output adds time. The hook retries a write that would block for up to 5 s. If that write fails, the hook writes a refusal under the same bound. Counting one blocked write, the Stop and completed-tool worst cases total 30 s. Process start, module imports and file I/O, which no figure here counts, push them past the limit. A prompt or the reset gate can exceed it when a refusal follows a failed write.
