@@ -37,3 +37,31 @@ test('[LIFE-015] SIGKILL during Codex install never becomes a silent baseline', 
   assert.equal(existsSync(join(w.stateDir, 'setup', 'codex-marketplace')), false);
   assert.equal(existsSync(join(w.codexHome, 'plugins', 'cache', 'context-engine')), false);
 });
+
+test('[LIFE-015] enable and status refuse until an interrupted install is undone', async () => {
+  const w = world();
+  const config = join(w.codexHome, 'config.toml');
+  writeFileSync(config, CODEX_CONFIG);
+  const pause = join(tempDir('pause'), 'plugin-add');
+  const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+  try { await waitForFile(pause); } finally { killGroup(install.pid); }
+  assert.equal((await install.done).signal, 'SIGKILL');
+  rmSync(join(w.stateDir, 'setup', 'codex.setup.lock'));
+  const pending = join(w.stateDir, 'setup', 'codex.pending.json');
+  assert.ok(existsSync(pending), 'the kill left the interrupted install record');
+
+  for (const args of [['enable'], ['status'], ['status', '--json']]) {
+    const r = w.ce(args);
+    assert.notEqual(r.status, 0, `${args.join(' ')} refuses while the interrupted install is not undone. It said:\n${r.stdout}`);
+    assert.ok(r.stderr.includes(pending), `${args.join(' ')} names ${pending}:\n${r.stderr}`);
+    for (const recovery of ['context-engine-codex install', 'context-engine-codex uninstall']) assert.ok(r.stderr.includes(recovery), `${args.join(' ')} names \`${recovery}\`:\n${r.stderr}`);
+  }
+  assert.equal(existsSync(join(w.stateDir, 'participation')), false, 'the refused enable wrote no participation record');
+
+  const undo = w.ce(['uninstall']);
+  assert.equal(undo.status, 0, undo.stdout + undo.stderr);
+  assert.equal(readFileSync(config, 'utf8'), CODEX_CONFIG);
+  const enabled = w.ce(['enable']);
+  assert.equal(enabled.status, 0, enabled.stderr);
+  assert.equal(w.ce(['status']).status, 0, 'status works again after the undo');
+});
