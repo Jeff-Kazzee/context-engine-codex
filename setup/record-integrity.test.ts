@@ -6,7 +6,7 @@ import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import { tempDir } from '../core/testing.ts';
 import { killGroup, startSetup, waitForFile } from './testing/process.ts';
-import { world } from './testing/world.ts';
+import { tree, world } from './testing/world.ts';
 
 const snapshotOf = (record: string) => JSON.parse(readFileSync(record, 'utf8')).dir as string;
 
@@ -47,4 +47,32 @@ test('[LIFE-004] uninstall refuses an install whose before backup is missing', (
   assert.doesNotMatch(r.stdout, /did not exist before install/);
   assert.equal(existsSync(config) ? readFileSync(config, 'utf8') : null, installed, 'config.toml is unchanged');
   assert.ok(existsSync(pointer), 'the install record stays');
+});
+
+test('[LIFE-015] a foreign interrupted install record refuses uninstall before any change', () => {
+  const w = world();
+  const config = join(w.codexHome, 'config.toml');
+  writeFileSync(config, '# my codex config\n');
+  assert.equal(w.ce(['install']).status, 0);
+  assert.equal(w.ce(['enable']).status, 0);
+  const pointer = join(w.stateDir, 'setup', 'codex.json');
+  const pending = join(w.stateDir, 'setup', 'codex.pending.json');
+  writeFileSync(pending, JSON.stringify({ version: 1, kind: 'codex', dir: join(tempDir('elsewhere'), 'codex-x'), files: [], namespaced: [], watch: [], listing: [] }), { mode: 0o600 });
+  const installed = tree(w.codexHome), project = tree(w.project), projects = tree(join(w.stateDir, 'setup', 'projects'));
+
+  for (const attempt of [1, 2]) {
+    const r = w.ce(['uninstall']);
+    assert.notEqual(r.status, 0, `uninstall ${attempt} refuses a record it cannot verify. It said:\n${r.stdout}`);
+    assert.ok(r.stderr.includes(pending), `uninstall ${attempt} names ${pending}:\n${r.stderr}`);
+    assert.deepEqual(tree(w.codexHome), installed, `uninstall ${attempt} left config.toml and the plugin alone`);
+    assert.deepEqual(tree(w.project), project, `uninstall ${attempt} left the project settings alone`);
+    assert.deepEqual(tree(join(w.stateDir, 'setup', 'projects')), projects, `uninstall ${attempt} left the project records alone`);
+    assert.ok(existsSync(pointer), 'the install record stays');
+    assert.match(r.stderr, /move the record aside/, `uninstall ${attempt} gives a next step:\n${r.stderr}`);
+  }
+
+  rmSync(pending);
+  const r = w.ce(['uninstall']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(readFileSync(config, 'utf8'), '# my codex config\n');
 });
