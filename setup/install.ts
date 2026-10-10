@@ -48,10 +48,18 @@ export function interruptedInstall(ctx: SetupContext, spec: RunnerSpec): Snapsho
   return s;
 }
 
-/** Enable and status refuse while a killed install is not undone. Only install and uninstall undo it. */
-export function refuseInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): void {
+/**
+ * Enable and status refuse while a killed install is not undone. Only install and uninstall undo it. A record
+ * whose snapshot the install record names belongs to a finished install that was killed before it removed the
+ * record. It is not refused, and a caller that holds the setup lock removes it.
+ */
+export function refuseInterruptedInstall(ctx: SetupContext, spec: RunnerSpec, locked: boolean): void {
   const snap = interruptedInstall(ctx, spec);
   if (!snap) return;
+  if (installedLedger(ctx, spec.id, spec)?.dir === snap.dir) {
+    if (locked) removePending(ctx, spec.id);
+    return;
+  }
   throw new SetupError(`${spec.title}: an install did not finish, and its configuration changes are not undone. Run \`context-engine-${spec.id} uninstall\` to undo them, or \`context-engine-${spec.id} install\` to undo them and install again. Interrupted install record: ${pendingPath(ctx, spec.id)}. Its before backups: ${join(snap.dir, 'before')}`);
 }
 
@@ -125,7 +133,11 @@ export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
 export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   checkOwnedDirectory(spec.home);
   const prior = installedLedger(ctx, spec.id, spec);
-  if (prior) throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine-${spec.id} uninstall\` first`);
+  if (prior) {
+    // A kill between publishing the install record and removing the interrupted record leaves a finished install.
+    if (interruptedInstall(ctx, spec)?.dir === prior.dir) removePending(ctx, spec.id);
+    throw new SetupError(`${spec.title}: already installed (${prior.at}); run \`context-engine-${spec.id} uninstall\` first`);
+  }
   const recovered = undoInterruptedInstall(ctx, spec);
   const snap = takeSnapshot({ backupRoot: join(ctx.setupDir, 'backups'), kind: spec.id, files: spec.files, watch: spec.watch, namespaced: spec.namespaced });
   let publication: string | undefined;

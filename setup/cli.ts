@@ -91,7 +91,7 @@ export async function runSetup(argv: string[]): Promise<number> {
     if (command === 'status') {
       // "Not installed" would hide a half-applied install, so status refuses until it is undone. Status
       // takes no lock. A live install holds the lock and its own record, so status checks the record only without a lock.
-      if (!existsSync(join(ctx.setupDir, 'codex.setup.lock'))) refuseInterruptedInstall(ctx, codexSpec(ctx));
+      if (!existsSync(join(ctx.setupDir, 'codex.setup.lock'))) refuseInterruptedInstall(ctx, codexSpec(ctx), false);
       const s = await statusText(ctx, projectRoot);
       process.stdout.write(values.json ? `${JSON.stringify(s.json)}\n` : `${s.lines.join('\n')}\n`);
       return 0;

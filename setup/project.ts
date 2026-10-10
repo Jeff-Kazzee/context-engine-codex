@@ -241,7 +241,7 @@ export function revertAllCodexProjects(ctx: SetupContext): string[] {
 
 export function enableProject(ctx: SetupContext, projectRoot: string): string[] {
   // A half-applied install could already be loaded by Codex, so enable changes nothing until it is undone.
-  refuseInterruptedInstall(ctx, codexSpec(ctx));
+  refuseInterruptedInstall(ctx, codexSpec(ctx), true);
   const config = codexConfig(projectRoot), ptr = pointer(ctx, projectRoot);
   let priorPointer: Buffer | null = null;
   let snap: ReturnType<typeof takeSnapshot> | undefined;
