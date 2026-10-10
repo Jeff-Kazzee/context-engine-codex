@@ -42,9 +42,6 @@ export function interruptedInstall(ctx: SetupContext, spec: RunnerSpec): Snapsho
   const snapshot = openPrivateDirectory(s.dir);
   if (snapshot === undefined) throw unusable(`names a snapshot that is missing (${s.dir})`);
   closeSync(snapshot);
-  // A missing copy would read as a file that did not exist, and the undo would delete the live file.
-  const missing = s.files.find((f) => f.before !== null && safeRead(f.before) === null);
-  if (missing) throw new SetupError(`${spec.title}: the before backup of ${missing.path} is missing, so setup cannot undo the interrupted install and changed nothing. Restore ${missing.before}, then run setup again. Interrupted install record: ${pendingPath(ctx, spec.id)}`);
   return s;
 }
 
@@ -80,6 +77,8 @@ export function interruptedInstallStatus(ctx: SetupContext, spec: RunnerSpec): s
 function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   const snap = interruptedInstall(ctx, spec);
   if (!snap) return [];
+  // The undo never restores or deletes a file whose before copy is gone. It removes our entries and says so.
+  const lost = snap.files.filter((f) => f.before !== null && safeRead(f.before) === null).map((f): FileReport => ({ path: f.path, outcome: 'before-missing', lost: f.before! }));
   let retained: string[];
   try {
     checkOwnedDirectory(spec.home);
@@ -93,6 +92,7 @@ function undoInterruptedInstall(ctx: SetupContext, spec: RunnerSpec): string[] {
   removePending(ctx, spec.id);
   return [
     'An earlier install was interrupted. Its configuration changes were rolled back and unmanaged edits were kept.',
+    ...describe(lost),
     `Unowned new paths retained from it: ${retained.length}. Its before backups: ${join(snap.dir, 'before')}`,
   ];
 }
@@ -240,6 +240,10 @@ export function describe(reports: FileReport[]): string[] {
         return `${r.path}: changed by something else since install, so only Context Engine's entries were removed (not a byte-for-byte restore; the original is at ${r.backup ?? '(none: the file did not exist)'})`;
       case 'missing':
         return `${r.path}: missing now; left missing (the original is at ${r.backup ?? '(none)'})`;
+      case 'before-missing':
+        return `${r.path}: not restored, because its before backup ${r.lost} is missing. Only Context Engine's entries were removed.`;
+      case 'after-missing':
+        return `${r.path}: only Context Engine's entries were removed, because its after backup ${r.lost} is missing and setup cannot tell whether something else changed the file (the original is at ${r.backup ?? '(none: the file did not exist)'})`;
       default:
         return `${r.path}: unchanged`;
     }

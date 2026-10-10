@@ -57,9 +57,12 @@ export interface Snapshot extends Omit<Ledger, 'createdFiles' | 'createdDirs'> {
 
 export interface FileReport {
   path: string;
-  outcome: 'restored' | 'deleted' | 'reverse-edited' | 'unchanged' | 'missing';
+  /** `before-missing` and `after-missing`: a backup copy is gone, so only our entries were removed. */
+  outcome: 'restored' | 'deleted' | 'reverse-edited' | 'unchanged' | 'missing' | 'before-missing' | 'after-missing';
   /** Where the original bytes are kept, for a reverse edit. */
   backup?: string;
+  /** The backup copy that is gone. */
+  lost?: string;
 }
 
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
@@ -276,11 +279,12 @@ export function readLedger(dir: string, policy: LedgerPolicy): Ledger {
   const backup = (path: unknown) => path === null || (within(dir,path) && ['before','after','before-md','after-md'].includes(dirname(path).split(sep).at(-1)!) && dirname(dirname(path)) === dir);
   const owned = (path: unknown): path is string => typeof path === 'string' && policy.namespaced.some(n => path === n || within(n,path));
   if (l.version !== 1 || l.dir !== dir || !Array.isArray(l.files) || ![policy.files,...(policy.alternativeFiles??[])].some(paths=>l.files.length===paths.length && l.files.every((f,i)=>f.path===paths[i] && backup(f.before) && backup(f.after))) || !Array.isArray(l.namespaced) || l.namespaced.length !== policy.namespaced.length || !l.namespaced.every((n,i) => n.path === policy.namespaced[i] && typeof n.existed === 'boolean') || !Array.isArray(l.createdFiles) || !l.createdFiles.every(f => owned(f.path) && /^[a-f0-9]{64}$/.test(f.sha)) || !Array.isArray(l.createdDirs) || !l.createdDirs.every(owned)) throw new Error('ledger paths or schema violate confinement policy');
-  // Validate all referenced paths before any restore or namespace removal can occur. A missing copy
-  // would read as a file that did not exist, so a restore from this ledger could delete a live file.
+  // Validate all referenced paths before any restore or namespace removal can occur. Copies are not read
+  // here: status and enable need none, and revert handles a copy that is gone.
   for (const f of l.files) for (const p of [f.before,f.after]) if (p !== null) {
-    checkComponents(p); closeSync(openPrivateDirectory(dirname(p))!);
-    if (safeRead(p) === null) throw new Error(`a backup copy named by ${join(dir, 'ledger.json')} is missing, so setup restores nothing from it. Restore ${p}, then run setup again.`);
+    checkComponents(p);
+    const parent = openPrivateDirectory(dirname(p));
+    if (parent !== undefined) closeSync(parent);
   }
   for (const p of [...l.files.map(f=>f.path),...l.namespaced.map(n=>n.path),...l.createdDirs,...l.createdFiles.map(f=>f.path)]) checkComponents(p);
   return l;
@@ -319,7 +323,16 @@ function about<T>(path: string, action: () => T): T {
   }
 }
 
+/** The first backup copy of `f` that the ledger names but that is gone. */
+function lostCopy(f: Ledger['files'][number]): { kind: 'before' | 'after'; path: string } | undefined {
+  if (f.before !== null && safeRead(f.before) === null) return { kind: 'before', path: f.before };
+  if (f.after !== null && safeRead(f.after) === null) return { kind: 'after', path: f.after };
+  return undefined;
+}
+
 function unchangedBytes(f: Ledger['files'][number], rule: Rule | undefined, bytes: Buffer | null): boolean {
+    // A copy that is gone proves nothing. Read as an absent file, it would let revert delete a live one.
+    if (lostCopy(f)) return false;
     if (!rule) {
       const after = f.after ? safeRead(f.after) : null;
       return after === null ? bytes === null : bytes !== null && after.equals(bytes);
@@ -345,7 +358,9 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
   const reports: FileReport[] = [];
   for (const f of l.files) {
     const before = f.before ? safeRead(f.before) : null;
-    if (unchanged[f.path] && about(f.path, () => unchangedBytes(f, rules[f.path], current.get(f.path)!))) {
+    // A file whose copy is gone is never restored or deleted. It gets the reverse edit, and the report names the copy.
+    const lost = lostCopy(f);
+    if (!lost && unchanged[f.path] && about(f.path, () => unchangedBytes(f, rules[f.path], current.get(f.path)!))) {
       if (before) {
         safeWrite(f.path, before,current.get(f.path)!);
         reports.push({ path: f.path, outcome: 'restored' });
@@ -356,14 +371,15 @@ export function revert(l: Ledger, rules: Record<string, Rule>, unchanged: Record
       continue;
     }
     const now = current.get(f.path)?.toString('utf8') ?? null;
+    const backup = before ? f.before! : undefined;
     if (now === null) {
-      reports.push({ path: f.path, outcome: 'missing', backup: f.before ?? undefined });
+      reports.push({ path: f.path, outcome: 'missing', backup });
       continue;
     }
     const rule = rules[f.path];
     const stripped = rule ? about(f.path, () => rule.strip(now, before?.toString('utf8') ?? null)) : now;
     if (stripped !== now) safeWrite(f.path, stripped,current.get(f.path)!);
-    reports.push({ path: f.path, outcome: 'reverse-edited', backup: f.before ?? undefined });
+    reports.push(lost ? { path: f.path, outcome: `${lost.kind}-missing`, backup, lost: lost.path } : { path: f.path, outcome: 'reverse-edited', backup });
   }
   for (const n of l.namespaced) if (!n.existed) safeRemoveTree(n.path);
   for (const c of l.createdFiles) {
