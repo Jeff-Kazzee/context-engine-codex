@@ -24,21 +24,23 @@ const noticePath = (f: Fixture) => join(stateDir(f), 'codex-read-notice.json');
 
 type Start = 'idle' | 'checking' | 'pending';
 type Kind = 'prompt' | 'own-file tool' | 'ordinary tool' | 'parallel tools' | 'Stop' | 'new_context' | 'PreCompact';
-type Fault = 'none' | 'state' | 'sync' | 'record' | 'output' | 'delivered' | 'lost';
+type Fault = 'none' | 'state' | 'sync' | 'record' | 'output' | 'delivered' | 'lost' | 'sync-fail' | 'sync-late';
 
 const STARTS: Start[] = ['idle', 'checking', 'pending'];
 const KINDS: Kind[] = ['prompt', 'own-file tool', 'ordinary tool', 'parallel tools', 'Stop', 'new_context', 'PreCompact'];
 // state: killed before the first notice state write. sync, record: killed as that core call returns.
 // output: killed after the first hook output write, so Codex applies none of it. delivered: killed
 // after the hook marked its notice delivered. lost: stdout closed, so every output write fails.
-const FAULTS: Fault[] = ['none', 'state', 'sync', 'record', 'output', 'delivered', 'lost'];
+// sync-fail: every sync call reports a timeout without running, and the hook runs on. sync-late: every
+// sync call runs, commits what it finds, and then reports a timeout.
+const FAULTS: Fault[] = ['none', 'state', 'sync', 'record', 'output', 'delivered', 'lost', 'sync-fail', 'sync-late'];
 
 /** Triples this hook version does not reach, each with the reason. Every other fault must fire. */
 const PRUNED: Array<[Start | '*', Kind, Fault[], string]> = [
   ['*', 'own-file tool', ['record'], 'a tool that touched the managed file only syncs'],
   ['*', 'new_context', ['state', 'record', 'delivered'], 'the reset gate writes no notice state and never records'],
   ['*', 'PreCompact', ['delivered'], 'compaction never delivers a notice'],
-  ['*', 'Stop', ['sync', 'delivered'], 'a Stop makes no sync call and never delivers a notice'],
+  ['*', 'Stop', ['sync', 'delivered', 'sync-fail', 'sync-late'], 'a Stop makes no sync call and never delivers a notice'],
   ['*', 'parallel tools', ['state', 'output', 'delivered', 'lost'], 'which hook takes the lease first decides whether the ordinary one writes notice state or output'],
   ['idle', 'new_context', ['output', 'lost'], 'the gate allows a reset onto a valid edit and writes no output'],
   ['checking', 'new_context', ['output', 'lost'], 'the gate allows a reset over an edit owed at HEAD and writes no output'],
@@ -47,8 +49,8 @@ const PRUNED: Array<[Start | '*', Kind, Fault[], string]> = [
   ['idle', 'Stop', ['output', 'lost'], 'a Stop with no owed notice writes no output'],
   ['checking', 'Stop', ['state', 'record'], 'a Stop refuses an owed notice before any state write or core call'],
   ['pending', 'Stop', ['state', 'record'], 'a Stop refuses a pending notice before any state write or core call'],
-  ['pending', 'new_context', ['sync'], 'the gate refuses a pending notice before its sync'],
-  ['pending', 'PreCompact', ['state', 'sync', 'record'], 'compaction refuses a pending notice before any state write or core call'],
+  ['pending', 'new_context', ['sync', 'sync-fail', 'sync-late'], 'the gate refuses a pending notice before its sync'],
+  ['pending', 'PreCompact', ['state', 'sync', 'record', 'sync-fail', 'sync-late'], 'compaction refuses a pending notice before any state write or core call'],
 ];
 const pruned = (start: Start, kind: Kind, fault: Fault) => PRUNED.some(([s, k, faults]) => (s === '*' || s === start) && k === kind && faults.includes(fault));
 
@@ -99,6 +101,7 @@ function faultPreload(f: Fixture, fault: Fault): string {
 if(process.argv[1]?.endsWith('/codex-hook.ts')){
   const point=${JSON.stringify(fault)},write=fs.writeSync,rename=fs.renameSync,spawn=cp.spawnSync;
   const die=()=>{fs.writeFileSync(${fired},point);process.kill(process.pid,'SIGKILL');};
+  const fail=()=>{fs.writeFileSync(${fired},point);return {status:null,signal:'SIGTERM',stdout:'',stderr:'',output:[],pid:0,error:Object.assign(new Error('synthetic core timeout'),{code:'ETIMEDOUT'})};};
   let idle=false;
   fs.writeSync=function(fd,data,...rest){
     if(point==='state'&&String(data).includes('"lastNotifiedRevision"'))die();
@@ -113,8 +116,11 @@ if(process.argv[1]?.endsWith('/codex-hook.ts')){
     return r;
   };
   cp.spawnSync=function(file,args,...rest){
+    const call=Array.isArray(args)?args[1]:undefined;
+    if(point==='sync-fail'&&call==='sync')return fail();
     const r=spawn.call(this,file,args,...rest);
-    if(Array.isArray(args)&&args[1]===point)die();
+    if(point==='sync-late'&&call==='sync')return fail();
+    if(call===point)die();
     return r;
   };
   syncBuiltinESMExports();
