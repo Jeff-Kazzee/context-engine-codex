@@ -523,7 +523,8 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], 
   const maxBuffer = Math.max(16 * 1024 * 1024 * 12, Math.ceil((Number(hardLimit) || DEFAULT_HARD_LIMIT) * 12)) + 1024 * 1024;
   // PreCompact can sync, append its marker, then recheck: all three calls plus
   // the one-second intent wait must leave room under the host's 30-second limit.
-  // Completed shell hooks may sync then record: 10s lease + two 7.5s calls leaves host margin.
+  // Completed shell hooks may sync then record: 10s lease + two 7.5s calls is 25s, so one blocked
+  // output write reaches the host's 30-second limit. The adapter README states the consequence.
   const timeout=input.hook_event_name==='PreCompact'?5000:input.hook_event_name==='PostToolUse'?7500:input.hook_event_name==='Stop'?15_000:20_000;
   const r = spawnSync(file, argv, { maxBuffer, input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout });
   let out: CoreResult | undefined;
