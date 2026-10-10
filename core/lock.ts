@@ -102,6 +102,8 @@ export type Acquired =
 
 /**
  * Takes the lock for `me`. Re-entrant for the same process; takes over from a dead holder.
+ * A reentrant acquisition joins the current lock lifetime: `me.generation` becomes the preserved
+ * generation, so `releaseLock(path, me)` can release that lifetime and no later one.
  *
  * A lock is only ever created by hard-linking a fully written record into place (link() fails
  * atomically if a lock exists), and only ever removed by its live owner (release) or by
@@ -119,6 +121,7 @@ export function acquireLock(path: string, me: LockHolder): Acquired {
     if (current !== 'unreadable') {
       if (sameProcess(current, me)) {
         atomicWrite(path, JSON.stringify({ ...me, acquiredAt: current.acquiredAt, generation: current.generation ?? me.generation }), 'lock-tmp');
+        me.generation = current.generation ?? me.generation;
         return { status: 'acquired', takeoverFrom: null, reused: true };
       }
       if (isAlive(current)) return { status: 'refused', holder: current };

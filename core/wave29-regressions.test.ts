@@ -30,7 +30,8 @@ test('wave29: dead publisher cleanup preserves a distinct live session owner',()
  const root=tempDir('live-owner'),path=join(root,'session.lock');
  const child=spawnSync(process.execPath,['--input-type=module','-e',`import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';import {acquireLock,holderFor} from ${JSON.stringify(new URL('./lock.ts',import.meta.url).href)};const native=fs.linkSync;fs.linkSync=(a,b)=>{native(a,b);process.exit(0);};syncBuiltinESMExports();acquireLock(${JSON.stringify(path)},holderFor(process.ppid,'test',1000));`],{encoding:'utf8',timeout:5000});assert.equal(child.status,0,child.stderr);
  const result=acquireLock(path,holderFor(99999998,'test',1000));assert.equal(result.status,'refused');assert.equal(result.holder.pid,process.pid);assert.equal(fs.lstatSync(path).nlink,1);
- releaseLock(path,holderFor(process.pid,'test',1000));
+ // Release with the holder that the live owner published, so the lock really ends.
+ releaseLock(path,result.holder);assert.equal(fs.existsSync(path),false);
 });
 
 test('wave29: arbitrary hard-linked lock remains refused and untouched',()=>{
