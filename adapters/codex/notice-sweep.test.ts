@@ -23,11 +23,11 @@ const stateDir = (f: Fixture) => layout(f.projectRoot, SID, f.stateDir).stateDir
 const noticePath = (f: Fixture) => join(stateDir(f), 'codex-read-notice.json');
 
 type Start = 'idle' | 'checking' | 'pending';
-type Kind = 'prompt' | 'own-file tool' | 'ordinary tool' | 'Stop' | 'new_context' | 'PreCompact';
+type Kind = 'prompt' | 'own-file tool' | 'ordinary tool' | 'parallel tools' | 'Stop' | 'new_context' | 'PreCompact';
 type Fault = 'none' | 'state' | 'sync' | 'record' | 'output' | 'delivered' | 'lost';
 
 const STARTS: Start[] = ['idle', 'checking', 'pending'];
-const KINDS: Kind[] = ['prompt', 'own-file tool', 'ordinary tool', 'Stop', 'new_context', 'PreCompact'];
+const KINDS: Kind[] = ['prompt', 'own-file tool', 'ordinary tool', 'parallel tools', 'Stop', 'new_context', 'PreCompact'];
 // state: killed before the first notice state write. sync, record: killed as that core call returns.
 // output: killed after the first hook output write, so Codex applies none of it. delivered: killed
 // after the hook marked its notice delivered. lost: stdout closed, so every output write fails.
@@ -39,7 +39,7 @@ const PRUNED: Array<[Start | '*', Kind, Fault[], string]> = [
   ['*', 'new_context', ['state', 'record', 'delivered'], 'the reset gate writes no notice state and never records'],
   ['*', 'PreCompact', ['delivered'], 'compaction never delivers a notice'],
   ['*', 'Stop', ['sync', 'delivered'], 'a Stop makes no sync call and never delivers a notice'],
-  ['idle', 'ordinary tool', ['record'], 'its sync commits the unseen edit, so the tool counts as touching the managed file and only syncs'],
+  ['*', 'parallel tools', ['state', 'output', 'delivered', 'lost'], 'which hook takes the lease first decides whether the ordinary one writes notice state or output'],
   ['idle', 'new_context', ['output', 'lost'], 'the gate allows a reset onto a valid edit and writes no output'],
   ['checking', 'new_context', ['output', 'lost'], 'the gate allows a reset over an edit owed at HEAD and writes no output'],
   ['idle', 'PreCompact', ['output', 'lost'], 'compaction onto a valid edit writes no output'],
@@ -52,14 +52,24 @@ const PRUNED: Array<[Start | '*', Kind, Fault[], string]> = [
 ];
 const pruned = (start: Start, kind: Kind, fault: Fault) => PRUNED.some(([s, k, faults]) => (s === '*' || s === start) && k === kind && faults.includes(fault));
 
-/** The faulted event. Tool events keep one tool_use_id, so a resend is the same host event. */
-const EVENTS: Record<Kind, (f: Fixture) => Record<string, unknown>> = {
-  prompt: () => prompt('FAULT_PROMPT'),
-  'own-file tool': f => toolUse('Write', { file_path: wcPath(f) }, 'write completed', 'call_fault_own'),
-  'ordinary tool': () => toolUse('Bash', { command: 'make' }, 'FAULT_TOOL_OUTPUT', 'call_fault'),
-  Stop: () => stop('FAULT_REPLY'),
-  new_context: () => newContext,
-  PreCompact: () => preCompact,
+const ordinaryTool = toolUse('Bash', { command: 'make' }, 'FAULT_TOOL_OUTPUT', 'call_fault');
+/** A shell command that wrote the Working Context and names it. */
+const shellEdit = toolUse('Bash', { command: `sed -i 's/^/ /' .context-engine/${SID}/context.md` }, 'SHELL_EDIT_OUTPUT', 'call_shell_edit');
+
+/**
+ * The faulted event, as hooks started at once. The fault applies to the last one. Tool events keep one
+ * tool_use_id, so a resend is the same host event.
+ */
+const EVENTS: Record<Kind, (f: Fixture) => Array<Record<string, unknown>>> = {
+  prompt: () => [prompt('FAULT_PROMPT')],
+  'own-file tool': f => [toolUse('Write', { file_path: wcPath(f) }, 'OWN_FILE_OUTPUT', 'call_fault_own')],
+  'ordinary tool': () => [ordinaryTool],
+  // Codex 0.161.0 runs tools that support parallel calls, such as shell commands, at the same time,
+  // with their PostToolUse hooks. apply_patch and other tools without that support run alone.
+  'parallel tools': () => [shellEdit, ordinaryTool],
+  Stop: () => [stop('FAULT_REPLY')],
+  new_context: () => [newContext],
+  PreCompact: () => [preCompact],
 };
 
 const edit = (f: Fixture) => writeFileSync(wcPath(f), `${readFileSync(wcPath(f), 'utf8').trimEnd()}\n${EDIT}\n`);
@@ -148,12 +158,13 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
     delivered.push(Number(notice[1]));
   };
   await SETUP[start](f);
-  const fields = EVENTS[kind](f);
+  const group = EVENTS[kind](f);
   const extra: Record<string, string> = fault === 'none' || fault === 'lost' ? {} : { NODE_OPTIONS: `--import=${faultPreload(f, fault)}` };
-  const faulted = await runHook(f, SID, fields, extra, 40_000, fault === 'lost');
+  const runs = await Promise.all(group.map((fields, i) => i === group.length - 1 ? runHook(f, SID, fields, extra, 40_000, fault === 'lost') : runHook(f, SID, fields)));
+  const faulted = runs.at(-1)!;
   if (extra.NODE_OPTIONS) assert.equal(existsSync(join(f.projectRoot, 'fault-fired')), true, `the ${fault} fault fired`);
   if (fault === 'lost') assert.notEqual(faulted.status, 0, 'the hook wrote output to the closed stdout');
-  await observe(faulted, 'faulted event');
+  for (const run of runs) await observe(run, 'faulted event');
   if (stopDebt(f)) {
     const next = await runHook(f, SID, prompt('RECOVERY_PROMPT'));
     assert.ok(stoppedContinuation(next), `a killed Stop leaves the session refused: ${next.stdout}`);
@@ -174,16 +185,16 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
   // prompt. Codex does not send a failed tool hook again, so a killed tool hook otherwise leaves the
   // session refused until Context Engine is disabled.
   const intents = readdirSync(stateDir(f)).filter(name => name === 'codex-prompt-pending.json' || name.startsWith('codex-record-pending-'));
-  const resend = intents.length && (kind === 'prompt' || kind.endsWith('tool')) ? [fields] : [];
+  const resend = intents.length && (kind === 'prompt' || kind.endsWith('tool') || kind.endsWith('tools')) ? group : [];
   let last: Run | undefined;
   for (const next of [...resend, prompt('LATER_PROMPT'), stop('RECOVERY_REPLY')]) {
     last = await runHook(f, SID, next);
     assert.equal(last.status, 0, last.stderr);
   }
-  // In the idle start the faulted tool's own sync commits the edit, which marks it as the editing tool,
-  // so its output is left out unless a resend finds the edit already committed.
-  if (kind === 'ordinary tool' && start === 'idle') assert.ok(count('FAULT_TOOL_OUTPUT') <= 1, 'the faulted tool output is never recorded twice');
-  else if (kind === 'ordinary tool') assert.equal(count('FAULT_TOOL_OUTPUT'), 1, 'the faulted tool output is in the Event Log once');
+  if (group.includes(ordinaryTool)) assert.equal(count('FAULT_TOOL_OUTPUT'), 1, 'the ordinary tool output is in the Event Log once');
+  assert.equal(count('OWN_FILE_OUTPUT'), 0, 'a tool that wrote the managed file never echoes into it');
+  // A shell edit whose hook runs second finds the edit already committed, so it reads as ordinary.
+  assert.ok(count('SHELL_EDIT_OUTPUT') <= 1, 'a shell edit is never recorded twice');
   assert.equal(last!.stdout, '', 'the session ends usable: the last Stop is not refused');
 }
 
