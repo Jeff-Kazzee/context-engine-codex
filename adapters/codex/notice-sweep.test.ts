@@ -22,23 +22,27 @@ const wcPath = (f: Fixture) => join(f.projectRoot, '.context-engine', SID, 'cont
 const stateDir = (f: Fixture) => layout(f.projectRoot, SID, f.stateDir).stateDir;
 const noticePath = (f: Fixture) => join(stateDir(f), 'codex-read-notice.json');
 
-type Start = 'idle' | 'checking' | 'pending';
+type Start = 'idle' | 'checking' | 'pending' | 'clean';
 type Kind = 'prompt' | 'own-file tool' | 'ordinary tool' | 'parallel tools' | 'Stop' | 'new_context' | 'PreCompact';
-type Fault = 'none' | 'state' | 'sync' | 'record' | 'output' | 'delivered' | 'lost' | 'sync-fail' | 'sync-late';
+type Fault = 'none' | 'state' | 'sync' | 'record' | 'output' | 'delivered' | 'lost' | 'sync-fail' | 'sync-late' | 'race' | 'race-kill' | 'race-late';
 
-const STARTS: Start[] = ['idle', 'checking', 'pending'];
+const STARTS: Start[] = ['idle', 'checking', 'pending', 'clean'];
 const KINDS: Kind[] = ['prompt', 'own-file tool', 'ordinary tool', 'parallel tools', 'Stop', 'new_context', 'PreCompact'];
 // state: killed before the first notice state write. sync, record: killed as that core call returns.
 // output: killed after the first hook output write, so Codex applies none of it. delivered: killed
 // after the hook marked its notice delivered. lost: stdout closed, so every output write fails.
 // sync-fail: every sync call reports a timeout without running, and the hook runs on. sync-late: every
-// sync call runs, commits what it finds, and then reports a timeout.
-const FAULTS: Fault[] = ['none', 'state', 'sync', 'record', 'output', 'delivered', 'lost', 'sync-fail', 'sync-late'];
+// sync call runs, commits what it finds, and then reports a timeout. race: the agent edits the file
+// again while the first record call runs, so that call commits the edit. race-kill: the same, then a
+// kill as the record call returns. race-late: the same, then the record call reports a timeout.
+const FAULTS: Fault[] = ['none', 'state', 'sync', 'record', 'output', 'delivered', 'lost', 'sync-fail', 'sync-late', 'race', 'race-kill', 'race-late'];
+const RACES: Fault[] = ['race', 'race-kill', 'race-late'];
 
 /** Triples this hook version does not reach, each with the reason. Every other fault must fire. */
-const PRUNED: Array<[Start | '*', Kind, Fault[], string]> = [
-  ['*', 'own-file tool', ['record'], 'a tool that touched the managed file only syncs'],
-  ['*', 'new_context', ['state', 'record', 'delivered'], 'the reset gate writes no notice state and never records'],
+const PRUNED: Array<[Start | '*', Kind | '*', Fault[], string]> = [
+  ['clean', '*', FAULTS.filter(fault => !RACES.includes(fault)), 'the clean start has no edit at stake until a race writes one'],
+  ['*', 'own-file tool', ['record', ...RACES], 'a tool that touched the managed file only syncs'],
+  ['*', 'new_context', ['state', 'record', 'delivered', ...RACES], 'the reset gate writes no notice state and never records'],
   ['*', 'PreCompact', ['delivered'], 'compaction never delivers a notice'],
   ['*', 'Stop', ['sync', 'delivered', 'sync-fail', 'sync-late'], 'a Stop makes no sync call and never delivers a notice'],
   ['*', 'parallel tools', ['state', 'output', 'delivered', 'lost'], 'which hook takes the lease first decides whether the ordinary one writes notice state or output'],
@@ -47,12 +51,12 @@ const PRUNED: Array<[Start | '*', Kind, Fault[], string]> = [
   ['idle', 'PreCompact', ['output', 'lost'], 'compaction onto a valid edit writes no output'],
   ['checking', 'PreCompact', ['output', 'lost'], 'compaction carries an edit owed at HEAD and writes no output'],
   ['idle', 'Stop', ['output', 'lost'], 'a Stop with no owed notice writes no output'],
-  ['checking', 'Stop', ['state', 'record'], 'a Stop refuses an owed notice before any state write or core call'],
-  ['pending', 'Stop', ['state', 'record'], 'a Stop refuses a pending notice before any state write or core call'],
+  ['checking', 'Stop', ['state', 'record', ...RACES], 'a Stop refuses an owed notice before any state write or core call'],
+  ['pending', 'Stop', ['state', 'record', ...RACES], 'a Stop refuses a pending notice before any state write or core call'],
   ['pending', 'new_context', ['sync', 'sync-fail', 'sync-late'], 'the gate refuses a pending notice before its sync'],
-  ['pending', 'PreCompact', ['state', 'sync', 'record', 'sync-fail', 'sync-late'], 'compaction refuses a pending notice before any state write or core call'],
+  ['pending', 'PreCompact', ['state', 'sync', 'record', 'sync-fail', 'sync-late', ...RACES], 'compaction refuses a pending notice before any state write or core call'],
 ];
-const pruned = (start: Start, kind: Kind, fault: Fault) => PRUNED.some(([s, k, faults]) => (s === '*' || s === start) && k === kind && faults.includes(fault));
+const pruned = (start: Start, kind: Kind, fault: Fault) => PRUNED.some(([s, k, faults]) => (s === '*' || s === start) && (k === '*' || k === kind) && faults.includes(fault));
 
 const ordinaryTool = toolUse('Bash', { command: 'make' }, 'FAULT_TOOL_OUTPUT', 'call_fault');
 /** A shell command that wrote the Working Context and names it. */
@@ -92,11 +96,13 @@ const SETUP: Record<Start, (f: Fixture) => Promise<void>> = {
     await SETUP.idle(f);
     assert.notEqual((await runHook(f, SID, toolUse('Write', { file_path: wcPath(f) }, 'write completed', 'call_edit'), {}, 30_000, true)).status, 0);
   },
+  // Nothing is owed. The only edit at stake is the one a race writes during a record call.
+  clean: async f => { assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0); },
 };
 
 /** Kills the hook process, never its core CLI child, at one point, and leaves a file saying it fired. */
 function faultPreload(f: Fixture, fault: Fault): string {
-  const path = join(f.projectRoot, 'fault.mjs'), fired = JSON.stringify(join(f.projectRoot, 'fault-fired'));
+  const path = join(f.projectRoot, 'fault.mjs'), fired = JSON.stringify(join(f.projectRoot, 'fault-fired')), wc = JSON.stringify(wcPath(f));
   writeFileSync(path, `import fs from 'node:fs';import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';
 if(process.argv[1]?.endsWith('/codex-hook.ts')){
   const point=${JSON.stringify(fault)},write=fs.writeSync,rename=fs.renameSync,spawn=cp.spawnSync;
@@ -115,11 +121,16 @@ if(process.argv[1]?.endsWith('/codex-hook.ts')){
     if(point==='delivered'&&idle&&String(to).endsWith('codex-read-notice.json'))die();
     return r;
   };
+  let raced=false;
   cp.spawnSync=function(file,args,...rest){
     const call=Array.isArray(args)?args[1]:undefined;
     if(point==='sync-fail'&&call==='sync')return fail();
+    const race=point.startsWith('race')&&call==='record'&&!raced;
+    if(race){raced=true;fs.writeFileSync(${fired},point);fs.writeFileSync(${wc},fs.readFileSync(${wc},'utf8').trimEnd()+'\\nRACE_SENTINEL\\n');}
     const r=spawn.call(this,file,args,...rest);
     if(point==='sync-late'&&call==='sync')return fail();
+    if(race&&point==='race-kill')die();
+    if(race&&point==='race-late')return fail();
     if(call===point)die();
     return r;
   };
@@ -153,7 +164,7 @@ function stillOwed(f: Fixture): boolean {
 
 async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
   const f = enabledFixture();
-  const delivered: number[] = [];
+  const delivered: number[] = [], readBacks: string[] = [];
   /**
    * The newest notice in applied output must read back, at that moment, a revision that holds the
    * edit. Codex hands the model every output of parallel hooks at once, so within such a group a newer
@@ -166,8 +177,9 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
     const read = await startBounded([process.execPath, CLI, 'read', '--session', SID, '--sha', notice[2]!], { cwd: f.projectRoot, env: hookEnv(f), input: '', timeoutMs: 30_000 }).done;
     if (staleAllowed && read.status !== 0) return;
     assert.equal(read.status, 0, `${what}: the notice for revision ${notice[1]} reads back: ${read.stdout}${read.stderr}`);
-    assert.match(read.stdout, new RegExp(EDIT), `${what}: revision ${notice[1]} holds the edit`);
+    assert.match(read.stdout, new RegExp(start === 'clean' ? 'RACE_SENTINEL' : EDIT), `${what}: revision ${notice[1]} holds the edit`);
     delivered.push(Number(notice[1]));
+    readBacks.push(read.stdout);
   };
   await SETUP[start](f);
   const group = EVENTS[kind](f);
@@ -176,9 +188,9 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
   const faulted = runs.at(-1)!;
   if (extra.NODE_OPTIONS) assert.equal(existsSync(join(f.projectRoot, 'fault-fired')), true, `the ${fault} fault fired`);
   if (fault === 'lost') assert.notEqual(faulted.status, 0, 'the hook wrote output to the closed stdout');
-  // A parallel hook killed after its record leaves the other hook's notice stale with nothing to
-  // supersede it. Recovery must then deliver a fresh one.
-  await observe(runs, 'faulted event', runs.length > 1 && faulted.signal === 'SIGKILL');
+  // A faulted parallel hook can record and then fail to write the notice that supersedes the other
+  // hook's, which leaves that one stale. Recovery must then deliver a fresh one.
+  await observe(runs, 'faulted event', runs.length > 1 && fault !== 'none');
   if (stopDebt(f)) {
     const next = await runHook(f, SID, prompt('RECOVERY_PROMPT'));
     assert.ok(stoppedContinuation(next), `a killed Stop leaves the session refused: ${next.stdout}`);
@@ -193,6 +205,7 @@ async function runCell(start: Start, kind: Kind, fault: Fault): Promise<void> {
     await observe([await runHook(f, SID, next)], `recovery event ${i}`);
   }
   if (!documentedLoss) assert.ok(delivered.length > 0, 'the accepted edit reached applied output as a readable notice');
+  if (RACES.includes(fault)) assert.ok(readBacks.some(text => text.includes('RACE_SENTINEL')), 'the edit made during the record call reached a readable notice');
   const count = (output: string) => loggedEvents(f, SID).filter(e => e.event.text.includes(output)).length;
   assert.equal(count('RECOVERY_TOOL_OUTPUT'), 1, 'the recovery tool output is in the Event Log once');
   // Documented recovery: only the same event clears its own intent (README). A user retries a refused
