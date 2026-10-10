@@ -27,6 +27,23 @@ test('[SAFE-012] linked project pointer dir refuses enable without outside write
   assert.deepEqual(tree(w.project), project, 'the project config was rolled back');
 });
 
+test('[SAFE-012] a linked staging directory refuses install by name without a stack trace', () => {
+  const w = world();
+  const config = join(w.codexHome, 'config.toml');
+  writeFileSync(config, '# my codex config\n');
+  mkdirSync(join(w.stateDir, 'setup'), { recursive: true, mode: 0o700 });
+  const outside = tempDir('outside');
+  writeFileSync(join(outside, 'sentinel'), 'SENTINEL');
+  const staged = join(w.stateDir, 'setup', 'codex-marketplace');
+  symlinkSync(outside, staged);
+  const r = w.ce(['install']);
+  assert.notEqual(r.status, 0, 'install refuses a linked staging directory');
+  assert.ok(r.stderr.includes(staged), `install names ${staged}:\n${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /^\s+at /m, 'install prints no stack trace');
+  assert.deepEqual(readdirSync(outside), ['sentinel']);
+  assert.equal(fs.readFileSync(config, 'utf8'), '# my codex config\n');
+});
+
 test('[SAFE-012] swapped codex-marketplace staging dir cannot copy or delete outside the state root', () => {
   const w = world();
   const ctx = setupContext({ ...process.env, ...w.env });

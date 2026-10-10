@@ -38,6 +38,37 @@ test('[LIFE-015] SIGKILL during Codex install never becomes a silent baseline', 
   assert.equal(existsSync(join(w.codexHome, 'plugins', 'cache', 'context-engine')), false);
 });
 
+test('[LIFE-015] a refused undo names the file, the record and the snapshot without a stack trace', async () => {
+  const w = world();
+  const config = join(w.codexHome, 'config.toml');
+  writeFileSync(config, CODEX_CONFIG);
+  const pause = join(tempDir('pause'), 'plugin-add');
+  const install = startSetup(['install'], { cwd: w.project, env: { ...w.env, FAKE_CODEX_PAUSE: pause } });
+  try { await waitForFile(pause); } finally { killGroup(install.pid); }
+  assert.equal((await install.done).signal, 'SIGKILL');
+  rmSync(join(w.stateDir, 'setup', 'codex.setup.lock'));
+  const pending = join(w.stateDir, 'setup', 'codex.pending.json');
+  const backups = join(w.stateDir, 'setup', 'backups');
+
+  // A tracked file that no longer parses blocks the undo. The refusal names it and what to repair.
+  writeFileSync(config, `${readFileSync(config, 'utf8')}bad = "unterminated\n`);
+  for (const command of ['install', 'uninstall']) {
+    const r = w.ce([command]);
+    assert.notEqual(r.status, 0, `${command} refuses an undo over unparsable TOML`);
+    for (const name of [config, pending, backups]) assert.ok(r.stderr.includes(name), `${command} names ${name}:\n${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /^\s+at /m, `${command} prints no stack trace`);
+  }
+
+  // A record that is not JSON cannot say what to undo. Every command names it.
+  writeFileSync(pending, '{"dir": ');
+  for (const command of ['install', 'uninstall', 'enable', 'status']) {
+    const r = w.ce([command]);
+    assert.notEqual(r.status, 0, `${command} refuses a corrupt interrupted install record`);
+    assert.ok(r.stderr.includes(pending), `${command} names ${pending}:\n${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /^\s+at /m, `${command} prints no stack trace`);
+  }
+});
+
 test('[LIFE-015] enable and status refuse until an interrupted install is undone', async () => {
   const w = world();
   const config = join(w.codexHome, 'config.toml');
