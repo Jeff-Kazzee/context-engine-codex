@@ -583,11 +583,13 @@ test('the session lock is owned by the runner process through controlled shell a
   assert.equal(status(f).revision, 2, 'both prompts were recorded by the same owner');
 });
 
-test('actual shell edit does not resurrect its removed command text or output', () => {
+test('an opaque shell edit keeps the edit and is recorded after it, since its input does not name the Working Context', () => {
   const f = enabledFixture(); hook(f, prompt('REMOVE_THIS_SENTINEL keep active task'));
   writeFileSync(wcPath(f), wc(f).replace('REMOVE_THIS_SENTINEL', 'RETAINED_SENTINEL'));
-  const r = hook(f, toolUse('Bash', { command: 'opaque-script REMOVE_THIS_SENTINEL' }, 'REMOVE_THIS_SENTINEL'));
-  assert.equal(r.status, 0, r.stderr); assert.ok(wc(f).includes('RETAINED_SENTINEL')); assert.ok(!wc(f).includes('REMOVE_THIS_SENTINEL'));
+  const r = hook(f, toolUse('Bash', { command: 'opaque-script REMOVE_THIS_SENTINEL' }, 'SCRIPT_OUTPUT'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(wc(f), /RETAINED_SENTINEL[\s\S]*opaque-script REMOVE_THIS_SENTINEL\nSCRIPT_OUTPUT/, 'the edit is kept and the tool call is recorded after it');
+  assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, new RegExp(`revision ${status(f).revision} was validated`), 'the notice names the revision the record produced');
 });
 test('prompt submission surfaces a discarded-edit restore receipt', () => {
   const f = enabledFixture(); hook(f, prompt('prior task'));

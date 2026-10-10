@@ -22,7 +22,15 @@ Prompt retries retain a durable operation ID until recording and the pending che
 
 If an older pending request has no operation ID and no successful-record marker, its committed status is ambiguous. Preserve its session data and disable Context Engine before continuing in the native conversation. Do not delete the marker to force a retry. These offline controls do not prove delivery to a model.
 
-Every completed tool is checked for a Working Context change before its output is recorded, including tools with unfamiliar path fields. Each accepted model edit owes a read notice until the notice reaches hook output. After its sync, a hook finds a notice owed when one is already pending or HEAD is a model edit above the last notified revision. It then writes a private pending marker before any call that records past the edit. A prompt syncs before it records for the same reason. The notice therefore survives a failed hook output write. A hook killed between steps leaves it durable, with two exceptions. A Stop killed after its record call leaves its intent, which refuses the session as described below. If the agent edits the file while a hook's record call runs, that call commits the edit, and a kill right after the call loses its notice.
+Each completed tool hook syncs the Working Context before it records the tool's output. A tool that read or wrote the managed file is only synced, so it never echoes the file into itself. The tool's own input decides that:
+
+- a path field, such as `file_path` or an MCP tool's `target_path`, that names a managed file
+- a plain `cat`, `head`, `tail`, truncate or `context-engine read` command
+- a shell command or patch that names `.context-engine` while its sync sees the file change
+
+The hook records every other tool's output, even when its sync commits an edit that a parallel tool made. Codex 0.161.0 runs tools that support parallel calls, such as shell commands, at the same time. Two cases follow. A shell command that names `.context-engine` while a parallel tool edits the file is treated as the editor. A script that edits the file without naming it has its command and output recorded like any other tool.
+
+Each accepted model edit owes a read notice until the notice reaches hook output. After its sync, a hook finds a notice owed when one is already pending or HEAD is a model edit above the last notified revision. It then writes a private pending marker before any call that records past the edit. A prompt syncs before it records for the same reason. The notice therefore survives a failed hook output write. A hook killed between steps leaves it durable, with two exceptions. A Stop killed after its record call leaves its intent, which refuses the session as described below. If the agent edits the file while a hook's record call runs, that call commits the edit, and a kill right after the call loses its notice.
 
 An owed notice refuses a Stop and a reset, which cannot deliver it. The refused Stop ends the turn, records nothing and leaves no completion debt, so its reply stays only in the native conversation. The next prompt or tool hook delivers the notice, and a reset can follow. The notice names a revision that still holds the edit:
 

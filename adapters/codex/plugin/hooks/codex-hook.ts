@@ -323,9 +323,12 @@ async function main(input: HookInput): Promise<void> {
     // An owed notice, an earlier pending one or an edit this sync committed, is durable before the
     // record below moves HEAD past the edit.
     const owed = settleNotice(input, previous, observed);
-    // Observe actual file effects for every tool shape, including MCP-specific path keys. Whether a
-    // notice is owed does not change whether this tool touched the managed file.
-    const ownFile = touchesWorkingContext(input) || observed.receipt?.kind === 'committed' || observed.receipt?.kind === 'restored';
+    // Ownership comes from this tool's own input. A shell command or a patch can write the file in a
+    // way no pattern recognizes, so input that names the managed directory also counts when this sync
+    // saw the file change. Another tool's edit that this sync commits never takes over this output:
+    // Codex runs the hooks of parallel tool calls at once. Whether a notice is owed does not matter.
+    const changed = observed.receipt?.kind === 'committed' || observed.receipt?.kind === 'restored';
+    const ownFile = touchesWorkingContext(input) || (changed && JSON.stringify(input.tool_input ?? null).includes(lib.WORKING_CONTEXT_DIR));
     const result = ownFile ? observed : core(input, 'record', [{ role: 'tool', text: renderToolCall(input) }], undefined, operationId);
     // The notice names the revision this hook leaves current, which still holds the edit.
     const pending = ownFile ? owed : noticeAfterRecord(input, previous, owed, result);
@@ -336,7 +339,8 @@ async function main(input: HookInput): Promise<void> {
     // leaves the result alone: in code mode a blocked result reads as a script error, which broke
     // read-back in smoke 2. A plain commit needs no notice. All of it is static text with numbers.
     const out: Record<string, unknown> = {};
-    const receipt = result.receipt;
+    // A restore this hook's sync made is reported even when the tool's own output is recorded.
+    const receipt = observed.receipt?.kind === 'restored' ? observed.receipt : result.receipt;
     const restored = receipt?.kind === 'restored';
     if (receipt && (restored || (ownFile && receipt.stale))) {
       Object.assign(out, { decision: 'block', reason: `${receipt.text}${restored ? ' Re-read the file before editing it again.' : ''}\n\nTool output:\n${responseText(input)}` });
@@ -476,8 +480,11 @@ function touchesWorkingContext(input: HookInput): boolean {
     const candidate = resolve(input.cwd, path);
     return candidate === managedRoot || candidate.startsWith(managedRoot + '/');
   };
-  for (const key of ['file_path', 'path', 'filename']) {
-    if (typeof data[key] === 'string' && managedPath(data[key] as string)) return true;
+  // Any path-like field, such as an MCP tool's target_path, that names a managed file.
+  for (const [key, value] of Object.entries(data)) {
+    if (!/path|file|dir|target/i.test(key)) continue;
+    const paths = typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+    if (paths.some(managedPath)) return true;
   }
   // Recognize only simple, unambiguous reads or truncation of a managed path.
   // Arbitrary shell text may mention a path as search data; retain its output.

@@ -239,7 +239,8 @@ test('[CDX-025] sub-agent events on the root session leave a pending root edit u
   for (const [, fields] of FIVE_EVENTS) assert.equal((await runHook(f, SID, { ...fields, agent_id: 'a1' })).status, 0);
   assert.deepEqual(sessionBytes(f, SID), before, 'no sub-agent event syncs, records or restores the root session');
   const root = await runHook(f, SID, toolUse('Read', { file_path: 'ordinary.txt' }, 'ROOT_TOOL_OUTPUT'));
-  assert.match(root.stdout, /revision 2 was validated/, 'the root edit was still pending and intact');
+  assert.match(root.stdout, /revision 3 was validated/, 'the root edit was still pending, and the root tool recorded after it');
+  assert.match(readFileSync(wcPath(f), 'utf8'), /ROOT_EDIT_SENTINEL[\s\S]*ROOT_TOOL_OUTPUT/);
 });
 
 test('[CDX-009] an ordinary tool hook still delivers a pending read notice after a Stop was refused', async () => {
