@@ -216,9 +216,16 @@ export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
   checkOwnedDirectory(spec.home);
   preflightOwnership(spec);
   const lines: string[] = [];
-  for (const cmd of spec.uninstall) {
-    const r = runBinary(spec.bin, cmd, ctx.env);
-    if (!r.ok) lines.push(`\`${spec.bin} ${cmd.join(' ')}\` failed (${r.output.slice(0, 200)}); Context Engine's entries were removed directly instead`);
+  // Native removal can erase user values before the ledger sees them. If a required before copy
+  // is lost, use direct cleanup instead. A null before path means the original file was absent.
+  const missingBefore = ledger.files.filter(f => f.before !== null && safeRead(f.before) === null).map(f => f.before!);
+  if (missingBefore.length) {
+    lines.push(`${spec.title}: native uninstall commands were not run, because required before backups are missing: ${missingBefore.join(', ')}. Direct ledger cleanup follows. Native-only effects are unverified.`);
+  } else {
+    for (const cmd of spec.uninstall) {
+      const r = runBinary(spec.bin, cmd, ctx.env);
+      if (!r.ok) lines.push(`\`${spec.bin} ${cmd.join(' ')}\` failed (${r.output.slice(0, 200)}); Context Engine's entries were removed directly instead`);
+    }
   }
   lines.push(...describe(revert(ledger, spec.rules, assess(ledger, spec.rules))));
   const parent = openPrivateDirectory(ctx.setupDir)!;
