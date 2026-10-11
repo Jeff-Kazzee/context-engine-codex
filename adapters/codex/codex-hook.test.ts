@@ -227,7 +227,7 @@ test('stale-refs experiment: stale citations are reported with the output of the
   assert.match(marker, /^⟦src:parser\.ts#L1@[0-9a-f]{8}⟧$/);
   hook(f, prompt('Task: refactor parser.'), on);
   writeFileSync(wcPath(f), `${wc(f)}\n[[CTX_TURN 2 role=assistant]]\na is defined at ${marker}\n`);
-  const fresh = JSON.parse(hook(f, toolUse('Bash', { command: WC_CMD }, 'file text'), on).stdout);
+  const fresh = JSON.parse(hook(f, toolUse('Bash', { command: WC_CMD }, wc(f)), on).stdout);
   assert.equal(fresh.decision, undefined, 'a fresh citation does not block the tool result');
   assert.match(fresh.hookSpecificOutput.additionalContext, /Working Context revision 2 was validated/, 'the accepted edit still gets its static notice');
   assert.equal(fresh.hookSpecificOutput.additionalContext.includes(marker), false, 'the notice contains no editable citation payload');
@@ -682,6 +682,9 @@ test('wave49: failed public stdout retains the accepted read notice for an ordin
   assert.match(retry.stdout, /revision 3 was validated/, 'the notice names the revision the tool record produced');
   assert.doesNotMatch(retry.stdout, /RETRY_EDIT_SENTINEL/);
   assert.match(wc(f), /RETRY_EDIT_SENTINEL[\s\S]*ordinary output/, 'the ordinary tool output is recorded after the edit');
+  // The model reads the revision the notice names, which acknowledges it.
+  const sha = /--sha ([0-9a-f]{64})/.exec(retry.stdout)![1]!;
+  assert.equal(hook(f, toolUse('Bash', { command: `context-engine read --session ${SID} --sha ${sha}` }, wc(f))).stdout, '');
   const subsequent = hook(f, toolUse('Read', { file_path: 'ordinary.txt' }, 'NEXT_OUTPUT_SENTINEL'));
   assert.equal(subsequent.status, 0, subsequent.stderr);
   assert.doesNotMatch(subsequent.stdout, /was validated/);
