@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fixture, tempDir } from '../../core/testing.ts';
 import { CODEX_TOKEN_LIMIT_RESET, setParticipation } from '../../core/index.ts';
@@ -704,4 +704,56 @@ test('wave49: an undelivered read notice blocks a prompt and reset before they c
   const reset = hook(f, { hook_event_name: 'PreToolUse', tool_name: 'new_context' });
   assert.equal(JSON.parse(reset.stdout).hookSpecificOutput.permissionDecision, 'deny');
   assert.equal(wc(f), edited);
+});
+
+for (const file_path of ['vendor/.context-engine/ordinary.txt', '.context-engine/../ordinary.txt', '../another-project/.context-engine/file.txt']) {
+  test(`wave52: an ordinary resolved path retains its result: ${file_path}`, () => {
+    const f = enabledFixture();
+    const result = hook(f, toolUse('Read', { file_path }, 'ORDINARY_PATH_RESULT'));
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(wc(f), /ORDINARY_PATH_RESULT/);
+  });
+}
+
+test('wave52: a normalized path inside the project managed directory still avoids self-copy', () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('ORIGINAL_TASK')).status, 0);
+  const before = wc(f);
+  const result = hook(f, toolUse('Read', { file_path: `.context-engine/unused/../${SID}/context.md` }, 'SELF_COPY_RESULT'));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(wc(f), before);
+});
+
+test('wave52: a symlinked cwd avoids self-copy through canonical and notice paths', () => {
+  const f = enabledFixture();
+  const link = join(tempDir('alias'), 'project-link');
+  symlinkSync(f.projectRoot, link);
+  const viaLink = (payload: Record<string, unknown>) => hook(f, { ...payload, cwd: link });
+  // The reset gate names the Working Context relative to the cwd the host reported.
+  const gate = viaLink({ hook_event_name: 'PreToolUse', tool_name: 'new_context', tool_input: {} });
+  const notice = /Working Context (\S+) is missing or empty/.exec(JSON.parse(gate.stdout).hookSpecificOutput.permissionDecisionReason)?.[1];
+  assert.equal(notice, relative(link, wcPath(f)));
+  assert.equal(viaLink(prompt('ORIGINAL_TASK')).status, 0);
+  const before = wc(f);
+  for (const file_path of [wcPath(f), notice, `.context-engine/${SID}/context.md`]) {
+    const result = viaLink(toolUse('Read', { file_path }, 'SELF_COPY_RESULT'));
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(wc(f), before, file_path);
+  }
+  const ordinary = viaLink(toolUse('Read', { file_path: 'ordinary.txt' }, 'ORDINARY_THROUGH_LINK'));
+  assert.equal(ordinary.status, 0, ordinary.stderr);
+  assert.match(wc(f), /ORDINARY_THROUGH_LINK/);
+});
+
+test('wave52: a symlink into the session directory followed by .. still avoids self-copy', () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('ORIGINAL_TASK')).status, 0);
+  const sub = join(f.projectRoot, '.context-engine', SID, 'sub');
+  mkdirSync(sub);
+  symlinkSync(sub, join(f.projectRoot, 'link'));
+  const before = wc(f);
+  // The shell resolves link before .., so this reads the Working Context itself.
+  const result = hook(f, toolUse('Bash', { command: 'cat link/../context.md' }, 'SELF_COPY_RESULT'));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(wc(f), before);
 });

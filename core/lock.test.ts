@@ -4,11 +4,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tempDir } from './testing.ts';
+import { readLock } from './lock.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
@@ -115,6 +116,56 @@ test('session lock: two contenders that both saw the same dead holder cannot bot
     assert.deepEqual([a, b].filter((r) => r.endsWith('.acquired')).length, 1, `exactly one acquires (got ${a}, ${b})`);
   } finally {
     for (const n of ['A', 'B']) writeFileSync(join(sig, `${n}.leave`), '');
+    for (const k of kids) k.kill('SIGKILL');
+  }
+});
+
+// Two handles of one owner: the releaser stops between its release check and its unlink, and the
+// replacer releases the same lifetime and publishes a new one in that window.
+const RELEASE_RACE = `
+import { existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const [role, lockPath, sig, owner] = process.argv.slice(1);
+const { setLockStepHook } = await import(${JSON.stringify(join(here, 'faults.ts'))});
+const { acquireLock, releaseLock, holderFor } = await import(${JSON.stringify(join(here, 'lock.ts'))});
+const nap = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
+const me = holderFor(Number(owner), role, 1000);
+if (acquireLock(lockPath, me).status !== 'acquired') process.exit(3);
+if (role === 'releaser') {
+  setLockStepHook((step) => {
+    if (step !== 'release-checked') return;
+    writeFileSync(join(sig, 'releaser.checked'), '');
+    while (!existsSync(join(sig, 'releaser.go'))) nap();
+  });
+  releaseLock(lockPath, me);
+} else {
+  releaseLock(lockPath, me);
+  const next = holderFor(Number(owner), role, 1000);
+  const got = acquireLock(lockPath, next);
+  writeFileSync(join(sig, 'replacer.done'), JSON.stringify({ status: got.status, generation: next.generation }));
+}
+`;
+
+test('a release cannot remove a lock lifetime published between its check and its unlink', async () => {
+  const lockPath = join(tempDir('release-race'), 'session.lock'), sig = tempDir('release-race-sig');
+  const run = (role: string) => spawn(process.execPath, ['--input-type=module', '-e', RELEASE_RACE, role, lockPath, sig, String(process.pid)], { stdio: ['ignore', 'ignore', 'inherit'] });
+  const kids: ChildProcess[] = [];
+  try {
+    kids.push(run('releaser'));
+    await waitAny(sig, ['releaser.checked']);
+    kids.push(run('replacer'));
+    // The replacer either finishes in the window or waits for the releaser to leave it.
+    await waitAny(sig, ['replacer.done'], 1500).catch(() => undefined);
+    writeFileSync(join(sig, 'releaser.go'), '');
+    await Promise.all(kids.map((k) => (k.exitCode === null ? once(k, 'exit') : null)));
+    for (const k of kids) assert.equal(k.exitCode, 0);
+    const published = JSON.parse(readFileSync(join(sig, 'replacer.done'), 'utf8'));
+    assert.equal(published.status, 'acquired');
+    const current = readLock(lockPath);
+    assert.ok(current && current !== 'unreadable', 'the lifetime the replacer published was removed');
+    assert.equal(current.generation, published.generation);
+  } finally {
+    writeFileSync(join(sig, 'releaser.go'), '');
     for (const k of kids) k.kill('SIGKILL');
   }
 });

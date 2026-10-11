@@ -528,14 +528,37 @@ function readPrivateBytes(path: FileTarget, maxBytes: number | undefined, expect
   } finally {closeSync(fd);}
 }
 
-/** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. */
-export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number } = {}): void {
+/** Byte range of one complete Event Log record, including its newline. */
+export interface LogRange { start: number; end: number }
+
+/** Cuts a private append-only file back to its committed length, appends `data`, and flushes the file and its directory. */
+export function appendCommitted(path: string, length: number, data: Buffer): void {
+  const parent = openPrivateDirectory(dirname(resolve(path)));
+  if (parent === undefined) throw Object.assign(new Error('private state parent is unavailable'), { code: 'ENOENT' });
+  try {
+    const fd = verifiedLogDescriptor(path, true, false, parent);
+    try {
+      if (fstatSync(fd).size < length) throw new Error('private state file is shorter than its committed length');
+      ftruncateSync(fd, length);
+      for (let offset = 0; offset < data.length;) {
+        const written = writeSync(fd, data, offset, data.length - offset);
+        if (written <= 0) throw new Error('private state append made no progress');
+        offset += written;
+      }
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    fsyncSync(parent);
+  } finally { closeSync(parent); }
+}
+
+/** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. Returns the row's byte range. */
+export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number } = {}): LogRange {
   const parent = openPrivateDirectory(dirname(resolve(path)));
   if (parent === undefined) throw Object.assign(new Error('Event Log parent is unavailable'), { code: 'ENOENT' });
-  let mayHavePersisted=false;
+  let mayHavePersisted=false, range: LogRange | undefined;
   try {
     try {serialized(`${path}.append.lock`,()=>{
-      try {appendLogLocked(path,entry,parent);mayHavePersisted=true;}
+      try {range=appendLogLocked(path,entry,parent);mayHavePersisted=true;}
       catch(e){if((e as NodeJS.ErrnoException).code==='CE_LOG_APPEND_AMBIGUOUS')mayHavePersisted=true;throw e;}
     },{...opts,parentFd:parent});}
     finally {closeSync(parent);}
@@ -544,15 +567,18 @@ export function appendLog(path: string, entry: Record<string, unknown>, opts: { 
     if(mayHavePersisted&&e instanceof Error)Object.assign(e,{code:'CE_LOG_APPEND_AMBIGUOUS'});
     throw e;
   }
+  return range!;
 }
 
-function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd: number): void {
+function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd: number): LogRange {
   let appended=false;
   try {
   truncateTornTailLocked(path, parentFd);
   const line = Buffer.from(`${JSON.stringify({ ...entry, at: new Date().toISOString() })}\n`);
   const fd = verifiedLogDescriptor(path, true, false, parentFd);
+  let start: number;
   try {
+    start = fstatSync(fd).size;
     try {
       crashPoint('log-torn');
     } catch (e) {
@@ -572,6 +598,7 @@ function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd:
   }
   // O_CREAT can publish a new name; file fsync alone does not make that name durable.
   fsyncSync(parentFd);
+  return { start, end: start + line.length };
   } catch(e) {
     if(appended&&e instanceof Error)Object.assign(e,{code:'CE_LOG_APPEND_AMBIGUOUS'});
     throw e;
@@ -580,14 +607,19 @@ function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd:
 
 /** Reads every complete Event Log entry. An incomplete final tail is ignored. Complete malformed records refuse recovery. Memory follows the largest entry, not the complete history. */
 export function* readLog(path: string): Generator<Record<string,unknown>> {
+  for (const row of readLogRows(path)) yield row.entry;
+}
+
+/** Reads complete records from byte offset `from`, which must start a record, with each record's byte range. */
+export function* readLogRows(path: string, from = 0): Generator<LogRange & { entry: Record<string,unknown> }> {
   let fd: number;
   try {fd=verifiedLogDescriptor(path,false,true);}
   catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
   try {
     const chunk=Buffer.alloc(65536);
-    let parts: Buffer[]=[],bytes=0,lastSequence=0;
+    let parts: Buffer[]=[],bytes=0,lastSequence=0,position=from,lineStart=from;
     for(;;){
-      const n=readSync(fd,chunk,0,chunk.length,null);if(!n)break;
+      const n=readSync(fd,chunk,0,chunk.length,position);if(!n)break;
       const batch=chunk.subarray(0,n);
       let start=0;
       while(start<n){
@@ -596,6 +628,7 @@ export function* readLog(path: string): Generator<Record<string,unknown>> {
         parts.push(Buffer.from(piece));
         if(end<0)break;
         const complete = Buffer.concat(parts, bytes); parts=[]; bytes=0; start=end+1;
+        const rowStart=lineStart; lineStart=position+end+1;
         let line: string;
         try { line = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(complete); }
         catch (cause) { throw new Error('Event Log contains invalid UTF-8 in a complete record, refusing recovery', { cause }); }
@@ -608,8 +641,9 @@ export function* readLog(path: string): Generator<Record<string,unknown>> {
           if (events.length && events[0]!.seq <= lastSequence) throw new Error('Event Log runner-event sequence regressed across records; refusing recovery');
           if (events.length) lastSequence = events.at(-1)!.seq;
         }
-        yield entry;
+        yield {entry,start:rowStart,end:lineStart};
       }
+      position+=n;
     }
     // Preserve the existing protocol: incomplete final lines are not records.
   } finally {closeSync(fd);}
