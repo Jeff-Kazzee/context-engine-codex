@@ -33,6 +33,7 @@ const openFlags: Record<OpenIntent, number | 'wx'> = {
   exclusive: 'wx',
   'exclusive-nofollow': c.O_WRONLY | c.O_CREAT | c.O_EXCL | c.O_NOFOLLOW,
   append: c.O_WRONLY | c.O_APPEND | c.O_CREAT | c.O_NOFOLLOW | c.O_NONBLOCK,
+  'append-existing': c.O_WRONLY | c.O_APPEND | c.O_NOFOLLOW | c.O_NONBLOCK,
   'read-write': c.O_RDWR | c.O_NOFOLLOW | c.O_NONBLOCK,
 };
 

@@ -1,6 +1,6 @@
 import { anchor, childTarget, absoluteName, openedPath, sameParent, suffix, targetBasename, requireSupportedPlatform, type FileTarget } from './platform.ts';
-// File primitives and layout for the core. Every write is temp + fsync + rename, so a reader
-// sees the old file or the new one, never a torn one.
+// File primitives and layout for the core. Replacement writes use temp + fsync + rename.
+// The Event Log and empty managed-ignore repair use explicit append protocols.
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
@@ -206,13 +206,31 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
       existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
     }
-    // Still empty: its creator died before writing it. Only that exact state is repaired. Two
-    // repairers publish the same bytes.
+    // Still empty: its creator died before writing it. Append through that inode instead of
+    // replacing the name, so a concurrent in-place edit or rename-save cannot be overwritten.
     const found = Buffer.isBuffer(existing) && existing.length === 0 ? lstatSync(ignore) : undefined;
     if (found?.isFile() && found.nlink === 1 && found.size === 0 && found.owner === 'current') {
-      const tmp = writeTemp(ignore, MANAGED_IGNORE, 'ignore-tmp');
-      try { renameSync(tmp, ignore); } finally { try { unlinkSync(tmp); } catch {} }
-      existing = Buffer.from(MANAGED_IGNORE);
+      const file = openSync(ignore, 'append-existing');
+      try {
+        const verify = () => {
+          const st = fstatSync(file);
+          if (!st.isFile() || st.nlink !== 1 || st.owner !== 'current' || st.dev !== found.dev || st.ino !== found.ino || openedPath(file) !== join(managed, '.gitignore')) throw new Error('managed ignore file changed during repair');
+          return st;
+        };
+        verify();
+        // Another repairer may have completed since the empty sample. Do not append again when observed.
+        const latest = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+        if (Buffer.isBuffer(latest) && latest.length === 0 && verify().size === 0) {
+          const bytes = Buffer.from(`\n${MANAGED_IGNORE}`);
+          const written = writeSync(file, bytes, 0, bytes.length, null);
+          if (written !== bytes.length) throw new Error(`short append (${written}/${bytes.length} bytes)`);
+          fsyncSync(file);
+        }
+        verify();
+      } catch (e) {
+        throw new Error(`managed ignore file repair failed (${e instanceof Error ? e.message : String(e)}). Existing bytes retained. Review .context-engine/.gitignore and make its final effective rule * before retrying.`, { cause: e });
+      } finally { closeSync(file); }
+      existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
     }
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
