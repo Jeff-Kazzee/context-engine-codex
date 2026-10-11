@@ -357,7 +357,7 @@ test('[CDX-008] a Stop refused by completion debt that appears while it waits re
   assert.doesNotMatch(readFileSync(join(state, 'events.jsonl'), 'utf8'), /REPLY_DURING_DEBT/);
   rmSync(join(state, planted));
   assert.ok(stoppedContinuation(await runHook(f, SID, prompt('LATER'))), 'own debt still refuses a prompt after the other debt is gone');
-  assert.ok(stoppedContinuation(await runHook(f, SID, newContext)), 'own debt still refuses a reset');
+  assert.match(denial(await runHook(f, SID, newContext)), /completion|recorded|pending/i, 'own debt still refuses a reset');
 });
 
 test('[PERF-010] a Stop that waits out most of its lease and then stalls in the core answers before the 30 s hook timeout', async () => {
