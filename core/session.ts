@@ -1061,7 +1061,7 @@ class Core {
     if (!cached) this.validateHeadBoundary(head);
     const tornBytes = truncateTornTail(this.l.events);
     const repairedReceipt = cached ? undefined : this.repairRevisionLog(head);
-    const removed = removeTemps([this.l.stateDir, this.l.revisions], [dirname(this.l.workingContext)]);
+    const removed = removeTemps([this.l.stateDir, this.l.revisions], [dirname(this.l.workingContext)], [dirname(dirname(this.l.workingContext))]);
 
     removed.push(...removeDirectoryEntries(this.l.revisions, name => {
       const m = /^(\d+)\.md$/.exec(name);

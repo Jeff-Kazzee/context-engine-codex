@@ -1037,9 +1037,53 @@ export function removeDirectoryEntries(dir: string, own: (name: string) => boole
   } finally { closeSync(parent); }
 }
 
-export function removeTemps(privateDirs: string[], sharedDirs: string[]): string[] {
+/** A legacy ignore repair's PID has no start marker. Keep every present or uncertain PID. */
+function definitelyGone(pid: number): boolean {
+  try { process.kill(pid, 0); return false; }
+  catch (e) { return (e as NodeJS.ErrnoException).code === 'ESRCH'; }
+}
+
+/** Remove only a dead creator's exact private legacy ignore artifact in the core-owned namespace. */
+function removeLegacyIgnoreTemps(dir: string): string[] {
+  const parent = openPrivateDirectory(dir);
+  if (parent === undefined) return [];
+  const removed: string[] = [], bytes = Buffer.from(MANAGED_IGNORE);
+  try {
+    for (const name of readdirSync(anchor(parent))) {
+      const match = /^\.gitignore\.ce-([1-9]\d*)-[0-9a-f]{8}\.tmp$/.exec(name);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      if (!Number.isSafeInteger(pid) || !definitelyGone(pid)) continue;
+      const target = childTarget(anchor(parent), name);
+      let file: number | undefined;
+      try {
+        const found = lstatSync(target);
+        const usable = (st: ReturnType<typeof fstatSync>) => st.isFile() && st.owner === 'current' && st.privateAccess && st.nlink === 1 && st.size === bytes.length;
+        if (!usable(found)) continue;
+        file = openSync(target, 'read');
+        const st = fstatSync(file);
+        if (!usable(st) || st.dev !== found.dev || st.ino !== found.ino || openedPath(file) !== join(dir, name)) continue;
+        const current = boundedRead(file, st.size, bytes.length);
+        if (current === 'too-large' || !current.equals(bytes)) continue;
+        const now = lstatSync(target);
+        if (!usable(now) || now.dev !== st.dev || now.ino !== st.ino || !definitelyGone(pid)) continue;
+        // This reserved internal name remains a pathname unlink. Active same-user substitution
+        // after this final sample is unsupported, as for other core-owned temporary paths.
+        unlinkSync(target);
+        removed.push(join(dir, name));
+      } catch (e) {
+        if (!['ENOENT', 'ELOOP'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e;
+      } finally { if (file !== undefined) closeSync(file); }
+    }
+    if (removed.length) fsyncSync(parent);
+    return removed;
+  } finally { closeSync(parent); }
+}
+
+export function removeTemps(privateDirs: string[], sharedDirs: string[], legacyIgnoreDirs: string[] = []): string[] {
   return [
     ...privateDirs.flatMap(dir => removeDirectoryEntries(dir, name => name.endsWith('.tmp'))),
     ...sharedDirs.flatMap(dir => removeDirectoryEntries(dir, name => CORE_TEMP.test(name))),
+    ...legacyIgnoreDirs.flatMap(removeLegacyIgnoreTemps),
   ];
 }
