@@ -26,6 +26,7 @@ function assertRecovered(f: ReturnType<typeof fixture>) {
   assert.deepEqual(readFileSync(l.workingContext), snapshot, 'the Working Context equals the HEAD snapshot');
   assert.deepEqual([l.stateDir, l.revisions].flatMap((d) => readdirSync(d).filter((n) => n.endsWith('.tmp'))), [], 'no temp file in private state');
   assert.deepEqual(readdirSync(dirname(l.workingContext)).filter((n) => /\.ce-\d+-[0-9a-f]{8}\.tmp$/.test(n)), [], 'no core temp file beside the Working Context');
+  assert.deepEqual(readdirSync(dirname(l.workingContext)).filter((n) => n.includes('.ce-preserved-')), [], 'verified predecessor recovery artifacts are retired');
   for (const lease of [`${l.lock}.op`, `${l.events}.append.lock`]) assert.ok(!existsSync(lease), `${lease} is not stranded`);
   return { head, rows: eventLog(l.events), text: readFileSync(l.workingContext, 'utf8') };
 }
@@ -36,6 +37,8 @@ const steps: Array<{ step: string; fault: FaultPlan; copies: number; lease: bool
   { step: 'after the snapshot rename', fault: { call: 'renameSync', path: '/revisions/2\\.md$', at: 'after', action: 'kill' }, copies: 1, lease: false },
   { step: 'after the HEAD rename', fault: { call: 'renameSync', path: '/HEAD$', at: 'after', action: 'kill' }, copies: 1, lease: false },
   { step: 'before the Working Context rename', fault: { call: 'renameSync', path: '/context\\.md$', at: 'before', action: 'kill' }, copies: 1, lease: false },
+  { step: 'after preserving the Working Context predecessor', fault: { call: 'linkSync', path: '\\.ce-preserved-[a-f0-9]{64}\\.bak$', at: 'after', action: 'kill' }, copies: 1, lease: false },
+  { step: 'after the Working Context rename', fault: { call: 'renameSync', path: '/context\\.md$', at: 'after', action: 'kill' }, copies: 1, lease: false },
 ];
 
 for (const { step, fault, copies, lease } of steps) {

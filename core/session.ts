@@ -334,6 +334,7 @@ class Core {
   private closed = false;
   private unloggedCommit: { head: Head; text: string } | undefined;
   private appendUncertain=false;
+  private materializationFailed = false;
   private recoveryReceiptHeads: Array<{rev:number;sha:string}> = [];
   /** The operation index as of this call's lookup, extended by the row the call appends. */
   private operationIndex: OperationLookup | undefined;
@@ -385,6 +386,7 @@ class Core {
     this.assertOpen();
     this.confirmReturnedReceipts();
     if(repair&&this.appendUncertain)throw new Error('Event Log append may have persisted; close and reopen this session before retrying');
+    if (repair && this.materializationFailed) throw new Error('Working Context publication failed; close and reopen this session to recover its preserved predecessor before retrying');
     if (repair && this.unloggedCommit) {
       const { head, text } = this.unloggedCommit;
       const published = this.head();
@@ -432,7 +434,7 @@ class Core {
   }
 
   private saveRecoveryCheckpoint(): void {
-    if(this.appendUncertain)return;
+    if(this.appendUncertain || this.materializationFailed)return;
     try {
       const head = this.head();
       const log = this.checkpointLog();
@@ -568,16 +570,21 @@ class Core {
     crashPoint('before-wc');
     const kept = new Set<string>();
     const bound = Math.min(SNAPSHOT_MAX_BYTES, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size));
-    replaceWorkingContext(this.l.workingContext, text, bound, (read) => this.keepStaleEdit(head, text.length, read, kept));
-    head.materialized = true;
-    atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
+    try {
+      replaceWorkingContext(this.l.workingContext, text, bound, (read) => this.keepStaleEdit(head, text.length, read, kept));
+      head.materialized = true;
+      atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
+    } catch (error) {
+      this.materializationFailed = true;
+      throw error;
+    }
   }
 
   /** Keeps one stale edit. True when it appended a row, which gave other edits time to land. */
   private keepStaleEdit(head: Head, chars: number, read: WorkingContextRead, kept: Set<string>): boolean {
     if (read === undefined) return false;
     const current = Buffer.isBuffer(read) ? decode(read) : null;
-    if (current !== null && (!current.trim() || [head.parent, head.sha].includes(sha(current)))) return false;
+    if (current !== null && ((head.parent === null && !current.trim()) || [head.parent, head.sha].includes(sha(current)))) return false;
     // Logged as sync() logs an unusable file: the text, the raw bytes, or nothing when it was not read.
     const rejected: Record<string, unknown> = current !== null ? { rejected: current }
       : Buffer.isBuffer(read) ? { rejectedBase64: read.toString('base64') }
@@ -1061,14 +1068,11 @@ class Core {
       const read = readWorkingContextFile(this.l.workingContext, Math.min(SNAPSHOT_MAX_BYTES, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size)));
       const current = read && typeof read !== 'string' ? decode(read) : null;
       const currentSha = current === null ? null : sha(current);
-      if (currentSha !== head.sha) {
-        this.materialize(head, this.snapshot(head.rev));
-        interruptedReceipt = this.pendingReceipt ?? repairedReceipt;
-        rematerialized = true;
-      } else {
-        head.materialized = true;
-        atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
-      }
+      // Even an already-current file can have a preserved predecessor from a
+      // failed post-rename log append. Materialization recovers that artifact.
+      this.materialize(head, this.snapshot(head.rev));
+      interruptedReceipt = this.pendingReceipt ?? repairedReceipt;
+      rematerialized = currentSha !== head.sha || interruptedReceipt !== undefined;
     }
 
     if (repairedReceipt && interruptedReceipt && !interruptedReceipt.text.includes(repairedReceipt.text)) interruptedReceipt = {...interruptedReceipt,text:`${repairedReceipt.text}\n${interruptedReceipt.text}`};

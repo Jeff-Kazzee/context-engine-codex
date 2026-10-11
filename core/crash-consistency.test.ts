@@ -148,7 +148,9 @@ test('[REC-011] every crash-consistent prefix of a commit trace recovers', () =>
   assert.ok(images.length > 5, `${images.length} distinct crash images`);
   for (const [i, img] of images.entries()) {
     for (const dir of dirs) for (const name of fs.readdirSync(dir)) if (fs.lstatSync(join(dir, name)).isFile()) fs.unlinkSync(join(dir, name));
-    for (const [path, bytes] of img) fs.writeFileSync(path, bytes);
+    // The trace models bytes and names. All managed files are private, including
+    // predecessor recovery artifacts, so recreate that invariant in each image.
+    for (const [path, bytes] of img) fs.writeFileSync(path, bytes, { mode: 0o600 });
     const reopened = openS1(f);
     const r = reopened.sync();
     const head = JSON.parse(fs.readFileSync(join(s.stateDir, 'HEAD'), 'utf8'));

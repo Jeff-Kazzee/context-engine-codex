@@ -487,22 +487,75 @@ function readOpened(fd: number, maxBytes: number): Buffer | 'too-large' {
  * offers no renameat2(RENAME_EXCHANGE) and the core has no native dependencies.
  */
 export function replaceWorkingContext(wc: string, data: string, maxBytes: number, keep: (read: WorkingContextRead) => boolean): void {
+  assertWorkingContextDir(wc);
+  const directory = dirname(wc), parent = openSync(directory, 'directory');
+  const target = childTarget(anchor(parent), basename(wc));
+  // This is a recovery artifact, not a CORE_TEMP candidate. Its name binds it to
+  // the committed text whose publication may have displaced the old inode.
+  const preserved = suffix(target, `.ce-preserved-${sha(data)}.bak`);
+  const preservedPath = join(directory, `${basename(wc)}.ce-preserved-${sha(data)}.bak`);
   const last: { fd?: number; read: WorkingContextRead } = { read: undefined };
+  let tmp: FileTarget | undefined;
   try {
-    atomicWrite(wc, data, 'wc-tmp', () => {
-      for (let look = 0; look < 4; look++) {
-        if (last.fd !== undefined) { closeSync(last.fd); last.fd = undefined; }
-        const opened = openWorkingContext(wc);
-        last.fd = typeof opened === 'number' ? opened : undefined;
-        last.read = last.fd === undefined ? opened as undefined | 'not-a-file' : readOpened(last.fd, maxBytes);
-        if (!keep(last.read)) return;
+    if (!fstatSync(parent).isDirectory() || openedPath(parent) !== directory) throw new Error('Working Context parent could not be verified; refusing to write');
+    // A previous publication can die before rename (two names for one inode) or
+    // after it (only the recovery name). Only this exact, verified pair permits
+    // a two-link read. Ordinary Working Context reads retain their one-link rule.
+    if (existsSync(preserved)) {
+      const fd = openSync(preserved, 'read');
+      try {
+        const st = fstatSync(fd), named = lstatSync(preserved);
+        const current = existsSync(target) ? lstatSync(target) : undefined;
+        const ownPair = st.nlink === 2 && current?.isFile() && current.dev === st.dev && current.ino === st.ino && current.nlink === 2;
+        if (!st.isFile() || st.owner !== 'current' || !st.privateAccess || isCredential(preservedPath, st)
+          || openedPath(fd) !== preservedPath || named.dev !== st.dev || named.ino !== st.ino
+          || !(st.nlink === 1 || ownPair)) throw new Error('unverified Working Context recovery artifact; refusing payload');
+        keep(readOpened(fd, maxBytes));
+        const latest = lstatSync(preserved);
+        if (latest.dev !== st.dev || latest.ino !== st.ino) throw new Error('Working Context recovery artifact changed before removal');
+        unlinkSync(preserved);
+        fsyncSync(parent);
+      } finally { closeSync(fd); }
+    }
+    tmp = writeTemp(target, data, 'wc-tmp');
+    for (let look = 0; look < 4; look++) {
+      if (last.fd !== undefined) { closeSync(last.fd); last.fd = undefined; }
+      const opened = openWorkingContext(wc);
+      last.fd = typeof opened === 'number' ? opened : undefined;
+      last.read = last.fd === undefined ? opened as undefined | 'not-a-file' : readOpened(last.fd, maxBytes);
+      if (!keep(last.read)) break;
+    }
+    if (last.fd !== undefined) {
+      const st = fstatSync(last.fd);
+      if (st.owner !== 'current' || st.nlink !== 1) throw new Error('Working Context predecessor is not owned and unlinked; refusing publication');
+      restrictPrivateAccess(last.fd, 'file');
+      linkSync(target, preserved);
+      const saved = lstatSync(preserved);
+      if (!saved.isFile() || saved.dev !== st.dev || saved.ino !== st.ino || saved.nlink !== 2) {
+        unlinkSync(preserved);
+        fsyncSync(parent);
+        throw new Error('Working Context changed before preservation; refusing publication');
       }
-    });
+      fsyncSync(parent);
+    }
+    renameSync(tmp, target);
+    fsyncSync(parent);
     if (last.fd === undefined) return;
     const after = readOpened(last.fd, maxBytes);
     if (Buffer.isBuffer(after) && Buffer.isBuffer(last.read) ? !after.equals(last.read) : after !== last.read) keep(after);
+    // keep() has made the observed edit durable. Writes after this last sample
+    // remain outside the bounded capture contract.
+    const saved = lstatSync(preserved), held = fstatSync(last.fd);
+    if (saved.dev !== held.dev || saved.ino !== held.ino) throw new Error('Working Context recovery artifact changed before removal');
+    unlinkSync(preserved);
+    fsyncSync(parent);
+  } catch (error) {
+    if (existsSync(preserved)) throw new Error(`Working Context publication failed. Preserve the recovery artifact ${preservedPath} and retry after repairing storage.`, { cause: error });
+    throw error;
   } finally {
+    if (tmp) try { unlinkSync(tmp); } catch {}
     if (last.fd !== undefined) closeSync(last.fd);
+    closeSync(parent);
   }
 }
 
