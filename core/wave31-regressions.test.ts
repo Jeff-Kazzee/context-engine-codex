@@ -98,9 +98,10 @@ test('wave31: a first-seen operation reads only the Event Log tail', () => {
   for(let i=0;i<8;i++)first.session.record([{role:'tool',text:`BULK_${i} `+'x'.repeat(128*1024)}],{operationId:id(100+i)});
   const log=join(first.session.stateDir,'events.jsonl');first.session.close();
   const next=openSession(options);assert.equal(next.status,'open');
+  // Inspect the descriptor link itself, including valid handles to replaced files.
   // Count Event Log bytes read while one new identified operation is recorded.
   const read=fs.readSync;let logBytes=0;
-  fs.readSync=((fd:number,...args:any[])=>{const n=(read as any)(fd,...args);if(fs.realpathSync(`/proc/self/fd/${fd}`)===log)logBytes+=n;return n;}) as typeof fs.readSync;syncBuiltinESMExports();
+  fs.readSync=((fd:number,...args:any[])=>{const n=(read as any)(fd,...args);if(fs.readlinkSync(`/proc/self/fd/${fd}`)===log)logBytes+=n;return n;}) as typeof fs.readSync;syncBuiltinESMExports();
   try{next.session.record([{role:'tool',text:'FRESH_OPERATION'}],{operationId:id(200)});}
   finally{fs.readSync=read;syncBuiltinESMExports();}
   const size=fs.statSync(log).size;assert.ok(size>1024*1024);
@@ -190,7 +191,7 @@ test('wave31: an ambiguous identified append enters the index only after reopen'
   // The whole row is written, then its flush fails, so the append may or may not be durable.
   const native=fs.fsyncSync;let failed=false;
   fs.fsyncSync=((fd:number)=>{
-    if(!failed&&fs.realpathSync(`/proc/self/fd/${fd}`)===log&&fs.readFileSync(log,'utf8').trimEnd().split('\n').at(-1)!.includes(operationId)){failed=true;throw Object.assign(new Error('fixture log flush failure'),{code:'EIO'});}
+    if(!failed&&fs.readlinkSync(`/proc/self/fd/${fd}`)===log&&fs.readFileSync(log,'utf8').trimEnd().split('\n').at(-1)!.includes(operationId)){failed=true;throw Object.assign(new Error('fixture log flush failure'),{code:'EIO'});}
     native(fd);
   }) as typeof fs.fsyncSync;syncBuiltinESMExports();
   try{assert.throws(()=>first.session.record(events,{operationId}),/fixture log flush failure/);}
@@ -290,7 +291,7 @@ for(const inflate of ['every index file','only the shards'] as const)test('wave3
   for(const name of files)fs.appendFileSync(join(p.stateDir,name),Buffer.alloc(32*1024*1024,0x78));
   // Count the index bytes read while an exact retry and a new operation are recorded.
   const read=fs.readSync,readFile=fs.readFileSync;let indexBytes=0;
-  const isIndex=(target:unknown)=>typeof target==='number'&&/\/operations[^/]*$/.test(fs.realpathSync(`/proc/self/fd/${target}`));
+  const isIndex=(target:unknown)=>typeof target==='number'&&/\/operations[^/]*$/.test(fs.readlinkSync(`/proc/self/fd/${target}`));
   fs.readSync=((fd:number,...args:any[])=>{const n=(read as any)(fd,...args);if(isIndex(fd))indexBytes+=n;return n;}) as typeof fs.readSync;
   fs.readFileSync=((target:any,...args:any[])=>{const out=(readFile as any)(target,...args);if(isIndex(target))indexBytes+=out.length;return out;}) as typeof fs.readFileSync;
   syncBuiltinESMExports();
@@ -371,7 +372,7 @@ test('wave31: retries persist tail coverage when no identified rows were appende
     const native=fs.readSync;let logBytes=0;
     const spy=t.mock.method(fs,'readSync',(...args:unknown[])=>{
       const n:number=Reflect.apply(native,fs,args),fd=args[0];
-      if(typeof fd==='number'&&fs.realpathSync(`/proc/self/fd/${fd}`)===log)logBytes+=n;
+      if(typeof fd==='number'&&fs.readlinkSync(`/proc/self/fd/${fd}`)===log)logBytes+=n;
       return n;
     });
     syncBuiltinESMExports();
