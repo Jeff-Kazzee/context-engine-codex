@@ -631,6 +631,16 @@ function retirePreservation(parent: number, directory: string, preserved: FileTa
   } finally { if (dir !== undefined) closeSync(dir); }
 }
 
+/** Logging gives an in-place writer time to finish another chunk. Sample only a bounded window. */
+function keepOpenedChanges(fd: number, maxBytes: number, keep: (read: WorkingContextRead) => boolean, previous?: WorkingContextRead): void {
+  for (let look = 0; look < 4; look++) {
+    const read = readOpened(fd, maxBytes);
+    if (previous !== undefined && (Buffer.isBuffer(read) && Buffer.isBuffer(previous) ? read.equals(previous) : read === previous)) break;
+    previous = read;
+    if (!keep(read)) break;
+  }
+}
+
 function recoverPreservation(parent: number, directory: string, target: FileTarget, preserved: FileTarget, preservedPath: string, marker: string, record: PreservationRecord, maxBytes: number, keep: (read: WorkingContextRead) => boolean): void {
   if (record.stage === 'retired') return retirePreservation(parent, directory, preserved, marker, record);
   let retirement: number | undefined;
@@ -655,7 +665,7 @@ function recoverPreservation(parent: number, directory: string, target: FileTarg
           || st.dev !== record.dev || st.ino !== record.ino
           || openedPath(fd) !== artifactPath || named.dev !== st.dev || named.ino !== st.ino
           || !(st.nlink === 1 || ownPair)) throw new Error('unverified Working Context recovery artifact; refusing payload');
-        keep(readOpened(fd, maxBytes));
+        keepOpenedChanges(fd, maxBytes, keep);
         const latest = lstatSync(artifact);
         if (latest.dev !== st.dev || latest.ino !== st.ino) throw new Error('Working Context recovery artifact changed before removal');
       } finally { closeSync(fd); }
@@ -668,7 +678,8 @@ function recoverPreservation(parent: number, directory: string, target: FileTarg
  * Writes `data` over the Working Context. Just before the rename, `keep` sees what the file holds.
  * Keeping an edit appends to the Event Log and takes time, so while `keep` returns true the file is
  * opened and checked again, up to four times. After the rename, `keep` also sees anything an
- * in-place write put into the replaced file since the last check. An editor that renames its own
+ * in-place write put into the replaced file since the last check. Successful changed-byte logging
+ * permits another read of that same verified inode, up to four post-rename samples. An editor that renames its own
  * file over the Working Context after the last check is still overwritten unseen, because Node
  * offers no renameat2(RENAME_EXCHANGE) and the core has no native dependencies.
  */
@@ -713,9 +724,8 @@ export function replaceWorkingContext(wc: string, data: string, maxBytes: number
     renameSync(tmp, target);
     fsyncSync(parent);
     if (last.fd === undefined) return;
-    const after = readOpened(last.fd, maxBytes);
-    if (Buffer.isBuffer(after) && Buffer.isBuffer(last.read) ? !after.equals(last.read) : after !== last.read) keep(after);
-    // keep() has made the observed edit durable. Writes after this last sample
+    keepOpenedChanges(last.fd, maxBytes, keep, last.read);
+    // Successful keep() calls made each observed edit durable. Writes after the bounded last sample
     // remain outside the bounded capture contract.
     const saved = lstatSync(preserved), held = fstatSync(last.fd);
     if (saved.dev !== held.dev || saved.ino !== held.ino) throw new Error('Working Context recovery artifact changed before removal');
