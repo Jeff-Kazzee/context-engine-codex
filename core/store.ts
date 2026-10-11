@@ -564,6 +564,9 @@ function openRetirement(directory: string, record: RetiringRecord): number | und
   return fd;
 }
 
+// Exclusively created probe and retirement paths belong to the core, including their parent entries.
+// Mode 0700 excludes other users. Same-user replacement inside this namespace is unsupported,
+// and its pathname deletion is not an atomic inode-conditional operation.
 /** Move before inspecting and deleting, so replacing the public artifact name cannot erase its replacement. */
 function retirePreservation(parent: number, directory: string, preserved: FileTarget, marker: string, record: PreservationRecord): void {
   let retiring: RetiringRecord;
