@@ -8,17 +8,20 @@
 // - The Working Context is a materialized view of HEAD. A runner append commits first and then
 //   rewrites the file; HEAD.materialized says whether that rewrite finished.
 // - record() always syncs first, so a runner append never overwrites an uncommitted model edit.
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { crashPoint } from './faults.ts';
 import { acquireLock, holderFor, isAlive, readLock, releaseLock, serialized, type LockHolder } from './lock.ts';
 import {
+  appendCommitted,
   appendLog,
   atomicWrite,
   ensureDirs,
   layout,
   readBytes,
   readLog,
+  readLogRows,
   readWorkingContextFile,
   assertWorkingContextDir,
   removeTemps,
@@ -28,6 +31,7 @@ import {
   sha,
   truncateTornTail,
   type Layout,
+  type LogRange,
 } from './store.ts';
 import { countHeaders, parseTurns, renderTurns, type Turn } from './turns.ts';
 import { checkRefs, experimentOn, staleText, type StaleReport } from './refs.ts';
@@ -160,6 +164,57 @@ interface Replacement {
 
 type Pending = { seq: number; event: RunnerEvent; replace?: Replacement };
 
+/**
+ * The operation index records the identified runner-events rows of the Event Log in 64 shard files,
+ * chosen by a digest of the operation ID. Its head names the log file it belongs to, the log offset
+ * it is complete through, and the committed length and SHA-256 digest of each shard. A lookup reads
+ * the head and one shard, trusts a miss only when the shard matches its digest, scans only log rows
+ * past that offset, and checks a hit against its own row. A missing, damaged or disagreeing index
+ * is rebuilt from the whole log. An index with a shard above its bound is not kept, so lookups then
+ * scan the whole log.
+ */
+type IndexedOperation = { sha: string; start: number; end: number };
+type ShardState = { bytes: number; sha: string };
+type OperationIndex = { dev: string; ino: string; through: number; shards: Record<string, ShardState> };
+type OperationLookup = { hit?: IndexedOperation; index?: OperationIndex; shard?: { name: string; committed: Buffer } };
+const OPERATION_HEAD = 'operations.json';
+const OPERATION_SHARD = /^operations-[0-9a-f]{2}\.jsonl$/;
+const OPERATION_HEAD_MAX_BYTES = 64 * 1024;
+const OPERATION_SHARD_MAX_BYTES = 4 * 1024 * 1024;
+/** Uncommitted bytes a shard may carry after an interrupted append. More forces a rebuild. */
+const OPERATION_SHARD_SLACK_BYTES = 64 * 1024;
+const digestBytes = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
+const OPERATION_SHARDS = Array.from({ length: 64 }, (_, n) => `operations-${n.toString(16).padStart(2, '0')}.jsonl`);
+const EMPTY_SHARD_SHA = digestBytes(Buffer.alloc(0));
+
+function operationShard(id: string): string {
+  return `operations-${(parseInt(sha(id).slice(0, 2), 16) >> 2).toString(16).padStart(2, '0')}.jsonl`;
+}
+
+function loggedOperation(entry: Record<string, unknown>): { id: string; sha: string } | undefined {
+  if (entry.type !== 'runner-events' || !entry.operation || typeof entry.operation !== 'object') return undefined;
+  const { id, sha: digest } = entry.operation as { id?: unknown; sha?: unknown };
+  return typeof id === 'string' && typeof digest === 'string' ? { id, sha: digest } : undefined;
+}
+
+function indexLine(operation: { id: string; sha: string }, row: LogRange): string {
+  return JSON.stringify({ id: operation.id, sha: operation.sha, start: row.start, end: row.end }) + '\n';
+}
+
+/** The first entry for an ID in a shard's committed bytes. */
+function findIndexedOperation(shard: Buffer, id: string): IndexedOperation | undefined {
+  const needle = `{"id":"${id}"`;
+  for (let at = shard.indexOf(needle); at >= 0; at = shard.indexOf(needle, at + 1)) {
+    if (at > 0 && shard[at - 1] !== 0x0a) continue;
+    const end = shard.indexOf(0x0a, at);
+    const entry = JSON.parse(decoder.decode(shard.subarray(at, end < 0 ? shard.length : end))) as Record<string, unknown>;
+    if (entry.id !== id || typeof entry.sha !== 'string' || !Number.isSafeInteger(entry.start) || !Number.isSafeInteger(entry.end)
+        || (entry.end as number) <= (entry.start as number)) throw new Error('invalid operation index entry');
+    return { sha: entry.sha, start: entry.start as number, end: entry.end as number };
+  }
+  return undefined;
+}
+
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
 function decode(bytes: Buffer): string | null {
@@ -278,6 +333,8 @@ class Core {
   private unloggedCommit: { head: Head; text: string } | undefined;
   private appendUncertain=false;
   private recoveryReceiptHeads: Array<{rev:number;sha:string}> = [];
+  /** The operation index as of this call's lookup, extended by the row the call appends. */
+  private operationIndex: OperationLookup | undefined;
   // Acknowledgements are confirmed only on a later call, after the result returned.
   private returnedReceiptHeads: Array<{rev:number;sha:string}> = [];
   private readonly l: Layout;
@@ -588,10 +645,8 @@ class Core {
     const synced = this.retainReceipt(this.sync());
     if (operation) {
       // Identity and events share one durable row, including during replay after a failed return.
-      for (const entry of readLog(this.l.events)) {
-        if (entry.type !== 'runner-events' || !entry.operation || typeof entry.operation !== 'object') continue;
-        const recorded = entry.operation as { id?: unknown; sha?: unknown };
-        if (recorded.id !== operation.id) continue;
+      const recorded = this.findOperation(operation.id);
+      if (recorded) {
         if (recorded.sha !== operation.sha) throw new Error('record operation identifier was used for different input');
         return this.result(this.apply(), synced.receipt);
       }
@@ -609,16 +664,182 @@ class Core {
     const previewHead=this.head();
     const prospective = this.renderPending([...this.unapplied, ...preview].filter(p=>p.seq>(previewHead?.through??0)),previewHead);
     if (Buffer.byteLength(prospective.text, 'utf8') > maxBytes) throw new Error(`revision snapshot exceeds the ${maxBytes === SNAPSHOT_MAX_BYTES ? '64 MiB' : maxBytes+' byte'} publication limit`);
-    try {appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(operation ? { operation } : {}), ...(replacement ? { replace: replacement } : {}) });}
+    let row: LogRange;
+    try {row=appendLog(this.l.events, { type: 'runner-events', events: numbered, ...(operation ? { operation } : {}), ...(replacement ? { replace: replacement } : {}) });}
     catch(e) {if((e as NodeJS.ErrnoException).code==='CE_LOG_APPEND_AMBIGUOUS')this.appendUncertain=true;throw e;}
     this.lastSeq += numbered.length;
     if (replacement) numbered[0]!.replace = replacement;
     this.unapplied.push(...numbered);
     crashPoint('after-log');
+    if (operation) this.indexOperation(operation, row);
     const head = this.apply();
     const r = this.result(head);
     if (synced.receipt) r.receipt = synced.receipt;
     return r;
+  }
+
+  private logIdentity(): { dev: string; ino: string; size: number } | undefined {
+    try {
+      const st = statSync(this.l.events, { bigint: true });
+      return { dev: String(st.dev), ino: String(st.ino), size: Number(st.size) };
+    } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
+  }
+
+  /** Finds the first row of an operation ID without reading the whole Event Log in the normal path. */
+  private findOperation(id: string): IndexedOperation | undefined {
+    let found = this.searchOperationIndex(id);
+    if (found?.hit && !this.operationRowMatches(id, found.hit)) found = undefined;
+    found ??= this.rebuildOperationIndex(id);
+    this.operationIndex = found;
+    return found.hit;
+  }
+
+  /** The head, when it belongs to this log file and covers no more than its length. */
+  private readOperationHead(log: { dev: string; ino: string; size: number }): OperationIndex | undefined {
+    const bytes = readBytes(join(this.l.stateDir, OPERATION_HEAD), OPERATION_HEAD_MAX_BYTES);
+    if (!bytes) return undefined;
+    const head = JSON.parse(decoder.decode(bytes)) as Record<string, unknown>;
+    if (head.type !== 'operation-index' || head.version !== 3 || head.dev !== log.dev || head.ino !== log.ino) return undefined;
+    if (!Number.isSafeInteger(head.through) || (head.through as number) < 0 || (head.through as number) > log.size) return undefined;
+    const shards = head.shards as Record<string, { bytes?: unknown; sha?: unknown }> | undefined;
+    if (!shards || typeof shards !== 'object' || Array.isArray(shards)) return undefined;
+    // Every bucket has a commitment, so a missing entry cannot masquerade as an empty shard.
+    if (Object.keys(shards).length !== OPERATION_SHARDS.length || OPERATION_SHARDS.some(name => !Object.hasOwn(shards, name))) return undefined;
+    for (const [name, state] of Object.entries(shards)) {
+      if (!OPERATION_SHARD.test(name) || !state || !Number.isSafeInteger(state.bytes) || (state.bytes as number) < 0
+          || (state.bytes as number) > OPERATION_SHARD_MAX_BYTES || typeof state.sha !== 'string' || !/^[0-9a-f]{64}$/.test(state.sha)) return undefined;
+      if (state.bytes === 0 && state.sha !== EMPTY_SHARD_SHA) return undefined;
+    }
+    return { dev: log.dev, ino: log.ino, through: head.through as number, shards: shards as Record<string, ShardState> };
+  }
+
+  /** A shard's committed bytes, or undefined unless they match the head's length and digest. */
+  private readOperationShard(index: OperationIndex, name: string): Buffer | undefined {
+    const state = index.shards[name];
+    if (!state) return undefined;
+    if (state.bytes === 0) return Buffer.alloc(0);
+    const file = readBytes(join(this.l.stateDir, name), state.bytes + OPERATION_SHARD_SLACK_BYTES);
+    if (!file || file.length < state.bytes) return undefined;
+    // An omitted, replaced or reordered entry changes the digest, so a miss is never trusted then.
+    const committed = file.subarray(0, state.bytes);
+    return digestBytes(committed) === state.sha ? committed : undefined;
+  }
+
+  /** Appends whole lines after a shard's committed bytes and returns its new committed bytes. */
+  private appendOperationShard(index: OperationIndex, name: string, committed: Buffer, lines: string): Buffer {
+    const added = Buffer.from(lines);
+    if (committed.length + added.length > OPERATION_SHARD_MAX_BYTES) throw new Error('operation index shard exceeds its size bound');
+    appendCommitted(join(this.l.stateDir, name), committed.length, added);
+    const grown = Buffer.concat([committed, added]);
+    index.shards[name] = { bytes: grown.length, sha: digestBytes(grown) };
+    return grown;
+  }
+
+  private writeOperationHead(index: OperationIndex): void {
+    const head = { type: 'operation-index', version: 3, dev: index.dev, ino: index.ino, through: index.through, shards: index.shards };
+    atomicWrite(join(this.l.stateDir, OPERATION_HEAD), JSON.stringify(head), 'operation-index-tmp');
+  }
+
+  /** Searches one shard, then indexes log rows past the covered offset. Undefined when the index cannot be used. */
+  private searchOperationIndex(id: string): OperationLookup | undefined {
+    try {
+      const log = this.logIdentity();
+      const index = log && this.readOperationHead(log);
+      if (!log || !index) return undefined;
+      const name = operationShard(id);
+      let committed = this.readOperationShard(index, name);
+      if (!committed) return undefined;
+      let hit = findIndexedOperation(committed, id);
+      if (index.through < log.size) {
+        const pending = new Map<string, string>();
+        let through = index.through;
+        for (const row of readLogRows(this.l.events, index.through)) {
+          const operation = loggedOperation(row.entry);
+          if (operation) {
+            if (!hit && operation.id === id) hit = { sha: operation.sha, start: row.start, end: row.end };
+            const target = operationShard(operation.id);
+            pending.set(target, (pending.get(target) ?? '') + indexLine(operation, row));
+          }
+          through = row.end;
+        }
+        // Identified rows logged past the offset, as after a crash before indexing, enter their shards.
+        for (const [target, lines] of pending) {
+          const base = target === name ? committed : this.readOperationShard(index, target);
+          if (!base) return undefined;
+          const grown = this.appendOperationShard(index, target, base, lines);
+          if (target === name) committed = grown;
+        }
+        if (through !== index.through) {
+          index.through = through;
+          this.writeOperationHead(index);
+        }
+      }
+      return { hit, index, shard: { name, committed } };
+    } catch { return undefined; }
+  }
+
+  /** A hit must name its own complete row, so the index never stands in for log data. */
+  private operationRowMatches(id: string, hit: IndexedOperation): boolean {
+    try {
+      for (const row of readLogRows(this.l.events, hit.start)) {
+        const operation = loggedOperation(row.entry);
+        return row.end === hit.end && operation?.id === id && operation.sha === hit.sha;
+      }
+    } catch { /* A range that does not start a record disagrees with the log. */ }
+    return false;
+  }
+
+  /** Recovery path: one full Event Log scan, then fresh shards and head. An index too large to keep is removed. */
+  private rebuildOperationIndex(id: string): OperationLookup {
+    const log = this.logIdentity();
+    if (!log) return {};
+    const shards = new Map<string, string[]>(), sizes = new Map<string, number>();
+    let hit: IndexedOperation | undefined, through = 0, kept = true;
+    for (const row of readLogRows(this.l.events)) {
+      const operation = loggedOperation(row.entry);
+      if (operation) {
+        if (!hit && operation.id === id) hit = { sha: operation.sha, start: row.start, end: row.end };
+        if (kept) {
+          const name = operationShard(operation.id), line = indexLine(operation, row), size = (sizes.get(name) ?? 0) + line.length;
+          if (size > OPERATION_SHARD_MAX_BYTES) { kept = false; shards.clear(); }
+          else {
+            sizes.set(name, size);
+            const lines = shards.get(name);
+            if (lines) lines.push(line); else shards.set(name, [line]);
+          }
+        }
+      }
+      through = row.end;
+    }
+    try {
+      // The head goes first and returns last, so an interrupted rebuild leaves no index to trust.
+      removeDirectoryEntries(this.l.stateDir, name => name === OPERATION_HEAD || (OPERATION_SHARD.test(name) && !shards.has(name)));
+      if (!kept) return { hit };
+      const index: OperationIndex = { dev: log.dev, ino: log.ino, through,
+        shards: Object.fromEntries(OPERATION_SHARDS.map(name => [name, { bytes: 0, sha: EMPTY_SHARD_SHA }])) };
+      const contents = new Map<string, Buffer>();
+      for (const [name, lines] of shards) {
+        const bytes = Buffer.from(lines.join(''));
+        atomicWrite(join(this.l.stateDir, name), bytes.toString('utf8'), 'operation-index-tmp');
+        index.shards[name] = { bytes: bytes.length, sha: digestBytes(bytes) };
+        contents.set(name, bytes);
+      }
+      this.writeOperationHead(index);
+      const name = operationShard(id);
+      return { hit, index, shard: { name, committed: contents.get(name) ?? Buffer.alloc(0) } };
+    } catch { return { hit }; }
+  }
+
+  /** Extends the index with this call's own row when the index reaches exactly to its start. */
+  private indexOperation(operation: { id: string; sha: string }, row: LogRange): void {
+    const found = this.operationIndex;
+    this.operationIndex = undefined;
+    if (!found?.index || !found.shard || found.index.through !== row.start) return;
+    try {
+      this.appendOperationShard(found.index, found.shard.name, found.shard.committed, indexLine(operation, row));
+      found.index.through = row.end;
+      this.writeOperationHead(found.index);
+    } catch { /* The next lookup scans the Event Log from the last covered offset. */ }
   }
 
   /**

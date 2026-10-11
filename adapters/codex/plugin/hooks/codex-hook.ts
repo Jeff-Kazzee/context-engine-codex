@@ -8,9 +8,9 @@
 // checkout itself (tests, the regression), the core is found relative to this file. Session work
 // goes through the `context-engine` CLI, which also serializes concurrent hooks of one session.
 import { spawnSync } from 'node:child_process';
-import { closeSync, readFileSync, readdirSync, writeSync } from 'node:fs';
+import { closeSync, readFileSync, readdirSync, realpathSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { locallyEnabled } from './activation.ts';
 import type * as Core from '../../../../core/index.ts';
@@ -247,15 +247,16 @@ function requireNoCompletionDebt(input: HookInput, own?: string): void {
     if (readdirSync(`/proc/self/fd/${parent}`).some(name => name !== own && (name === PENDING_RECORD || /^codex-record-pending-[0-9a-f-]+\.json$/.test(name)))) throw new PendingPrompt(RECORD_REFUSAL);
   } finally { closeSync(parent); }
 }
-/** Use host identity for retries. Equal output alone never identifies an event. */
-function completedOperationId(input: HookInput): string | undefined {
+/** Use host identity for retries. Equal output alone never identifies an event. Returns its digest. */
+function completedEventDigest(input: HookInput): string | undefined {
   const turn = typeof input.turn_id === 'string' && input.turn_id ? input.turn_id : undefined;
   const tool = typeof input.tool_use_id === 'string' && input.tool_use_id ? input.tool_use_id : undefined;
   // Stop can run repeatedly inside one continued turn, so turn_id is not an event ID.
   if (input.hook_event_name !== 'PostToolUse' || !tool) return undefined;
-  const hash = store.sha(JSON.stringify(['completed-v1', input.hook_event_name, turn ?? null, tool ?? null]));
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+  return store.sha(JSON.stringify(['completed-v1', input.hook_event_name, turn ?? null, tool ?? null]));
 }
+/** The operation ID is the event digest's prefix in UUID form. */
+const digestOperationId = (digest: string): string => `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
 
 /** Legacy or unidentified debt cannot prove that a newly identified event is distinct. */
 function requireUnambiguousCompletion(stateDir: string, own: string | undefined, identifiedCaller: boolean): void {
@@ -266,13 +267,12 @@ function requireUnambiguousCompletion(stateDir: string, own: string | undefined,
       if (name === own || !(name === PENDING_RECORD || /^codex-record-pending-[0-9a-f-]+\.json$/.test(name))) continue;
       const bytes = store.readBytes(join(stateDir, name), 4096);
       if (!bytes) continue;
-      let marker: { hash?: unknown; operationId?: unknown; failed?: unknown; publisher?: Partial<Lock.LockHolder>; hostEvent?: { toolUseId?: unknown; turnId?: unknown } };
+      let marker: { hash?: unknown; operationId?: unknown; failed?: unknown; publisher?: Partial<Lock.LockHolder>; hostEvent?: { digest?: unknown } };
       try { marker = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
       catch { throw new PendingPrompt(RECORD_REFUSAL + ' The host event has no stable identity and pending completion state is ambiguous.'); }
-      const hostEvent = marker?.hostEvent;
-      const identified = typeof hostEvent?.toolUseId === 'string' && hostEvent.toolUseId.length > 0
-        && (hostEvent.turnId === null || (typeof hostEvent.turnId === 'string' && hostEvent.turnId.length > 0))
-        && completedOperationId({ hook_event_name: 'PostToolUse', session_id: '', cwd: '', tool_use_id: hostEvent.toolUseId, turn_id: hostEvent.turnId }) === marker.operationId
+      // The marker holds a digest of the host IDs, so its size never depends on their length.
+      const digest = marker?.hostEvent?.digest;
+      const identified = typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest) && digestOperationId(digest) === marker.operationId
         && name === `codex-record-pending-${marker.operationId}.json`
         && typeof marker.hash === 'string' && /^[0-9a-f]{64}$/.test(marker.hash);
       if (identifiedCaller) {
@@ -291,44 +291,30 @@ function requireUnambiguousCompletion(stateDir: string, own: string | undefined,
   } finally { closeSync(parent); }
 }
 
-/**
- * Records one completed event under a durable intent marker. The recheck for other completion debt
- * and `beforeRecord` run under the lease before any core call. A refusal there withdraws an intent
- * this call published fresh, since nothing was recorded. An earlier attempt's intent stays, because
- * that attempt may have recorded.
- */
-function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: string) => T, afterRecorded?: (result: T) => void, beforeRecord?: () => void): T {
+/** Records one completed event and keeps its intent until the exact event is safely recorded. */
+function recordCompleted<T>(input: HookInput, text: string, fn: (operationId: string) => T, afterRecorded?: (result: T) => void): T {
   const state = store.resolveStateRoot(), l = store.layout(input.cwd, input.session_id, state);
   store.ensureDirs(l, state);
-  const stable = completedOperationId(input);
+  const digest = completedEventDigest(input);
+  const stable = digest === undefined ? undefined : digestOperationId(digest);
   const operationId = stable ?? randomUUID();
   const name = `codex-record-pending-${operationId}.json`, path = join(l.stateDir, name);
   const hash = store.sha(text);
-  requireUnambiguousCompletion(l.stateDir, stable ? name : undefined, Boolean(stable));
-  let prior = false;
   if (stable) {
     const pending = pendingPrompt(input, name);
     if (pending.hash && (pending.hash !== hash || pending.operationId !== operationId)) throw new PendingPrompt(RECORD_REFUSAL + ' The host event identity conflicts with its pending completion.');
-    prior = pending.hash !== undefined;
-  }
-  const hostEvent = stable ? { toolUseId: input.tool_use_id as string, turnId: typeof input.turn_id === 'string' && input.turn_id ? input.turn_id : null } : undefined;
+  } else requireUnambiguousCompletion(l.stateDir, undefined, false);
+  const hostEvent = digest === undefined ? undefined : { digest };
   const marker = { hash, operationId, hostEvent, publisher: lock.holderFor(process.pid, RUNNER, 0) };
   const bytes = JSON.stringify(marker);
   // Publish independent intent before waiting for the lease. Another event cannot clear it.
   store.atomicWrite(path, bytes, 'frame-key-tmp');
   let cleared = false;
   try {
+    // A refused identified event keeps its own intent as debt until its exact retry records it.
+    if (stable) requireUnambiguousCompletion(l.stateDir, name, true);
     return withPromptLease(input, () => {
-      try {
-        requireUnambiguousCompletion(l.stateDir, name, Boolean(stable));
-        beforeRecord?.();
-      } catch (refusal) {
-        if (!prior) {
-          store.removeDirectoryEntries(dirname(path), candidate => candidate === name);
-          cleared = true;
-        }
-        throw refusal;
-      }
+      requireUnambiguousCompletion(l.stateDir, name, Boolean(stable));
       const result = fn(operationId);
       try { store.removeDirectoryEntries(dirname(path), candidate => candidate === name); }
       catch (error) {
@@ -605,10 +591,14 @@ function returnedWorkingContext(input: HookInput, whole: string | undefined): bo
 function workingContextAccess(input: HookInput): 'read' | 'write' | undefined {
   const data = input.tool_input as Record<string, unknown> | undefined;
   if (!data || typeof data !== 'object') return undefined;
-  const managedRoot = resolve(input.cwd, lib.WORKING_CONTEXT_DIR);
+  // The core keeps the Working Context under the canonical project root, and the host cwd can be a
+  // symlinked alias of it. Compare each path as given, in canonical form, and as the filesystem
+  // resolves it, which follows a symlink before any later `..`.
+  const managedRoot = resolve(input.cwd, lib.WORKING_CONTEXT_DIR), canonicalRoot = canonicalPath(managedRoot);
+  const within = (root: string, candidate: string) => candidate === root || candidate.startsWith(root + '/');
   const managedPath = (path: string) => {
     const candidate = resolve(input.cwd, path);
-    return candidate === managedRoot || candidate.startsWith(managedRoot + '/');
+    return within(managedRoot, candidate) || within(canonicalRoot, canonicalPath(candidate)) || within(canonicalRoot, physicalPath(input.cwd, path));
   };
   // Any path-like field, such as an MCP tool's target_path, that names a managed file.
   for (const [key, value] of Object.entries(data)) {
@@ -627,6 +617,34 @@ function workingContextAccess(input: HookInput): 'read' | 'write' | undefined {
   const directRead = !!nodeRead && resolve(input.cwd, nodeRead[1] ?? nodeRead[2] ?? nodeRead[3]!) === resolve(cli);
   if ((!!read && managedPath(read[2]!)) || coreRead || directRead) return 'read';
   return !!truncate && managedPath(truncate[2]!) ? 'write' : undefined;
+}
+
+/** An absolute path with its nearest existing ancestor resolved through symlinks. */
+function canonicalPath(path: string): string {
+  const missing: string[] = [];
+  for (let current = path; ; current = dirname(current)) {
+    try { return join(realpathSync(current), ...missing); }
+    catch {
+      if (dirname(current) === current) return path;
+      missing.unshift(basename(current));
+    }
+  }
+}
+
+/** A path resolved component by component from the real cwd, following each symlink where it appears. */
+function physicalPath(cwd: string, path: string): string {
+  const parts = path.split('/');
+  let current = isAbsolute(path) ? '/' : canonicalPath(resolve(cwd));
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!;
+    if (part === '' || part === '.') continue;
+    if (part === '..') { current = dirname(current); continue; }
+    const next = join(current, part);
+    try { current = realpathSync(next); }
+    // Nothing below a missing component can be a symlink, so the rest resolves lexically.
+    catch { return resolve(next, ...parts.slice(i + 1)); }
+  }
+  return current;
 }
 
 function emit(output: Record<string, unknown>): void {

@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openSession } from './index.ts';
-import { fixture } from './testing.ts';
+import { fixture, tempDir } from './testing.ts';
 import { layout } from './store.ts';
+import { acquireLock, holderFor, readLock, releaseLock } from './lock.ts';
 
 for (const ownerPid of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
   test(`wave52: invalid ownerPid ${ownerPid} refuses before creating state`, () => {
@@ -48,4 +49,22 @@ test('wave52: reentrant facades remain usable while their shared lock is held', 
   assert.match(a.session.sync().workingContextText, /FIRST_HANDLE[\s\S]*SECOND_HANDLE/);
   b.session.close();
   assert.throws(() => a.session.close(), /closed/);
+});
+
+test('wave52: a reentrant holder releases the current lock lifetime but not a later one', () => {
+  const path = join(tempDir('reentrant-release'), 'session.lock');
+  const first = holderFor(process.pid, 'ownership', 1000), again = holderFor(process.pid, 'ownership', 1000);
+  assert.equal(acquireLock(path, first).status, 'acquired');
+  assert.deepEqual(acquireLock(path, again), { status: 'acquired', takeoverFrom: null, reused: true });
+  releaseLock(path, again);
+  assert.equal(existsSync(path), false);
+  const later = holderFor(process.pid, 'ownership', 1000);
+  assert.equal(acquireLock(path, later).status, 'acquired');
+  releaseLock(path, again);
+  releaseLock(path, first);
+  const current = readLock(path);
+  assert.ok(current && current !== 'unreadable');
+  assert.equal(current.generation, later.generation);
+  releaseLock(path, later);
+  assert.equal(existsSync(path), false);
 });
