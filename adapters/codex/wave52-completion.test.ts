@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fixture } from '../../core/testing.ts';
@@ -15,14 +15,32 @@ function setup() {
   const f = fixture();
   setParticipation({ ...f, state: 'on' });
   const state = layout(f.projectRoot, sid, f.stateDir).stateDir;
-  const call = (event: Record<string, unknown>, preload?: string, hookPath = hook) => spawnSync(process.execPath, [hookPath], { cwd: f.projectRoot, input: JSON.stringify({ cwd: f.projectRoot, session_id: sid, ...event }), encoding: 'utf8', timeout: 30000, env: { ...process.env, CONTEXT_ENGINE_STATE_DIR: f.stateDir, CONTEXT_ENGINE_CLI: cli, CONTEXT_ENGINE: '', ...(preload ? { NODE_OPTIONS: '--import=' + preload } : {}) } });
+  const env = (preload?: string) => ({ ...process.env, CONTEXT_ENGINE_STATE_DIR: f.stateDir, CONTEXT_ENGINE_CLI: cli, CONTEXT_ENGINE: '', ...(preload ? { NODE_OPTIONS: '--import=' + preload } : {}) });
+  const call = (event: Record<string, unknown>, preload?: string, hookPath = hook) => spawnSync(process.execPath, [hookPath], { cwd: f.projectRoot, input: JSON.stringify({ cwd: f.projectRoot, session_id: sid, ...event }), encoding: 'utf8', timeout: 30000, env: env(preload) });
+  /** Starts a hook without waiting for it. The promise settles when the hook exits. */
+  const start = (event: Record<string, unknown>, preload?: string) => new Promise<{ status: number | null; stdout: string; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [hook], { cwd: f.projectRoot, env: env(preload) });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', data => stdout += data);
+    child.stderr.on('data', data => stderr += data);
+    child.on('close', status => resolve({ status, stdout, stderr }));
+    child.stdin.end(JSON.stringify({ cwd: f.projectRoot, session_id: sid, ...event }));
+  });
   assert.equal(call({ hook_event_name: 'UserPromptSubmit', prompt: 'ORIGINAL_REQUIREMENT' }).status, 0);
   const preload = join(f.projectRoot, 'lost-child-reply.mjs');
   fs.writeFileSync(preload, `import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const native=cp.spawnSync;cp.spawnSync=function(cmd,args,...rest){const result=native(cmd,args,...rest);if(args.includes('record')&&result.status===0){fs.writeFileSync(${JSON.stringify(join(f.projectRoot, 'fault-hit'))},'committed');return {...result,status:1,stdout:'',stderr:'fixture lost child reply'};}return result;};syncBuiltinESMExports();`);
   const rows = () => fs.readFileSync(join(state, 'events.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  const count = () => rows().filter(row => row.type === 'runner-events' && JSON.stringify(row).includes('COMPLETED_REQUIREMENT')).length;
+  const count = (text = 'COMPLETED_REQUIREMENT') => rows().filter(row => row.type === 'runner-events' && JSON.stringify(row).includes(text)).length;
   const intents = () => fs.readdirSync(state).filter(name => name.startsWith('codex-record-pending-'));
-  return { ...f, state, call, preload, count, intents };
+  return { ...f, state, call, start, preload, count, intents };
+}
+
+/** Waits for a file a fixture hook writes at a known point. */
+async function until(path: string): Promise<void> {
+  for (const deadline = Date.now() + 20_000; !fs.existsSync(path);) {
+    if (Date.now() > deadline) throw new Error(`fixture signal ${path} did not appear`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
 }
 
 function completion(kind: 'PostToolUse' | 'Stop', id?: string): Record<string, unknown> {
@@ -119,5 +137,115 @@ for (const legacy of [true, false]) test(`wave52: identified retry refuses ${leg
   assert.match(retry.stdout, /continue.*false/);
   assert.equal(f.count(), 1);
   files.forEach((path, index) => assert.deepEqual(fs.readFileSync(path), before[index]));
-  assert.deepEqual(f.intents().map(name => [name, fs.readFileSync(join(f.state, name), 'utf8')]), markerBefore);
+  // The earlier debt stays byte for byte. The refused event adds only its own failed intent.
+  const after = f.intents().map(name => [name, fs.readFileSync(join(f.state, name), 'utf8')]);
+  const earlier = new Set(markerBefore.map(([name]) => name));
+  assert.deepEqual(after.filter(([name]) => earlier.has(name)), markerBefore);
+  const added = after.filter(([name]) => !earlier.has(name));
+  assert.equal(added.length, 1);
+  assert.equal(JSON.parse(added[0]![1]!).failed, true);
+});
+
+test('wave52: an identified completion refused beside a live Stop keeps its own debt', async () => {
+  const f = setup();
+  const recording = join(f.projectRoot, 'stop-recording'), release = join(f.projectRoot, 'stop-release');
+  const hold = join(f.projectRoot, 'hold-stop-record.mjs');
+  // The Stop passes its checks, then waits inside its core record call until the test releases it.
+  fs.writeFileSync(hold, `import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const native=cp.spawnSync;cp.spawnSync=function(cmd,args,...rest){if(args.includes('record')){fs.writeFileSync(${JSON.stringify(recording)},'');while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return native(cmd,args,...rest);};syncBuiltinESMExports();`);
+  const stop = f.start(completion('Stop'), hold);
+  const event = completion('PostToolUse', 'event-beside-stop');
+  let refused: ReturnType<typeof f.call>;
+  try {
+    await until(recording);
+    refused = f.call(event);
+  } finally { fs.writeFileSync(release, ''); }
+  assert.match(refused.stdout, /continue.*false/);
+  assert.match(refused.stderr, /no stable identity/);
+  const stopped = await stop;
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.doesNotMatch(stopped.stdout, /continue.*false/);
+  assert.equal(f.count(), 1);
+  // The refused tool output is not recorded, so its intent must outlive the Stop's marker.
+  assert.equal(f.intents().length, 1);
+  assert.match(f.call({ hook_event_name: 'UserPromptSubmit', prompt: 'NEXT_REQUEST' }).stdout, /continue.*false/);
+  assert.equal(JSON.parse(f.call({ hook_event_name: 'PreToolUse', tool_name: 'new_context' }).stdout).hookSpecificOutput.permissionDecision, 'deny');
+  const retry = f.call(event);
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.doesNotMatch(retry.stdout, /continue.*false/);
+  assert.equal(f.count(), 2);
+  assert.deepEqual(f.intents(), []);
+  assert.equal(f.call({ hook_event_name: 'PreToolUse', tool_name: 'new_context' }).stdout, '');
+});
+
+for (const length of [905, 5005]) test(`wave52: a ${length}-character tool_use_id keeps a bounded retry intent`, () => {
+  const f = setup();
+  const event = completion('PostToolUse', 'call_' + 'x'.repeat(length - 5));
+  assert.equal(String(event.tool_use_id).length, length);
+  assert.match(f.call(event, f.preload).stdout, /continue.*false/);
+  assert.equal(f.count(), 1);
+  const [name] = f.intents();
+  assert.ok(name);
+  const markerBytes = fs.statSync(join(f.state, name)).size;
+  // Another identified event reads this intent, and the exact retry reads it as its own.
+  const other = f.call(completion('PostToolUse', 'event-two'));
+  assert.doesNotMatch(other.stdout, /continue.*false/, other.stderr);
+  const retry = f.call(event);
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.doesNotMatch(retry.stdout, /continue.*false/, retry.stderr);
+  assert.equal(f.count(), 2);
+  assert.deepEqual(f.intents(), []);
+  assert.ok(markerBytes < 1024, `marker holds ${markerBytes} bytes`);
+});
+
+test('wave52: a hook killed after its core commit leaves debt that blocks Stop until the exact retry', () => {
+  const f = setup();
+  const kill = join(f.projectRoot, 'kill-after-record.mjs');
+  fs.writeFileSync(kill, `import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const native=cp.spawnSync;cp.spawnSync=function(cmd,args,...rest){const result=native(cmd,args,...rest);if(args.includes('record')&&result.status===0)process.kill(process.pid,'SIGKILL');return result;};syncBuiltinESMExports();`);
+  const event = completion('PostToolUse', 'event-killed');
+  assert.equal(f.call(event, kill).signal, 'SIGKILL');
+  assert.equal(f.count(), 1);
+  const [name] = f.intents();
+  assert.ok(name);
+  // A killed hook never marks its intent failed. Only its dead publisher shows the debt.
+  assert.equal(JSON.parse(fs.readFileSync(join(f.state, name), 'utf8')).failed, undefined);
+  const blocked = f.call({ hook_event_name: 'Stop', last_assistant_message: 'STOP_WHILE_DEBT' });
+  assert.match(blocked.stdout, /continue.*false/);
+  assert.match(blocked.stderr, /cannot be safely retried/);
+  assert.equal(f.count('STOP_WHILE_DEBT'), 0);
+  const retry = f.call(event);
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.doesNotMatch(retry.stdout, /continue.*false/);
+  assert.equal(f.count(), 1);
+  assert.deepEqual(f.intents(), []);
+  const after = f.call({ hook_event_name: 'Stop', last_assistant_message: 'STOP_AFTER_RETRY' });
+  assert.doesNotMatch(after.stdout, /continue.*false/, after.stderr);
+  assert.equal(f.count('STOP_AFTER_RETRY'), 1);
+});
+
+test('wave52: a failed completion blocks Stop while its hook is still running', async () => {
+  const f = setup();
+  const failed = join(f.projectRoot, 'hook-failed'), release = join(f.projectRoot, 'hook-release');
+  const hold = join(f.projectRoot, 'lose-reply-and-hold.mjs');
+  // The committed child's reply is lost. The hook marks its intent failed, then stays alive at exit.
+  fs.writeFileSync(hold, `import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const native=cp.spawnSync;cp.spawnSync=function(cmd,args,...rest){const result=native(cmd,args,...rest);if(args.includes('record')&&result.status===0)return {...result,status:1,stdout:'',stderr:'fixture lost child reply'};return result;};syncBuiltinESMExports();if(process.argv[1]?.endsWith('codex-hook.ts'))process.on('exit',()=>{fs.writeFileSync(${JSON.stringify(failed)},'');while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);});`);
+  const event = completion('PostToolUse', 'event-failed-live');
+  const running = f.start(event, hold);
+  let blocked: ReturnType<typeof f.call>;
+  try {
+    await until(failed);
+    const [name] = f.intents();
+    assert.ok(name);
+    assert.equal(JSON.parse(fs.readFileSync(join(f.state, name), 'utf8')).failed, true);
+    blocked = f.call({ hook_event_name: 'Stop', last_assistant_message: 'STOP_WHILE_FAILED' });
+  } finally { fs.writeFileSync(release, ''); }
+  assert.match((await running).stdout, /continue.*false/);
+  assert.match(blocked.stdout, /continue.*false/);
+  assert.match(blocked.stderr, /cannot be safely retried/);
+  assert.equal(f.count('STOP_WHILE_FAILED'), 0);
+  assert.equal(f.count(), 1);
+  const retry = f.call(event);
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.doesNotMatch(retry.stdout, /continue.*false/);
+  assert.equal(f.count(), 1);
+  assert.deepEqual(f.intents(), []);
 });

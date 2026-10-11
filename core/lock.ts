@@ -102,6 +102,8 @@ export type Acquired =
 
 /**
  * Takes the lock for `me`. Re-entrant for the same process; takes over from a dead holder.
+ * A reentrant acquisition joins the current lock lifetime: `me.generation` becomes the preserved
+ * generation, so `releaseLock(path, me)` can release that lifetime and no later one.
  *
  * A lock is only ever created by hard-linking a fully written record into place (link() fails
  * atomically if a lock exists), and only ever removed by its live owner (release) or by
@@ -119,6 +121,7 @@ export function acquireLock(path: string, me: LockHolder): Acquired {
     if (current !== 'unreadable') {
       if (sameProcess(current, me)) {
         atomicWrite(path, JSON.stringify({ ...me, acquiredAt: current.acquiredAt, generation: current.generation ?? me.generation }), 'lock-tmp');
+        me.generation = current.generation ?? me.generation;
         return { status: 'acquired', takeoverFrom: null, reused: true };
       }
       if (isAlive(current)) return { status: 'refused', holder: current };
@@ -134,8 +137,35 @@ export function acquireLock(path: string, me: LockHolder): Acquired {
 }
 
 export function releaseLock(path: string, me: LockHolder, parentFd?: number): void {
-  const current = readLock(path, parentFd);
-  if (current && current !== 'unreadable' && sameProcess(current, me) && (me.generation === undefined || current.generation === me.generation)) unlinkSync(atParent(path, parentFd));
+  // Every removal holds the break lock, so no other remover can end this lifetime, and nothing can
+  // publish a new one, between this check and the unlink.
+  withBreakLock(path, parentFd, () => {
+    const current = readLock(path, parentFd);
+    if (current && current !== 'unreadable' && sameProcess(current, me) && (me.generation === undefined || current.generation === me.generation)) {
+      lockStep('release-checked', path);
+      unlinkSync(atParent(path, parentFd));
+    }
+  });
+}
+
+/** Runs `fn` while holding `<path>.break`, waiting for a live holder and removing a dead one. */
+function withBreakLock<T>(path: string, parentFd: number | undefined, fn: () => T): T {
+  const breakPath = `${path}.break`;
+  const me = holderFor(process.pid, 'lock-break', 0);
+  const deadline = Date.now() + 5_000;
+  while (!tryLink(breakPath, me, parentFd)) {
+    const breaker = readLock(breakPath, parentFd);
+    if (breaker !== null && (breaker === 'unreadable' || !isAlive(breaker))) removeIfDead(breakPath, parentFd);
+    else if (Date.now() > deadline) throw new Error(`lock release stayed busy: another process holds ${breakPath}`);
+    else sleepSync(1);
+  }
+  try { return fn(); } finally { releaseBreak(breakPath, me, parentFd); }
+}
+
+/** Removes a break lock this process holds. Only its live holder, or a dead-holder takeover, removes one. */
+function releaseBreak(breakPath: string, me: LockHolder, parentFd?: number): void {
+  const current = readLock(breakPath, parentFd);
+  if (current && current !== 'unreadable' && sameProcess(current, me) && current.generation === me.generation) unlinkSync(atParent(breakPath, parentFd));
 }
 
 /** Thrown by `serialized` when the operation lock stays held by a live process past the timeout. */
@@ -228,6 +258,6 @@ function removeIfDead(path: string, parentFd?: number): 'done' | 'busy' {
     }
     return 'done';
   } finally {
-    releaseLock(breakPath, me, parentFd);
+    releaseBreak(breakPath, me, parentFd);
   }
 }

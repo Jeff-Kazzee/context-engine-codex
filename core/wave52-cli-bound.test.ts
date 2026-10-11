@@ -27,3 +27,13 @@ test('wave52: bounded JSON input preserves a valid multibyte event', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(JSON.parse(result.stdout).workingContextText, /REQUIREMENT 😀 café/);
 });
+
+test('wave52: invalid UTF-8 inside a JSON string refuses before creating state', () => {
+  const f = fixture();
+  const input = Buffer.concat([Buffer.from('[{"role":"user","text":"INVALID_'), Buffer.from([0xff, 0xfe]), Buffer.from('"}]')]);
+  const result = spawnSync(process.execPath, [cli, 'record', '--session', 'S1', '--project', f.projectRoot, '--runner', 'raw-bound', '--hard-limit', '10000'], { input, encoding: 'utf8', timeout: 15000, env: { ...process.env, CONTEXT_ENGINE_STATE_DIR: f.stateDir } });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(JSON.parse(result.stdout).error, /JSON on stdin \(UTF-8\)/);
+  assert.equal(existsSync(f.stateDir), false);
+  assert.equal(existsSync(join(f.projectRoot, '.context-engine')), false);
+});
