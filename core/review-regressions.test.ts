@@ -24,7 +24,9 @@ test('self-ignore rejects dangling and live links without reading or changing th
 });
 
 test('self-ignore refuses insufficient or negated existing rules without replacing them', () => {
-  for (const contents of ['', '*.tmp\n', '*\n!S1/\n']) {
+  // An empty file is what a first open killed before its write leaves, and it is repaired instead
+  // (the CORE-001 test in process-crash.test.ts).
+  for (const contents of ['*.tmp\n', '*\n!S1/\n']) {
     const f = fixture();
     mkdirSync(join(f.projectRoot, '.context-engine'));
     const path = join(f.projectRoot, '.context-engine', '.gitignore');

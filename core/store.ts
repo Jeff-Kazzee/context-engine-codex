@@ -176,6 +176,8 @@ function privateWorkingContextFile(path: string): void {
   } finally { closeSync(fd); }
 }
 
+const MANAGED_IGNORE = '# Context Engine Working Contexts are never committed.\n*\n';
+
 /** Creates the private state directories (mode 0700) and the Working Context directory. */
 export function ensureDirs(l: Layout, stateRoot: string): void {
   requireSupportedPlatform();
@@ -193,11 +195,24 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
   try {
     // O_EXCL does not follow even a dangling symlink at this name.
     const file = openSync(ignore, 'exclusive-nofollow');
-    try { writeFileSync(file, '# Context Engine Working Contexts are never committed.\n*\n'); fsyncSync(file); }
+    try { writeFileSync(file, MANAGED_IGNORE); fsyncSync(file); }
     finally { closeSync(file); }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-    const existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+    // A concurrent first open creates this file empty and then writes it. Wait for that write.
+    let existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+    for (const deadline = Date.now() + 2_000; Buffer.isBuffer(existing) && existing.length === 0 && Date.now() < deadline;) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+      existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+    }
+    // Still empty: its creator died before writing it. Only that exact state is repaired. Two
+    // repairers publish the same bytes.
+    const found = Buffer.isBuffer(existing) && existing.length === 0 ? lstatSync(ignore) : undefined;
+    if (found?.isFile() && found.nlink === 1 && found.size === 0 && found.owner === 'current') {
+      const tmp = writeTemp(ignore, MANAGED_IGNORE, 'ignore-tmp');
+      try { renameSync(tmp, ignore); } finally { try { unlinkSync(tmp); } catch {} }
+      existing = Buffer.from(MANAGED_IGNORE);
+    }
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
     if (rules.at(-1) !== '*') throw new Error('.context-engine/.gitignore must end with a blanket * rule; fix it before enabling Context Engine');
@@ -220,10 +235,18 @@ const FRAME_KEY = /^[0-9a-f]{32}$/;
 
 /** The frame key stored at `path`, or null when there is none or it is not a whole key. */
 function storedFrameKey(path: string): string | null {
-  try {
-    const text = readBytes(path,33)?.toString('utf8').trim();
-    return text && FRAME_KEY.test(text) ? text : null;
-  } catch(e) { if((e as NodeJS.ErrnoException).code==='CE_SIZE_LIMIT')return null;throw e; }
+  for (const deadline = Date.now() + 2_000; ;) {
+    try {
+      const text = readBytes(path,33)?.toString('utf8').trim();
+      return text && FRAME_KEY.test(text) ? text : null;
+    } catch(e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if(code==='CE_SIZE_LIMIT')return null;
+      // Another opener's publication gives the key two names until it removes its temp name.
+      if(code!=='CE_STATE_LINK_COUNT' || Date.now()>=deadline)throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+    }
+  }
 }
 
 /**
@@ -402,8 +425,19 @@ export function assertWorkingContextDir(wc: string): void {
  * descriptor must not be a credential. Throws (fails closed) when /proc is unavailable.
  */
 export function readWorkingContextFile(wc: string): Buffer | undefined | 'not-a-file';
-export function readWorkingContextFile(wc: string, maxBytes: number): Buffer | undefined | 'not-a-file' | 'too-large';
-export function readWorkingContextFile(wc: string, maxBytes?: number): Buffer | undefined | 'not-a-file' | 'too-large' {
+export function readWorkingContextFile(wc: string, maxBytes: number): WorkingContextRead;
+export function readWorkingContextFile(wc: string, maxBytes?: number): WorkingContextRead {
+  const fd = openWorkingContext(wc);
+  if (typeof fd !== 'number') return fd;
+  try { return maxBytes === undefined ? readFileSync(fd) : readOpened(fd, maxBytes); }
+  finally { closeSync(fd); }
+}
+
+/** What a Working Context read found: its bytes, nothing, or why its bytes were not read. */
+export type WorkingContextRead = Buffer | undefined | 'not-a-file' | 'too-large';
+
+/** Opens the Working Context with every check readWorkingContextFile describes. */
+function openWorkingContext(wc: string): number | undefined | 'not-a-file' {
   requireSupportedPlatform();
   assertWorkingContextDir(wc);
   let fd: number;
@@ -420,23 +454,108 @@ export function readWorkingContextFile(wc: string, maxBytes?: number): Buffer | 
     const st = fstatSync(fd);
     const real = openedPath(fd);
     if (real !== wc) throw new Error(`the Working Context's directory changed while it was being opened (${wc} led to ${real}); refusing to read it`);
-    if (isCredential(real, st) || !st.isFile() || st.nlink !== 1) return 'not-a-file';
-    if (maxBytes !== undefined) {
-      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('invalid Working Context read bound');
-      if (st.size > maxBytes) return 'too-large';
-      const chunk = Buffer.alloc(Math.min(65536, maxBytes + 1)), parts: Buffer[] = [];
-      let total = 0;
-      for (;;) {
-        const n = readSync(fd, chunk, 0, Math.min(chunk.length, maxBytes + 1 - total), null);
-        if (!n) return Buffer.concat(parts, total);
-        total += n;
-        if (total > maxBytes) return 'too-large';
-        parts.push(Buffer.from(chunk.subarray(0, n)));
-      }
-    }
-    return readFileSync(fd);
-  } finally {
+    if (!isCredential(real, st) && st.isFile() && st.nlink === 1) return fd;
+  } catch (e) {
     closeSync(fd);
+    throw e;
+  }
+  closeSync(fd);
+  return 'not-a-file';
+}
+
+/** Reads an opened Working Context from its first byte, refusing more than `maxBytes`. */
+function readOpened(fd: number, maxBytes: number): Buffer | 'too-large' {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('invalid Working Context read bound');
+  if (fstatSync(fd).size > maxBytes) return 'too-large';
+  const chunk = Buffer.alloc(Math.min(65536, maxBytes + 1)), parts: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const n = readSync(fd, chunk, 0, Math.min(chunk.length, maxBytes + 1 - total), total);
+    if (!n) return Buffer.concat(parts, total);
+    total += n;
+    if (total > maxBytes) return 'too-large';
+    parts.push(Buffer.from(chunk.subarray(0, n)));
+  }
+}
+
+/**
+ * Writes `data` over the Working Context. Just before the rename, `keep` sees what the file holds.
+ * Keeping an edit appends to the Event Log and takes time, so while `keep` returns true the file is
+ * opened and checked again, up to four times. After the rename, `keep` also sees anything an
+ * in-place write put into the replaced file since the last check. An editor that renames its own
+ * file over the Working Context after the last check is still overwritten unseen, because Node
+ * offers no renameat2(RENAME_EXCHANGE) and the core has no native dependencies.
+ */
+export function replaceWorkingContext(wc: string, data: string, maxBytes: number, keep: (read: WorkingContextRead) => boolean): void {
+  assertWorkingContextDir(wc);
+  const directory = dirname(wc), parent = openSync(directory, 'directory');
+  const target = childTarget(anchor(parent), basename(wc));
+  // This is a recovery artifact, not a CORE_TEMP candidate. Its name binds it to
+  // the committed text whose publication may have displaced the old inode.
+  const preserved = suffix(target, `.ce-preserved-${sha(data)}.bak`);
+  const preservedPath = join(directory, `${basename(wc)}.ce-preserved-${sha(data)}.bak`);
+  const last: { fd?: number; read: WorkingContextRead } = { read: undefined };
+  let tmp: FileTarget | undefined;
+  try {
+    if (!fstatSync(parent).isDirectory() || openedPath(parent) !== directory) throw new Error('Working Context parent could not be verified; refusing to write');
+    // A previous publication can die before rename (two names for one inode) or
+    // after it (only the recovery name). Only this exact, verified pair permits
+    // a two-link read. Ordinary Working Context reads retain their one-link rule.
+    if (existsSync(preserved)) {
+      const fd = openSync(preserved, 'read');
+      try {
+        const st = fstatSync(fd), named = lstatSync(preserved);
+        const current = existsSync(target) ? lstatSync(target) : undefined;
+        const ownPair = st.nlink === 2 && current?.isFile() && current.dev === st.dev && current.ino === st.ino && current.nlink === 2;
+        if (!st.isFile() || st.owner !== 'current' || !st.privateAccess || isCredential(preservedPath, st)
+          || openedPath(fd) !== preservedPath || named.dev !== st.dev || named.ino !== st.ino
+          || !(st.nlink === 1 || ownPair)) throw new Error('unverified Working Context recovery artifact; refusing payload');
+        keep(readOpened(fd, maxBytes));
+        const latest = lstatSync(preserved);
+        if (latest.dev !== st.dev || latest.ino !== st.ino) throw new Error('Working Context recovery artifact changed before removal');
+        unlinkSync(preserved);
+        fsyncSync(parent);
+      } finally { closeSync(fd); }
+    }
+    tmp = writeTemp(target, data, 'wc-tmp');
+    for (let look = 0; look < 4; look++) {
+      if (last.fd !== undefined) { closeSync(last.fd); last.fd = undefined; }
+      const opened = openWorkingContext(wc);
+      last.fd = typeof opened === 'number' ? opened : undefined;
+      last.read = last.fd === undefined ? opened as undefined | 'not-a-file' : readOpened(last.fd, maxBytes);
+      if (!keep(last.read)) break;
+    }
+    if (last.fd !== undefined) {
+      const st = fstatSync(last.fd);
+      if (st.owner !== 'current' || st.nlink !== 1) throw new Error('Working Context predecessor is not owned and unlinked; refusing publication');
+      restrictPrivateAccess(last.fd, 'file');
+      linkSync(target, preserved);
+      const saved = lstatSync(preserved);
+      if (!saved.isFile() || saved.dev !== st.dev || saved.ino !== st.ino || saved.nlink !== 2) {
+        unlinkSync(preserved);
+        fsyncSync(parent);
+        throw new Error('Working Context changed before preservation; refusing publication');
+      }
+      fsyncSync(parent);
+    }
+    renameSync(tmp, target);
+    fsyncSync(parent);
+    if (last.fd === undefined) return;
+    const after = readOpened(last.fd, maxBytes);
+    if (Buffer.isBuffer(after) && Buffer.isBuffer(last.read) ? !after.equals(last.read) : after !== last.read) keep(after);
+    // keep() has made the observed edit durable. Writes after this last sample
+    // remain outside the bounded capture contract.
+    const saved = lstatSync(preserved), held = fstatSync(last.fd);
+    if (saved.dev !== held.dev || saved.ino !== held.ino) throw new Error('Working Context recovery artifact changed before removal');
+    unlinkSync(preserved);
+    fsyncSync(parent);
+  } catch (error) {
+    if (existsSync(preserved)) throw new Error(`Working Context publication failed. Preserve the recovery artifact ${preservedPath} and retry after repairing storage.`, { cause: error });
+    throw error;
+  } finally {
+    if (tmp) try { unlinkSync(tmp); } catch {}
+    if (last.fd !== undefined) closeSync(last.fd);
+    closeSync(parent);
   }
 }
 
@@ -466,7 +585,8 @@ function writeTemp(path: FileTarget, data: string, point: CrashPoint): FileTarge
   return tmp;
 }
 
-export function atomicWrite(path: string, data: string, point: CrashPoint): void {
+/** `beforeRename` runs after the new bytes are flushed, just before they replace the file. */
+export function atomicWrite(path: string, data: string, point: CrashPoint, beforeRename?: () => void): void {
   if (point !== 'wc-tmp') {
     const parent = dirname(resolve(path));
     const fd = openPrivateDirectory(parent)!;
@@ -474,6 +594,7 @@ export function atomicWrite(path: string, data: string, point: CrashPoint): void
     try {
       const target=childTarget(anchor(fd),basename(path));
       tmp=writeTemp(target,data,point);
+      beforeRename?.();
       renameSync(tmp,target);
       fsyncSync(fd);
     } finally { if(tmp)try{unlinkSync(tmp);}catch{} closeSync(fd); }
@@ -489,6 +610,7 @@ export function atomicWrite(path: string, data: string, point: CrashPoint): void
     if (!fstatSync(fd).isDirectory() || openedPath(fd) !== parent) throw new Error('Working Context parent could not be verified; refusing to write');
     const target = childTarget(anchor(fd), basename(path));
     tmp = writeTemp(target, data, point);
+    beforeRename?.();
     renameSync(tmp, target);
     fsyncSync(fd);
   } finally {

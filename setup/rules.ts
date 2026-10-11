@@ -22,13 +22,32 @@ function has(obj: unknown, path: string[]): boolean {
   return true;
 }
 
+/** A key path as people read it, e.g. enabledPlugins."x@y". */
+const keyName = (path: string[]) => path.map((k) => (/^[A-Za-z_][\w-]*$/.test(k) ? k : JSON.stringify(k))).join('.');
+
 /**
  * A JSON file where our entries are the keys at `paths` (e.g. ['enabledPlugins', 'x@y']). A
  * container our removal empties is removed too, unless the file had it before. A file that isn't
  * JSON is left alone. The rewrite is 2-space indented, as Claude Code writes these files.
+ * `written[i]` says whether a value at `paths[i]` is exactly what the install writes there.
  */
-export function jsonRule(paths: string[][]): Rule {
+export function jsonRule(paths: string[][], written: Array<(value: unknown) => boolean> = []): Rule {
   return {
+    stripWritten(text) {
+      const obj = parse(text);
+      if (!isObject(obj)) return { text, kept: [] };
+      const kept: string[] = [];
+      let changed = false;
+      paths.forEach((path, i) => {
+        let parent: unknown = obj;
+        for (const k of path.slice(0, -1)) parent = isObject(parent) ? parent[k] : undefined;
+        const last = path.at(-1)!;
+        if (!isObject(parent) || !(last in parent)) return;
+        if (written[i]?.(parent[last])) { delete parent[last]; changed = true; }
+        else kept.push(keyName(path));
+      });
+      return { text: changed ? `${JSON.stringify(obj, null, 2)}${text.endsWith('\n') ? '\n' : ''}` : text, kept };
+    },
     empty(text) { const value = parse(text); return isObject(value) && Object.keys(value).length === 0; },
     strip(text, before) {
       const obj = parse(text);
@@ -127,6 +146,16 @@ function tomlKey(part: string): string {
   }
   return out;
 }
+/** The decoded key path of a [table] header line, or null for any other line. */
+function tableKey(line: string): string[] | null {
+  const match = /^\s*\[\s*((?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)(?:\s*\.\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+))*)\s*\]\s*(?:#.*)?$/.exec(line);
+  return match?.[1]?.match(/"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+/g)?.map(tomlKey) ?? null;
+}
+/** A table header in one spelling, so equivalent spellings of one table match the same pattern. */
+function canonicalHeader(line: string): string {
+  const key = tableKey(line);
+  return key ? `[${key.map((part) => (/^[\w-]+$/.test(part) ? part : JSON.stringify(part))).join('.')}]` : line.trim();
+}
 export function tomlTableBoolean(text: string, table: string[], key: string): boolean {
   return tomlTableScalar(text, table, key) === true;
 }
@@ -138,8 +167,7 @@ export function tomlTableScalar(text: string, table: string[], key: string): str
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (headers.has(i)) {
-      const match = /^\s*\[\s*((?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)(?:\s*\.\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+))*)\s*\]\s*(?:#.*)?$/.exec(line);
-      const parts = match?.[1]?.match(/"(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+/g)?.map(tomlKey);
+      const parts = tableKey(line);
       active = !!parts && parts.length === table.length && parts.every((part,n) => part === table[n]);
     } else if (active && outside.has(i)) {
       const match = /^\s*("(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)\s*=\s*(true|false|"(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?$/.exec(line);
@@ -158,19 +186,39 @@ export function tomlTableScalar(text: string, table: string[], key: string): str
  * previous table goes with it. Empty parent tables (e.g. `[hooks.state]`) matching `emptyParents`
  * are removed when the file didn't have them before. Text-level, so comments elsewhere are kept.
  */
-export function tomlTablesRule(ours: RegExp, emptyParents: RegExp): Rule {
+export function tomlTablesRule(ours: RegExp, emptyParents: RegExp, written: (key: string[], body: string[]) => boolean = () => false): Rule {
+  // Without a before copy: drop only our tables whose body is exactly what the install writes, keep every parent.
+  const stripWritten = (text: string) => {
+    const lines = text.split('\n');
+    const positions = tomlHeaders(lines);
+    const out: string[] = [], kept: string[] = [];
+    for (let i = 0; i < lines.length; ) {
+      const line = lines[i]!;
+      const header = positions.has(i) ? canonicalHeader(line) : null;
+      let end = i + 1;
+      while (end < lines.length && !positions.has(end)) end++;
+      if (header === null || !(ours.test(line.trim()) || ours.test(header))) { out.push(line); i++; continue; }
+      if (!written(tableKey(line) ?? [], lines.slice(i + 1, end))) { kept.push(header); out.push(line); i++; continue; }
+      if (out.length && out.at(-1) === '') out.pop();
+      if (end - 1 > i && lines[end - 1] === '') out.push('');
+      i = end;
+    }
+    return { text: out.join('\n'), kept };
+  };
   const strip = (text: string, before: string | null) => {
     const lines = text.split('\n');
     const positions = tomlHeaders(lines), priorLines = (before ?? '').split('\n');
-    const priorHeaders = new Set([...tomlHeaders(priorLines)].map(i => priorLines[i]!.trim()));
+    const priorHeaders = new Set([...tomlHeaders(priorLines)].map(i => canonicalHeader(priorLines[i]!)));
     const out: string[] = [];
     for (let i = 0; i < lines.length; ) {
       const line = lines[i]!;
-      const ourTable = positions.has(i) && ours.test(line.trim());
+      const header = positions.has(i) ? canonicalHeader(line) : null;
+      const named = (pattern: RegExp) => header !== null && (pattern.test(line.trim()) || pattern.test(header));
+      const ourTable = named(ours);
       let end = i + 1;
       while (end < lines.length && !positions.has(end)) end++;
       const body = lines.slice(i + 1, end);
-      const emptyParent = positions.has(i) && emptyParents.test(line.trim()) && !priorHeaders.has(line.trim()) && body.every((l) => l.trim() === '');
+      const emptyParent = header !== null && named(emptyParents) && !priorHeaders.has(header) && body.every((l) => l.trim() === '');
       if (!ourTable && !emptyParent) {
         out.push(line);
         i++;
@@ -186,6 +234,7 @@ export function tomlTablesRule(ours: RegExp, emptyParents: RegExp): Rule {
   };
   return {
     strip,
+    stripWritten,
     empty: (text) => text.trim() === '',
     canon: (text) =>
       text
@@ -218,6 +267,7 @@ export function prependBlock(text: string | null, block: string, m: Markers): st
 /** A file where our entry is one marked block (appendBlock at the end, or prependBlock at the start). */
 export function blockRule(m: Markers): Rule {
   return {
+    stripWritten(text) { return { text: this.strip(text, null), kept: [] }; },
     strip(text) {
       const start = text.indexOf(`${m.begin}\n`);
       let stop = text.indexOf(`${m.end}\n`, start);
