@@ -845,13 +845,13 @@ export function appendCommitted(path: string, length: number, data: Buffer): voi
 }
 
 /** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. Returns the row's byte range. */
-export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number } = {}): LogRange {
+export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number; requireCompleteTail?: boolean } = {}): LogRange {
   const parent = openPrivateDirectory(dirname(resolve(path)));
   if (parent === undefined) throw Object.assign(new Error('Event Log parent is unavailable'), { code: 'ENOENT' });
   let mayHavePersisted=false, range: LogRange | undefined;
   try {
     try {serialized(`${path}.append.lock`,()=>{
-      try {range=appendLogLocked(path,entry,parent);mayHavePersisted=true;}
+      try {range=appendLogLocked(path,entry,parent,opts.requireCompleteTail);mayHavePersisted=true;}
       catch(e){if((e as NodeJS.ErrnoException).code==='CE_LOG_APPEND_AMBIGUOUS')mayHavePersisted=true;throw e;}
     },{...opts,parentFd:parent});}
     finally {closeSync(parent);}
@@ -863,10 +863,17 @@ export function appendLog(path: string, entry: Record<string, unknown>, opts: { 
   return range!;
 }
 
-function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd: number): LogRange {
+function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd: number, requireCompleteTail = false): LogRange {
   let appended=false;
   try {
-  truncateTornTailLocked(path, parentFd);
+  if (requireCompleteTail) {
+    const check = verifiedLogDescriptor(path, false, true, parentFd);
+    try {
+      const size = fstatSync(check).size;
+      const byte = Buffer.alloc(1);
+      if (size && (readSync(check, byte, 0, 1, size - 1) !== 1 || byte[0] !== 10)) throw new Error('torn Event Log refuses restore confirmation without repair');
+    } finally { closeSync(check); }
+  } else truncateTornTailLocked(path, parentFd);
   const line = Buffer.from(`${JSON.stringify({ ...entry, at: new Date().toISOString() })}\n`);
   const fd = verifiedLogDescriptor(path, true, false, parentFd);
   let start: number;
@@ -904,7 +911,7 @@ export function* readLog(path: string): Generator<Record<string,unknown>> {
 }
 
 /** Reads complete records from byte offset `from`, which must start a record, with each record's byte range. */
-export function* readLogRows(path: string, from = 0): Generator<LogRange & { entry: Record<string,unknown> }> {
+export function* readLogRows(path: string, from = 0, requireCompleteTail = false): Generator<LogRange & { entry: Record<string,unknown> }> {
   let fd: number;
   try {fd=verifiedLogDescriptor(path,false,true);}
   catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
@@ -938,7 +945,8 @@ export function* readLogRows(path: string, from = 0): Generator<LogRange & { ent
       }
       position+=n;
     }
-    // Preserve the existing protocol: incomplete final lines are not records.
+    if (requireCompleteTail && bytes) throw new Error('torn Event Log refuses restore confirmation without repair');
+    // Preserve the existing recovery protocol: incomplete final lines are not records.
   } finally {closeSync(fd);}
 }
 

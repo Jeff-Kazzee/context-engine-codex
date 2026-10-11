@@ -1,7 +1,7 @@
 // Public interface of the Context Engine core. Adapters import only from here (or call the CLI).
 export { parseTurns, renderTurns } from './turns.ts';
 export type { Role, Turn } from './turns.ts';
-export { approxTokens, inspectSession, openSession, withSessionSerialized } from './session.ts';
+export { approxTokens, inspectSession, openSession, withSessionSerialized, confirmRestoreNotices } from './session.ts';
 export type { OpenOptions, OpenResult, Receipt, RestoreReason, RunnerEvent, Session, SessionStatus, SyncResult } from './session.ts';
 export { SerializeTimeout } from './lock.ts';
 export type { LockHolder } from './lock.ts';
@@ -16,3 +16,5 @@ export { CODEX_MANUAL_COMPACTION, CODEX_TOKEN_LIMIT_RESET, COMPACTION_ONLY_FALLB
 export type { DeliveryMode, WorkingContextDelivery } from './delivery.ts';
 export { BUDGET_TIERS } from './budget.ts';
 export type { BudgetReport, BudgetTier } from './budget.ts';
+export type { RestoreNotice } from './restore-notices.ts';
+export { restoreNoticeSummary } from './restore-notices.ts';

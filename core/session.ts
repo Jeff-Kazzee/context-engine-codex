@@ -42,6 +42,7 @@ import { budgetMemory, checkBudget, remember, type BudgetMemory, type BudgetRepo
 import { COMPACTION_ONLY_FALLBACK } from './delivery.ts';
 import { approxTokens } from './size.ts';
 import { retainRunnerEvent } from './event-safety.ts';
+import { decodeRestoreNotice, restoreNoticeSummary, restoreNoticeState, refreshRestoreNotices, keepRestoreIntent, confirmRestoreNoticeIds, type RestoreNotice } from './restore-notices.ts';
 
 export interface OpenOptions {
   /** The project (workspace) root. The Working Context lives at `<projectRoot>/.context-engine/<sessionId>/context.md`. */
@@ -111,6 +112,11 @@ export interface SyncResult {
   /** Size of the committed revision, in characters. */
   chars: number;
   receipt?: Receipt;
+  /** Owed until the adapter confirms these IDs after transport succeeds. */
+  restoreNotices?: RestoreNotice[];
+  restoreNoticesTotal?: number;
+  restoreNoticeSummary?: string;
+  sessionGeneration?: string;
   /** Present when the session was opened with a budget: where the Working Context stands against it. */
   budget?: BudgetReport;
 }
@@ -128,6 +134,8 @@ export interface Session {
   sync(): SyncResult;
   /** Confirm a returned recovery notice after a transport has completed its output write. */
   confirmReceiptReturn(): void;
+  /** Confirm only restore IDs actually carried by a successful transport. */
+  confirmRestoreNotices(ids: readonly string[]): void;
   /** Syncs and commits events. An optional UUID deduplicates retries of the same retained events. */
   record(events: RunnerEvent[], options?: { maxBytes?: number; operationId?: string }): SyncResult;
   /**
@@ -273,6 +281,56 @@ export function withSessionSerialized<T>(ref: { projectRoot: string; sessionId: 
   return serialized(`${l.lock}.op`, fn);
 }
 
+/** Validate the commit boundary before any recovery writes, including torn-tail repair. */
+function validateHeadLogBoundary(l: Layout, head: Head | null): void {
+  let prepared = false, hasPreparation = false, lastSequence = 0;
+  const legacyBoundaries = new Map<number, number>();
+  for (const entry of readLog(l.events)) {
+    if (entry.type === 'runner-events') {
+      const events = entry.events as Pending[];
+      for (const pending of events) {
+        if (pending.seq !== lastSequence + 1) throw new Error('missing covered runner-event sequence evidence; refusing recovery');
+        lastSequence = pending.seq;
+      }
+    }
+    if (!head) continue;
+    if (entry.type === 'revision-prepared' && entry.rev === head.rev) {
+      hasPreparation = true;
+      if (head.prepared !== undefined && entry.prepared === head.prepared) {
+        if (entry.sha !== head.sha || entry.parent !== head.parent || entry.kind !== head.kind || entry.through !== head.through) throw new Error('prepared revision accounting conflicts with HEAD');
+        prepared = true;
+      }
+    }
+    // Old normal accounting follows applied runner events. Recovered accounting
+    // was reconstructed from HEAD and cannot independently corroborate it.
+    if (entry.type === 'revision' && entry.recovered !== true && typeof entry.rev === 'number') {
+      const boundary = entry.kind === 'runner-append' || entry.kind === 'native-compaction' ? lastSequence
+        : entry.kind === 'init' ? 0 : entry.kind === 'model-edit' ? legacyBoundaries.get(entry.rev - 1) : undefined;
+      if (boundary !== undefined) {
+        legacyBoundaries.set(entry.rev, boundary);
+        if (head.prepared === undefined && entry.rev === head.rev && entry.sha === head.sha && boundary !== head.through) throw new Error('legacy HEAD through conflicts with durable revision accounting');
+      }
+    }
+  }
+  if (head && lastSequence < head.through) throw new Error('missing covered runner-event sequence evidence at HEAD; refusing recovery');
+  if (head && ((head.prepared !== undefined && !prepared) || (head.prepared === undefined && hasPreparation))) throw new Error('HEAD is missing its independently prepared sequence boundary; refusing recovery');
+  // A legacy HEAD with missing accounting has no independent sequence witness.
+  // Preserve missing-accounting compatibility only with whole runner-event evidence.
+}
+
+/** Acknowledgment only. Existing private state is required, with no file recovery or sync. */
+export function confirmRestoreNotices(opts: { projectRoot: string; sessionId: string; stateDir?: string; ownerPid: number; ownerGeneration: string }, ids: readonly string[]): void {
+  const l = layout(opts.projectRoot, opts.sessionId, resolveStateRoot(opts.stateDir));
+  serialized(`${l.lock}.op`, () => {
+    const current = readLock(l.lock);
+    if (!current || current === 'unreadable') throw new Error('restore notice acknowledgment requires an existing session owner');
+    const me = holderFor(opts.ownerPid, current.runner, current.hardLimit);
+    if (!current.generation || current.generation !== opts.ownerGeneration || current.pid !== me.pid || current.hostname !== me.hostname || current.startMarker !== me.startMarker) throw new Error('restore notice acknowledgment refused for a different session owner or generation');
+    validateHeadLogBoundary(l, decodeHead(readHead(l.head)));
+    confirmRestoreNoticeIds(l.events, ids);
+  });
+}
+
 export interface SessionStatus {
   /** Committed revision (0 = nothing committed yet). */
   revision: number;
@@ -332,6 +390,10 @@ class Core {
   /** Events in the Event Log that no committed revision includes yet. */
   private unapplied: Pending[] = [];
   private pendingReceipt: Receipt | undefined;
+  private restoreNotices = new Map<string, RestoreNotice>();
+  private restoreKnown = new Map<string, RestoreNotice>();
+  private restoreCursor = 0;
+  private restoreIdentity: string | undefined;
   private closed = false;
   private unloggedCommit: { head: Head; text: string } | undefined;
   private appendUncertain=false;
@@ -366,6 +428,15 @@ class Core {
       frameKey: sessionFrameKey(this.l.stateDir),
       sync: () => this.guard(() => this.finishResult(this.sync())),
       confirmReceiptReturn: () => { this.assertOpen(); this.confirmReturnedReceipts(); this.saveRecoveryCheckpoint(); },
+      confirmRestoreNotices: ids => {
+        this.assertOpen();
+        this.refreshRestoreState();
+        validateHeadLogBoundary(this.l, this.head());
+        try { confirmRestoreNoticeIds(this.l.events, ids); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'CE_LOG_APPEND_AMBIGUOUS') this.appendUncertain = true; throw error; }
+        this.refreshRestoreState();
+        this.saveRecoveryCheckpoint();
+      },
       record: (events, options) => this.guard(() => this.finishResult(this.record(events, false, options?.maxBytes, options?.operationId))),
       nativeCompaction: (events) => this.guard(() => this.finishResult(this.record(events, true))),
       close: () => this.close(),
@@ -385,6 +456,7 @@ class Core {
 
   private guard<T>(fn: () => T, repair = true): T {
     this.assertOpen();
+    this.refreshRestoreState();
     this.confirmReturnedReceipts();
     if(repair&&this.appendUncertain)throw new Error('Event Log append may have persisted; close and reopen this session before retrying');
     if (repair && this.materializationFailed) throw new Error('Working Context publication failed; close and reopen this session to recover its preserved predecessor before retrying');
@@ -405,16 +477,31 @@ class Core {
     return result;
   }
 
-  // Version 4 invalidates checkpoints from the weaker sequence validator.
+  // Version 5 also records pending restore intents, independent of revision receipts.
   // Cache only fully applied recovery state. It is an optimization, never the
   // source of truth: changed log identity/size/timestamps, HEAD or budget,
   // missing/corrupt cache and interrupted publication all take the full rebuild.
-  private checkpointLog(): object | null {
+  private checkpointLog(): {dev: string; ino: string; size: string; mtime: string; ctime: string} | null {
     try {
       const st = statSync(this.l.events, { bigint: true });
       if (!st.isFile() || st.nlink !== 1n) return null;
       return { dev: String(st.dev), ino: String(st.ino), size: String(st.size), mtime: String(st.mtimeNs), ctime: String(st.ctimeNs) };
     } catch { return null; }
+  }
+
+  private refreshRestoreState(): void {
+    const before = this.checkpointLog();
+    if (!before) {
+      if (this.restoreIdentity !== undefined || this.restoreCursor) throw new Error('restore notice log is missing, close and reopen before retrying');
+      return;
+    }
+    const identity = `${before.dev}:${before.ino}`;
+    if ((this.restoreIdentity !== undefined && identity !== this.restoreIdentity) || Number(before.size) < this.restoreCursor) throw new Error('restore notice log was replaced or truncated, close and reopen before retrying');
+    const end = refreshRestoreNotices(this.l.events, this.restoreCursor, this.restoreNotices, this.restoreKnown);
+    const after = this.checkpointLog();
+    if (!after || `${after.dev}:${after.ino}` !== identity || Number(after.size) < end) throw new Error('restore notice log changed during refresh, close and reopen before retrying');
+    this.restoreIdentity = identity;
+    this.restoreCursor = end;
   }
 
   private loadRecoveryCheckpoint(): boolean {
@@ -428,7 +515,14 @@ class Core {
       const log = this.checkpointLog();
       const m = c.memory;
       const nonnegative = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-      if (c.version !== 4 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readHead(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
+      if (c.version !== 5 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readHead(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
+      if (!Array.isArray(c.restoreNotices) || c.restoreNotices.length > 1024) return false;
+      const notices = c.restoreNotices.map(decodeRestoreNotice);
+      if (new Set(notices.map((n: RestoreNotice) => n.id)).size !== notices.length) return false;
+      this.restoreNotices = new Map(notices.map((n: RestoreNotice) => [n.id, n]));
+      this.restoreKnown = new Map(this.restoreNotices);
+      this.restoreCursor = Number(log.size);
+      this.restoreIdentity = `${log.dev}:${log.ino}`;
       this.lastSeq = c.lastSeq;
       this.memory = { announced: m.announced, growth: [...m.growth], lastTokens: m.lastTokens, loggedBudget: m.loggedBudget };
       return true;
@@ -438,11 +532,14 @@ class Core {
   private saveRecoveryCheckpoint(): void {
     if(this.appendUncertain || this.materializationFailed)return;
     try {
+      this.refreshRestoreState();
       const head = this.head();
       const log = this.checkpointLog();
-      if (!log || this.unloggedCommit || this.recoveryReceiptHeads.length || this.returnedReceiptHeads.length || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
-      const payload = { version: 4, log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
-      atomicWrite(join(this.l.stateDir, 'recovery.json'), JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) }), 'recovery-checkpoint-tmp');
+      if (!log || Number(log.size) !== this.restoreCursor || `${log.dev}:${log.ino}` !== this.restoreIdentity || this.unloggedCommit || this.recoveryReceiptHeads.length || this.returnedReceiptHeads.length || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
+      const payload = { version: 5, restoreNotices: [...this.restoreNotices.values()], log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
+      const bytes = JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) });
+      if (Buffer.byteLength(bytes) > 4096) return;
+      atomicWrite(join(this.l.stateDir, 'recovery.json'), bytes, 'recovery-checkpoint-tmp');
     } catch { /* A cache failure never changes the session result; next open rebuilds. */ }
   }
 
@@ -463,6 +560,13 @@ class Core {
     const text = head ? this.snapshot(head.rev) : '';
     const r: SyncResult = { revision: head?.rev ?? 0, ...(head?.kind ? { revisionKind: head.kind } : {}), turns: parseTurns(text), chars: text.length, workingContextText: text };
     if (receipt) r.receipt = receipt;
+    this.refreshRestoreState();
+    r.sessionGeneration = this.me.generation;
+    if (this.restoreNotices.size) {
+      r.restoreNotices = [...this.restoreNotices.values()].slice(0, 64);
+      r.restoreNoticesTotal = this.restoreNotices.size;
+      r.restoreNoticeSummary = restoreNoticeSummary(r.restoreNotices.length, r.restoreNoticesTotal);
+    }
     return r;
   }
 
@@ -595,14 +699,9 @@ class Core {
     const key = JSON.stringify(rejected);
     if (kept.has(key)) return false;
     kept.add(key);
-    // A retry after a crash between this append and the rename finds the edit already kept.
-    let last: Record<string, unknown> | undefined;
-    for (const entry of readLog(this.l.events)) if (entry.type === 'restored' && entry.rev === head.rev) last = entry;
-    const appended = !last || ['rejected', 'rejectedBase64', 'oversized'].some((k) => last[k] !== rejected[k]);
-    if (appended) {
-      try { appendLog(this.l.events, { type: 'restored', rev: head.rev, reason: 'unmaterialized-append', ...rejected }); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'CE_LOG_APPEND_AMBIGUOUS') this.appendUncertain = true; throw error; }
-    }
+    let appended: boolean;
+    try { appended = keepRestoreIntent(this.l.events, this.restoreNotices, head, 'unmaterialized-append', chars, rejected).appended; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'CE_LOG_APPEND_AMBIGUOUS') this.appendUncertain = true; throw error; }
     const what = Buffer.isBuffer(read)
       ? 'The intervening edit is kept in the Event Log; read the restored file before editing it again.'
       : 'The intervening file was oversized or linked, so its bytes were not read or copied, and its rejection is recorded in the Event Log. Read the restored file before editing it again.';
@@ -646,7 +745,8 @@ class Core {
       const restored = this.snapshot(head.rev);
       const rejected: Record<string, unknown> =
         check.text !== null ? { rejected: check.text } : bytes ? { rejectedBase64: bytes.toString('base64') } : { rejected: null };
-      appendLog(this.l.events, { type: 'restored', rev: head.rev, reason: check.reason, ...rejected });
+      try { keepRestoreIntent(this.l.events, this.restoreNotices, head, check.reason, restored.length, rejected); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'CE_LOG_APPEND_AMBIGUOUS') this.appendUncertain = true; throw error; }
       this.writeWorkingContext(restored);
       const receipt: Receipt = {
         kind: 'restored',
@@ -954,6 +1054,7 @@ class Core {
     this.assertOpen();
     let failed = false;
     try {
+      this.refreshRestoreState();
       this.confirmReturnedReceipts();
       appendLog(this.l.events, { type: 'closed', pid: this.me.pid });
       this.saveRecoveryCheckpoint();
@@ -1018,47 +1119,22 @@ class Core {
     return receipts[0] ? {...receipts[0],text:receipts.map(receipt=>receipt.text).join('\n')} : undefined;
   }
 
-  /** Validate the commit boundary before any recovery writes, including torn-tail repair. */
   private validateHeadBoundary(head: Head | null): void {
-    let prepared = false, hasPreparation = false, lastSequence = 0;
-    const legacyBoundaries = new Map<number, number>();
-    for (const entry of readLog(this.l.events)) {
-      if (entry.type === 'runner-events') {
-        const events = entry.events as Pending[];
-        for (const pending of events) {
-          if (pending.seq !== lastSequence + 1) throw new Error('missing covered runner-event sequence evidence; refusing recovery');
-          lastSequence = pending.seq;
-        }
-      }
-      if (!head) continue;
-      if (entry.type === 'revision-prepared' && entry.rev === head.rev) {
-        hasPreparation = true;
-        if (head.prepared !== undefined && entry.prepared === head.prepared) {
-          if (entry.sha !== head.sha || entry.parent !== head.parent || entry.kind !== head.kind || entry.through !== head.through) throw new Error('prepared revision accounting conflicts with HEAD');
-          prepared = true;
-        }
-      }
-      // Old normal accounting follows applied runner events. Recovered accounting
-      // was reconstructed from HEAD and cannot independently corroborate it.
-      if (entry.type === 'revision' && entry.recovered !== true && typeof entry.rev === 'number') {
-        const boundary = entry.kind === 'runner-append' || entry.kind === 'native-compaction' ? lastSequence
-          : entry.kind === 'init' ? 0 : entry.kind === 'model-edit' ? legacyBoundaries.get(entry.rev - 1) : undefined;
-        if (boundary !== undefined) {
-          legacyBoundaries.set(entry.rev, boundary);
-          if (head.prepared === undefined && entry.rev === head.rev && entry.sha === head.sha && boundary !== head.through) throw new Error('legacy HEAD through conflicts with durable revision accounting');
-        }
-      }
-    }
-    if (head && lastSequence < head.through) throw new Error('missing covered runner-event sequence evidence at HEAD; refusing recovery');
-    if (head && ((head.prepared !== undefined && !prepared) || (head.prepared === undefined && hasPreparation))) throw new Error('HEAD is missing its independently prepared sequence boundary; refusing recovery');
-    // A legacy HEAD with missing accounting has no independent sequence witness.
-    // Preserve missing-accounting compatibility only with whole runner-event evidence.
+    validateHeadLogBoundary(this.l, head);
   }
 
   recover(): void {
     const head = this.head();
     const cached = this.loadRecoveryCheckpoint();
-    if (!cached) this.validateHeadBoundary(head);
+    if (!cached) {
+      this.validateHeadBoundary(head);
+      const state = restoreNoticeState(this.l.events);
+      this.restoreKnown = state.notices;
+      this.restoreNotices = new Map([...state.notices].filter(([id]) => !state.confirmed.has(id)));
+      this.restoreCursor = state.end;
+      const log = this.checkpointLog();
+      this.restoreIdentity = log ? `${log.dev}:${log.ino}` : undefined;
+    }
     const tornBytes = truncateTornTail(this.l.events);
     const repairedReceipt = cached ? undefined : this.repairRevisionLog(head);
     const removed = removeTemps([this.l.stateDir, this.l.revisions], [dirname(this.l.workingContext)], [dirname(dirname(this.l.workingContext))]);

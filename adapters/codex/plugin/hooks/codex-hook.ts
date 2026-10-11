@@ -337,8 +337,9 @@ const isResetGate = (input: HookInput): boolean => input.hook_event_name === 'Pr
 
 const NOT_RESET = 'Context Engine: the context window was NOT reset, so nothing was lost.';
 
-function denyReset(refusal: string): void {
+function denyReset(input: HookInput, refusal: string, carried = false): void {
   emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `${refusal} Then call new_context again` } });
+  if (carried) confirmRestores(input, restoreBatch(lastSync));
 }
 
 /**
@@ -397,11 +398,15 @@ async function main(input: HookInput): Promise<void> {
     // call for many turns). Codex hands additionalContext to the model as a developer message, so
     // only the core's static budget text goes there: numbers and fixed wording, never the prompt or
     // any Working Context text.
+    const restoreNotices = restoreBatch(synced, recorded);
     const restored = [...new Set([synced, recorded])].flatMap(r => r.receipt?.kind === 'restored' ? [r.receipt.text] : []);
     const budget = budgetText(recorded.budget, synced.budget);
-    const notices = [...restored, ...(budget ? [budget] : [])];
+    const notices = [...restored, ...restoreSummary(synced, recorded), ...(budget ? [budget] : [])];
     if (delivered) notices.push(guidance.editedContextReadNotice(input.session_id, delivered.revision, delivered.sha256));
-    if (notices.length) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
+    if (notices.length) {
+      emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
+      confirmRestores(input, restoreNotices);
+    }
     // As for a tool hook, this confirms hook transport output only.
     if (delivered) markDelivered(input, delivered.revision);
     advanceLogOffset(input);
@@ -443,9 +448,10 @@ async function main(input: HookInput): Promise<void> {
     const out: Record<string, unknown> = {};
     // A restore this hook's sync made is reported even when the tool's own output is recorded.
     const receipt = observed.receipt?.kind === 'restored' ? observed.receipt : result.receipt;
-    const restored = receipt?.kind === 'restored';
-    if (receipt && (restored || (ownFile && receipt.stale))) {
-      Object.assign(out, { decision: 'block', reason: `${receipt.text}${restored ? ' Re-read the file before editing it again.' : ''}\n\nTool output:\n${responseText(input)}` });
+    const restoreNotices = restoreBatch(observed, result);
+    const restored = receipt?.kind === 'restored' || restoreNotices.length > 0;
+    if (restored || (receipt && ownFile && receipt.stale)) {
+      Object.assign(out, { decision: 'block', reason: `${[...(receipt ? [receipt.text] : []), ...restoreSummary(observed, result)].join('\n')}${restored ? ' Re-read the file before editing it again.' : ''}\n\nTool output:\n${responseText(input)}` });
     }
     const budget = result.budget;
     const notices: string[] = [];
@@ -455,9 +461,9 @@ async function main(input: HookInput): Promise<void> {
       notices.push(guidance.editedContextReadNotice(input.session_id, pending.revision, pending.sha256));
     }
     if (notices.length) out.hookSpecificOutput = { hookEventName: 'PostToolUse', additionalContext: notices.join('\n') };
-    return { out, pending, read };
-    }, ({ out, pending, read }) => {
-      if (Object.keys(out).length) emit(out);
+    return { out, pending, read, restoreNotices };
+    }, ({ out, pending, read, restoreNotices }) => {
+      if (Object.keys(out).length) { emit(out); confirmRestores(input, restoreNotices); }
       // This confirms hook transport output only, never ingestion by a later model request.
       if (pending) markDelivered(input, pending.revision, read);
       advanceLogOffset(input);
@@ -473,7 +479,7 @@ async function main(input: HookInput): Promise<void> {
       advanceLogOffset(input);
       return refusal;
     });
-    if (refusal) denyReset(refusal);
+    if (refusal) denyReset(input, refusal, true);
   } else if (input.hook_event_name === 'Stop') {
     if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) {
       const text = input.last_assistant_message;
@@ -529,7 +535,10 @@ async function main(input: HookInput): Promise<void> {
     return refusal;
     });
     // Finish the checks and release the lease before writing the one JSON response Codex parses.
-    if (refusal) emit({ continue: false, stopReason: refusal });
+    if (refusal) {
+      emit({ continue: false, stopReason: refusal });
+      confirmRestores(input, restoreBatch(lastSync));
+    }
   }
 }
 
@@ -565,8 +574,8 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
   const lastTurn = String(result.turns?.at(-1)?.text ?? '');
   lastTurnIsReset = (lastTurn.split(/\n[ \t]*\n/).at(-1) ?? '').trimStart().startsWith('Context window reset');
   const path = relative(input.cwd, result.workingContext ?? '') || lib.workingContextRelPath(input.session_id);
-  if (result.receipt?.kind === 'restored') {
-    return `${notReset} ${result.receipt.text} Read ${path} again and make sure it holds the current task.`;
+  if (result.receipt?.kind === 'restored' || result.restoreNotices?.length) {
+    return `${notReset} ${[...(result.receipt ? [result.receipt.text] : []), ...restoreSummary(result)].join('\n')} Read ${path} again and make sure it holds the current task.`;
   }
   if (!result.revision || !result.turns?.some(turn => turn.text.trim() !== '')) {
     return `${notReset} Your Working Context ${path} is missing or empty and there is no earlier revision to restore. Write the current task, decisions and next step into it.`;
@@ -706,6 +715,9 @@ interface CoreResult {
   workingContext?: string;
   receipt?: { kind: 'committed' | 'restored' | 'stale'; text: string; stale?: { count: number } };
   budget?: Core.BudgetReport;
+  restoreNotices?: Array<{ id: string; text: string }>;
+  restoreNoticesTotal?: number;
+  sessionGeneration?: string;
   turns?: Array<{ role: string; text: string }>;
   /** The committed revision's exact text. */
   workingContextText?: string;
@@ -715,10 +727,11 @@ interface CoreResult {
  * One core call through the CLI. Codex may run the hooks of parallel tool calls at the same time,
  * all presenting the same owner; the core serializes them per session (core/lock.ts `serialized`).
  */
-function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], maxBytes?: number, operationId?: string): CoreResult {
+function core(input: HookInput, command: 'record' | 'sync' | 'ack-restores', events?: unknown[], maxBytes?: number, operationId?: string, ownerGeneration?: string): CoreResult {
   const cli = process.env.CONTEXT_ENGINE_CLI || 'context-engine';
   const hardLimit = process.env.CONTEXT_ENGINE_HARD_LIMIT || String(DEFAULT_HARD_LIMIT);
-  const args = [command, '--session', input.session_id, '--project', input.cwd, '--runner', RUNNER, '--hard-limit', hardLimit, '--owner-pid', String(runnerPid()), '--if-enabled', '--budget', String(budgetTokens)];
+  const args = [command, '--session', input.session_id, '--project', input.cwd, '--runner', RUNNER, '--hard-limit', hardLimit, '--owner-pid', String(runnerPid()), '--if-enabled', '--defer-restore-ack', '--budget', String(budgetTokens)];
+  if(command==='ack-restores')args.push('--notice-ids',(events as string[]).join(','),'--owner-generation',ownerGeneration ?? '');
   if(maxBytes!==undefined)args.push('--max-context-bytes',String(maxBytes));
   if(operationId!==undefined)args.push('--operation-id',operationId);
   const [file, argv] = /\.[cm]?[jt]s$/.test(cli) ? [process.execPath, [cli, ...args]] : [cli, args];
@@ -732,7 +745,7 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], 
   // A prompt syncs then records: 1s lease + 5s + 15s matches the reset gate's single 20s call.
   const timeout=input.hook_event_name==='PreCompact'?5000:input.hook_event_name==='PostToolUse'?7500:input.hook_event_name==='Stop'?15_000
     :input.hook_event_name==='UserPromptSubmit'?(command==='sync'?5000:15_000):20_000;
-  const r = spawnSync(file, argv, { maxBuffer, input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout });
+  const r = spawnSync(file, argv, { maxBuffer, input: events && command!=='ack-restores' ? JSON.stringify(events) : '', encoding: 'utf8', timeout });
   let out: CoreResult | undefined;
   try {
     out = JSON.parse(r.stdout) as CoreResult;
@@ -743,6 +756,28 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], 
     throw new CoreUnavailable(`context-engine ${command} failed: ${why}`);
   }
   return out;
+}
+
+/** Only IDs whose static notices this output carries may be confirmed. */
+function restoreBatch(...results: Array<CoreResult | undefined>): Array<{ id: string; text: string; generation: string }> {
+  const notices = new Map<string, { id: string; text: string; generation: string }>();
+  for (const result of results) for (const notice of result?.restoreNotices ?? []) {
+    if (!result?.sessionGeneration || !/^[a-f0-9]{32}$/.test(result.sessionGeneration) || !/^[a-f0-9]{32}$/.test(notice.id) || typeof notice.text !== 'string') throw new CoreUnavailable('invalid restore notice reply');
+    if (notices.size && [...notices.values()][0]!.generation !== result.sessionGeneration) throw new CoreUnavailable('restore notice batch spans owner generations');
+    notices.set(notice.id, { ...notice, generation: result.sessionGeneration });
+  }
+  return [...notices.values()];
+}
+
+function restoreSummary(...results: Array<CoreResult | undefined>): string[] {
+  const batch = restoreBatch(...results);
+  return batch.length ? [lib.restoreNoticeSummary(batch.length, Math.max(batch.length, ...results.map(r => r?.restoreNoticesTotal ?? 0)))] : [];
+}
+
+function confirmRestores(input: HookInput, notices: Array<{ id: string; text: string; generation: string }>): void {
+  if (!notices.length) return;
+  try { core(input, 'ack-restores', notices.map(n => n.id), undefined, undefined, notices[0]!.generation); }
+  catch (error) { log(error); } // Output already succeeded. The durable notice remains owed on failure.
 }
 
 function log(e: unknown): void {
@@ -789,7 +824,7 @@ try {
     // checkout), nothing can show the Working Context is usable, and refusing costs only a retry.
     // The path is spelled out here because the core that knows it may be what failed to load.
     if (event && isResetGate(event) && !event.agent_id && confirmedParticipation) {
-      denyReset(e instanceof PendingPrompt ? e.message : `${NOT_RESET} The Context Engine core could not be loaded or reached, so your Working Context .context-engine/${event.session_id}/context.md could not be checked, and resetting onto a file that cannot be delivered would lose the conversation. Carry on in this window for now (if this keeps happening, reinstall or uninstall Context Engine).`);
+      denyReset(event, e instanceof PendingPrompt ? e.message : `${NOT_RESET} The Context Engine core could not be loaded or reached, so your Working Context .context-engine/${event.session_id}/context.md could not be checked, and resetting onto a file that cannot be delivered would lose the conversation. Carry on in this window for now (if this keeps happening, reinstall or uninstall Context Engine).`);
     } else if(event && !event.agent_id && confirmedParticipation && (event.hook_event_name==='UserPromptSubmit'||event.hook_event_name==='PreCompact'||event.hook_event_name==='PostToolUse'||event.hook_event_name==='Stop')) {
       emit({continue:false,stopReason:e instanceof PendingPrompt ? e.message : (event.hook_event_name==='PostToolUse'||event.hook_event_name==='Stop') ? RECORD_REFUSAL : 'Context Engine: this request/compaction was stopped because the user request could not be safely recorded. Retry the original request after repairing storage, or disable Context Engine. No reset acceptance is claimed.'});
     }

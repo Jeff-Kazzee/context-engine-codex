@@ -341,7 +341,7 @@ test('issue27: a valid prior checkpoint upgrades after recovery and the current 
   assert.equal(opened.status, 'open');
   assert.equal(opened.session.sync().workingContextText, expected);
   opened.session.close();
-  assert.equal(JSON.parse(readFileSync(cache, 'utf8')).version, 4);
+  assert.equal(JSON.parse(readFileSync(cache, 'utf8')).version, 5);
   const again = openSession(f.opts);
   assert.equal(again.status, 'open');
   assert.equal(again.session.sync().workingContextText, expected);
