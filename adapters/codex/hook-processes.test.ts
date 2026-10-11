@@ -4,7 +4,7 @@
 import './testing/private-tmp.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -261,9 +261,7 @@ test('[CDX-009] an ordinary tool hook delivers a pending read notice after a Sto
   assert.match(readFileSync(wcPath(f), 'utf8'), /NOTICE_EDIT_SENTINEL[\s\S]*REPLY_WHILE_NOTICE_PENDING[\s\S]*ORDINARY_OUTPUT[\s\S]*NEXT_REQUEST/);
 });
 
-test('[CORE-005] a PostToolUse record racing an apply_patch of the Working Context keeps the patch', {
-  todo: 'core defect, routed to U01: record() materializes over an edit written after its sync, and the edit reaches no file, revision or Event Log row (core/session.ts:502-511)',
-}, async () => {
+test('[CORE-005] a PostToolUse record racing an apply_patch of the Working Context keeps the patch', async () => {
   const f = enabledFixture();
   assert.equal((await runHook(f, SID, prompt('RACE_TASK'))).status, 0);
   const ready = join(f.projectRoot, 'materialize-paused'), release = join(f.projectRoot, 'materialize-release');
@@ -335,7 +333,7 @@ async function waitUntil(check: () => boolean, what: string, ms = 15_000): Promi
   for (const until = Date.now() + ms; !check();) { assert.ok(Date.now() < until, what); await delay(10); }
 }
 
-test('[CDX-008] a Stop refused by completion debt that appears while it waits leaves no failed marker of its own', async () => {
+test('[CDX-008] a Stop refused by completion debt that appears while it waits retains its unrecorded reply debt', async () => {
   const f = enabledFixture();
   assert.equal((await runHook(f, SID, prompt('ACTIVE_TASK'))).status, 0);
   const state = layout(f.projectRoot, SID, f.stateDir).stateDir;
@@ -352,7 +350,14 @@ test('[CDX-008] a Stop refused by completion debt that appears while it waits le
   const stopped = await stopping!.done;
   await lease.done;
   assert.ok(stoppedContinuation(stopped), stopped.stdout);
-  assert.deepEqual(intents(), [planted], 'only the debt that refused the Stop remains');
+  const own = intents().filter(name => name !== planted);
+  assert.equal(own.length, 1, 'the Stop retains its own completion intent');
+  assert.equal(readFileSync(join(state, planted), 'utf8'), JSON.stringify({ failed: true }), 'the earlier debt stays unchanged');
+  assert.equal(JSON.parse(readFileSync(join(state, own[0]!), 'utf8')).failed, true);
+  assert.doesNotMatch(readFileSync(join(state, 'events.jsonl'), 'utf8'), /REPLY_DURING_DEBT/);
+  rmSync(join(state, planted));
+  assert.ok(stoppedContinuation(await runHook(f, SID, prompt('LATER'))), 'own debt still refuses a prompt after the other debt is gone');
+  assert.ok(stoppedContinuation(await runHook(f, SID, newContext)), 'own debt still refuses a reset');
 });
 
 test('[PERF-010] a Stop that waits out most of its lease and then stalls in the core answers before the 30 s hook timeout', async () => {

@@ -347,6 +347,16 @@ function denyReset(refusal: string): void {
  * refuses only after cache-local opt-in was verified (see the handler at the bottom). Prompt, completed-event and
  * compaction failures also report refusal for a verified active project.
  */
+function budgetText(current: Core.BudgetReport | undefined, earlier: Core.BudgetReport | undefined): string | undefined {
+  if (!current) return earlier?.text;
+  // BudgetReport text starts with the readout, followed by its tier when one fired.
+  // Keep current size and urgency, and carry only the preliminary sync's one-shot tier.
+  const previousTier = earlier?.tier && earlier.tier !== current.tier ? earlier.text.split('\n')[1] : undefined;
+  if (!previousTier) return current.text;
+  const [readout, ...reminders] = current.text.split('\n');
+  return [readout, previousTier, ...reminders].join('\n');
+}
+
 async function main(input: HookInput): Promise<void> {
   // Subagents (multi-agent mode) get no Working Context; only the root agent's session is managed.
   if (input.agent_id) return;
@@ -388,7 +398,8 @@ async function main(input: HookInput): Promise<void> {
     // only the core's static budget text goes there: numbers and fixed wording, never the prompt or
     // any Working Context text.
     const restored = [...new Set([synced, recorded])].flatMap(r => r.receipt?.kind === 'restored' ? [r.receipt.text] : []);
-    const notices = [...restored, ...(recorded.budget ? [recorded.budget.text] : [])];
+    const budget = budgetText(recorded.budget, synced.budget);
+    const notices = [...restored, ...(budget ? [budget] : [])];
     if (delivered) notices.push(guidance.editedContextReadNotice(input.session_id, delivered.revision, delivered.sha256));
     if (notices.length) emit({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: notices.join('\n') } });
     // As for a tool hook, this confirms hook transport output only.
@@ -438,7 +449,7 @@ async function main(input: HookInput): Promise<void> {
     }
     const budget = result.budget;
     const notices: string[] = [];
-    if (budget && (budget.tier || budget.urgent)) notices.push(budget.text);
+    if (budget && (budget.tier || budget.urgent || observed.budget?.tier)) notices.push(budgetText(budget, observed.budget)!);
     if (pending) {
       // Static metadata only. Editable text remains ordinary tool data after an explicit read.
       notices.push(guidance.editedContextReadNotice(input.session_id, pending.revision, pending.sha256));

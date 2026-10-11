@@ -108,6 +108,38 @@ test('a reminder fired by a user prompt reaches the model with that prompt (epis
   assert.doesNotMatch(r.stdout, /xxxx/);
 });
 
+for (const kind of ['prompt', 'tool'] as const) for (const [tokens, tier] of [[300, 25], [550, 50], [800, 75]]) {
+  test(`a ${kind} preserves the ${tier}% reminder fired by preliminary sync`, () => {
+    const f = enabledFixture();
+    assert.equal(hook(f, prompt('START'), SMALL).status, 0);
+    writeFileSync(wcPath(f), `[[CTX_TURN 1 role=user]]\nPRIVATE_EDIT_${out(tokens!)}\n`);
+    const payload = kind === 'prompt' ? prompt('NEXT') : { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: 'ordinary.txt' }, tool_response: 'ORDINARY_OUTPUT' };
+    const r = hook(f, payload, SMALL);
+    assert.equal(r.status, 0, r.stderr);
+    const text = String(JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? '');
+    assert.equal(text.split(`passed ${tier}% of its budget`).length - 1, 1, text);
+    assert.equal(text.split('Context Engine: Working Context ~').length - 1, 1, 'one current size readout');
+    const size = Math.ceil(wc(f).length / 4).toLocaleString('en-US');
+    assert.ok(text.includes(`Working Context ~${size} tokens`), 'readout describes the final record');
+    assert.doesNotMatch(text, /PRIVATE_EDIT|xxxx|ORDINARY_OUTPUT/);
+    const later = hook(f, prompt('LATER'), SMALL);
+    assert.equal(later.status, 0, later.stderr);
+    assert.doesNotMatch(later.stdout, new RegExp(`passed ${tier}% of its budget`));
+  });
+}
+
+test('preliminary sync and the final record can each deliver a different budget tier', () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('START'), SMALL).status, 0);
+  writeFileSync(wcPath(f), `[[CTX_TURN 1 role=user]]\n${out(300)}\n`);
+  const r = hook(f, prompt(out(300)), SMALL);
+  assert.equal(r.status, 0, r.stderr);
+  const text = String(JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? '');
+  for (const tier of [25, 50]) assert.equal(text.split(`passed ${tier}% of its budget`).length - 1, 1, text);
+  assert.equal(text.split('Context Engine: Working Context ~').length - 1, 1);
+  assert.ok(text.includes(`Working Context ~${Math.ceil(wc(f).length / 4)} tokens`));
+});
+
 const toolUse = (tool_name: string, tool_input: unknown, tool_response: unknown) => ({
   hook_event_name: 'PostToolUse',
   turn_id: 't1',
