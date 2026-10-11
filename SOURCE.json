@@ -18,6 +18,7 @@
     "core/index.ts": "1eafd5026f1c50866312d42fcd808f827d103be17b3149e01fc57f4d6979f69c",
     "core/isolation.test.ts": "dc100ec58cb6d008c3cd60921e03bbc1ba9f98f756ad84b0e11cbd84acc2447a",
     "core/issue29-ignore-repair.test.ts": "5ace69e10b19091d5258fd52d36f6c8437d07e2cb70e5a59ae95ba0255ac52ff",
+    "core/issue30-legacy-ignore.test.ts": "f4eb5e6ea0bd0fef3a5d0d4c964f24f16341b2f0349fe3deaa73ed1ac3fcfd84",
     "core/late-review-regressions.test.ts": "7da4becc6f261703e8b12ae04f5854b87f9e5dc3c9da481cb2c46e86c5601c83",
     "core/lock.test.ts": "00545e037055298371db7a0d1fd5cbffc5fa9ffe2a7f65cf82fec91789a1b3b2",
     "core/lock.ts": "b0f557ac72a02020f158067f5375006c0d8407a518d92045f95da7afc2e94dc2",
@@ -42,10 +43,10 @@
     "core/renewed-regressions.test.ts": "8d207b1cab82b936226cbc6584ee9cc179d9a55e9afb1dfc701b803677e000c5",
     "core/review-regressions.test.ts": "46999bc11abfcf0a9e22ca17125d1d12a8335881ce3b99c5025b207bd851e525",
     "core/session.test.ts": "24ab14e448e2f66c9e6e0aa3f9d28516abfd035c103222878cd8dd4a446680d0",
-    "core/session.ts": "03e3665ee91909e5352acc4e111ca60093a6ecac2db078ae720e73ef39dc160a",
+    "core/session.ts": "586d11707543a429d5b5342c7f706223c998a3223378fe2b116e532905fe0f2e",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "29a352170b633e6cd103843b7f708a8be6e42702ed10446d6cf9ea176b35940b",
+    "core/store.ts": "5bcda35e815ab5b9442ae3052d8e2649a554abb71cd7451613538ee3bfc0f9aa",
     "core/temp-hygiene.test.ts": "7495b5b45299db20a4e0b8ef0627838c163013675bf1c9e8537f9e7d77389ee1",
     "core/testing.ts": "89fa6f05e3e4f2dee67092cdb4dee824500dfd9f43b4442d143a6bc86dbda639",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
@@ -133,7 +134,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "25c074779bc9ce7df1a7bee1531f810cea5fab0f",
+  "corePatchCommit": "3ba0c15bb6ad6aec5f419ae7c330b14f1ec9de72",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -164,6 +165,7 @@
     "Issue 27 recovery requires every complete runner-event sequence from 1 onward, including pending replay, and refuses when HEAD covers a sequence absent from durable rows. Validation precedes torn-tail repair, temporary cleanup and materialization. Healthy legacy sessions retain missing revision-accounting compatibility. Legacy sessions with missing runner evidence now refuse with their evidence retained. Disposable recovery checkpoints advance from version 3 to 4 so an older weaker proof cannot bypass the full scan. No HEAD or Event Log schema migration. Offset-tail readers are unchanged. Synthetic offline controls do not establish power-loss durability or live delivery.",
     "Issue 27 fixture alignment starts the existing cross-record regression controls with complete sequences 1 and 2. Their later duplicate/regression refusals and assertions remain unchanged. Production behavior is unchanged from the issue 27 repair.",
     "Issue 28 uninstall skips native removal when a required before backup is missing, and uses the existing direct ledger cleanup to preserve values it cannot prove the installation wrote. It names the missing copies and retained values, and reports native-only effects as unverified. Original file absence and after-copy-only loss retain the normal native path. Unsafe backup copies still refuse before commands or changes. Core pin and hashes are unchanged.",
-    "Issue 29 empty managed-ignore repair appends through a verified existing inode instead of replacing its name. Linux append-existing refuses absent names and links without creating a file. Before and after append, identity, ownership and single-link checks precede visible-file validation. In-place concurrent rules survive. A concurrent rename-save survives and may refuse repair. Observed completed repairs skip append, while already-racing repairers may each append one blanket block. Short and failed writes retain bytes and fail explicitly. An incomplete prefix without a final effective wildcard refuses restart for local review. Later writes after the final validation sample are not guaranteed. No legacy temporary-file cleanup is included."
+    "Issue 29 empty managed-ignore repair appends through a verified existing inode instead of replacing its name. Linux append-existing refuses absent names and links without creating a file. Before and after append, identity, ownership and single-link checks precede visible-file validation. In-place concurrent rules survive. A concurrent rename-save survives and may refuse repair. Observed completed repairs skip append, while already-racing repairers may each append one blanket block. Short and failed writes retain bytes and fail explicitly. An incomplete prefix without a final effective wildcard refuses restart for local review. Later writes after the final validation sample are not guaranteed. No legacy temporary-file cleanup is included.",
+    "Issue 30 adds separate legacy-ignore-temp cleanup after recovery validation. Only exact reserved names, exact legacy managed bytes, private current-user regular files with one link and PIDs proven absent are removed. Live or uncertain PIDs, malformed names, unknown bytes, oversized files, unsafe links and uncertain ownership are retained. Opened inode and final name identity are checked through a verified parent descriptor. Concurrent removal or detected replacement is harmless. Directory flush failures remain explicit. This reserved core-owned temporary namespace retains the final-sample limitation of pathname unlink. No generic sweep of the managed parent, format migration or arbitrary same-user substitution guarantee is introduced."
   ]
 }
