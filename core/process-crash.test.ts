@@ -37,7 +37,7 @@ const steps: Array<{ step: string; fault: FaultPlan; copies: number; lease: bool
   { step: 'after the snapshot rename', fault: { call: 'renameSync', path: '/revisions/2\\.md$', at: 'after', action: 'kill' }, copies: 1, lease: false },
   { step: 'after the HEAD rename', fault: { call: 'renameSync', path: '/HEAD$', at: 'after', action: 'kill' }, copies: 1, lease: false },
   { step: 'before the Working Context rename', fault: { call: 'renameSync', path: '/context\\.md$', at: 'before', action: 'kill' }, copies: 1, lease: false },
-  { step: 'after preserving the Working Context predecessor', fault: { call: 'linkSync', path: '\\.ce-preserved-[a-f0-9]{64}\\.bak$', at: 'after', action: 'kill' }, copies: 1, lease: false },
+  { step: 'after publishing the predecessor identity marker', fault: { call: 'renameSync', path: '/working-context-preservation\\.json$', at: 'after', action: 'kill' }, copies: 1, lease: false },
   { step: 'after the Working Context rename', fault: { call: 'renameSync', path: '/context\\.md$', at: 'after', action: 'kill' }, copies: 1, lease: false },
 ];
 

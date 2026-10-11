@@ -18,6 +18,7 @@ import {
   readSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   statSync,
   ftruncateSync,
   unlinkSync,
@@ -478,6 +479,170 @@ function readOpened(fd: number, maxBytes: number): Buffer | 'too-large' {
   }
 }
 
+/** Refuse an unsupported workspace before a materializing commit advances HEAD. */
+export function assertWorkingContextHardLinks(wc: string): void {
+  assertWorkingContextDir(wc);
+  const directory = dirname(wc), parent = openSync(directory, 'directory');
+  const name = `${basename(wc)}.ce-probe-${randomBytes(16).toString('hex')}`;
+  const probe = childTarget(anchor(parent), name), probePath = join(directory, name);
+  let dir: number | undefined, file: number | undefined;
+  try {
+    if (openedPath(parent) !== directory) throw new Error('Working Context parent changed before hard-link preflight');
+    mkdirPrivateSync(probe);
+    dir = openPrivateDirectory(probePath)!;
+    const source = childTarget(anchor(dir), 'source'), linked = childTarget(anchor(dir), 'linked');
+    file = openSync(source, 'exclusive-nofollow');
+    const identity = fstatSync(file);
+    try { linkSync(source, linked); }
+    catch (cause) { throw new Error('Working Context publication requires hard links in its workspace. HEAD was not advanced by this commit.', { cause }); }
+    for (const entry of [linked, source]) {
+      if (!existsSync(entry)) continue;
+      const st = lstatSync(entry);
+      if (st.dev !== identity.dev || st.ino !== identity.ino) throw new Error(`hard-link preflight entry changed. Preserve ${probePath}.`);
+      unlinkSync(entry);
+    }
+  } finally {
+    if (file !== undefined && dir !== undefined) {
+      const identity = fstatSync(file);
+      for (const name of ['linked', 'source']) {
+        const entry = childTarget(anchor(dir), name);
+        if (!existsSync(entry)) continue;
+        const st = lstatSync(entry);
+        if (st.dev === identity.dev && st.ino === identity.ino) unlinkSync(entry);
+      }
+      closeSync(file);
+    }
+    if (dir !== undefined) {
+      const held = fstatSync(dir), named = lstatSync(probe);
+      closeSync(dir);
+      if (held.dev === named.dev && held.ino === named.ino) {
+        try { rmdirSync(probe); fsyncSync(parent); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error; }
+      }
+    }
+    closeSync(parent);
+  }
+}
+
+type PreservationRecord = { version: 1; sha: string; dev: number; ino: number } & (
+  | { stage: 'linked' }
+  | { stage: 'retiring' | 'retired'; retirement: { name: string; dev: number; ino: number } }
+);
+
+function preservationRecord(path: string, digest: string): PreservationRecord | undefined {
+  const bytes = readBytes(path, 4096);
+  if (!bytes) return undefined;
+  const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  const identity = (v: unknown): v is { dev: number; ino: number } => typeof v === 'object' && v !== null
+    && 'dev' in v && Number.isSafeInteger(v.dev) && Number(v.dev) >= 0
+    && 'ino' in v && Number.isSafeInteger(v.ino) && Number(v.ino) > 0;
+  if (!identity(value) || !('version' in value) || value.version !== 1 || !('sha' in value) || value.sha !== digest || !('stage' in value)) {
+    throw new Error('unverified Working Context preservation marker; refusing recovery artifact');
+  }
+  const common = { version: 1, sha: digest, dev: value.dev, ino: value.ino } satisfies Omit<PreservationRecord, 'stage'>;
+  if (value.stage === 'linked') return { ...common, stage: 'linked' };
+  if ((value.stage === 'retiring' || value.stage === 'retired') && 'retirement' in value && identity(value.retirement)
+    && 'name' in value.retirement && typeof value.retirement.name === 'string' && /^context\.md\.ce-retired-[0-9a-f]{32}$/.test(value.retirement.name)) {
+    return { ...common, stage: value.stage, retirement: { name: value.retirement.name, dev: value.retirement.dev, ino: value.retirement.ino } };
+  }
+  throw new Error('unverified Working Context preservation marker; refusing recovery artifact');
+}
+
+type RetiringRecord = Exclude<PreservationRecord, { stage: 'linked' }>;
+
+function openRetirement(directory: string, record: RetiringRecord): number | undefined {
+  const path = join(directory, record.retirement.name), fd = openPrivateDirectory(path);
+  if (fd === undefined) {
+    if (record.stage === 'retired') return undefined;
+    throw new Error(`Working Context retirement directory is missing. Preserve the recovery artifact and marker for ${path}.`);
+  }
+  const st = fstatSync(fd);
+  if (st.dev !== record.retirement.dev || st.ino !== record.retirement.ino) {
+    closeSync(fd);
+    throw new Error(`Working Context retirement directory changed. Preserve ${path}.`);
+  }
+  return fd;
+}
+
+/** Move before inspecting and deleting, so replacing the public artifact name cannot erase its replacement. */
+function retirePreservation(parent: number, directory: string, preserved: FileTarget, marker: string, record: PreservationRecord): void {
+  let retiring: RetiringRecord;
+  if (record.stage === 'linked') {
+    const name = `context.md.ce-retired-${randomBytes(16).toString('hex')}`;
+    const target = childTarget(anchor(parent), name);
+    mkdirPrivateSync(target);
+    const dir = openPrivateDirectory(join(directory, name))!;
+    const st = fstatSync(dir);
+    closeSync(dir);
+    fsyncSync(parent);
+    retiring = { ...record, stage: 'retiring', retirement: { name, dev: st.dev, ino: st.ino } };
+    atomicWrite(marker, JSON.stringify(retiring), 'preservation-marker-tmp');
+  } else retiring = record;
+  const path = join(directory, retiring.retirement.name), dir = openRetirement(directory, retiring);
+  try {
+    if (record.stage === 'retired' && existsSync(preserved)) throw new Error('retired Working Context recovery artifact name was replaced; preserving its replacement');
+    if (dir !== undefined) {
+      const moved = childTarget(anchor(dir), 'predecessor');
+      if (record.stage === 'retired' && existsSync(moved)) throw new Error(`retired Working Context artifact was replaced. Preserve ${path}/predecessor.`);
+      if (existsSync(moved) && existsSync(preserved)) throw new Error(`Working Context preservation names conflict. Preserve ${path} and the original recovery artifact.`);
+      if (!existsSync(moved) && existsSync(preserved)) {
+        renameSync(preserved, moved);
+        fsyncSync(parent); fsyncSync(dir);
+      }
+      if (existsSync(moved)) {
+        const st = lstatSync(moved);
+        if (!st.isFile() || st.dev !== record.dev || st.ino !== record.ino) throw new Error(`Working Context recovery artifact changed during retirement. Preserve ${path}/predecessor.`);
+        unlinkSync(moved);
+        fsyncSync(dir);
+      }
+      if (existsSync(preserved)) throw new Error('Working Context recovery artifact name was replaced during retirement; preserving its replacement');
+      atomicWrite(marker, JSON.stringify({ ...retiring, stage: 'retired' } satisfies PreservationRecord), 'preservation-marker-tmp');
+      const named = lstatSync(childTarget(anchor(parent), retiring.retirement.name)), held = fstatSync(dir);
+      if (named.dev !== held.dev || named.ino !== held.ino || openedPath(dir) !== path) throw new Error(`Working Context retirement directory changed. Preserve ${path}.`);
+      rmdirSync(childTarget(anchor(parent), retiring.retirement.name));
+      fsyncSync(parent);
+    }
+    unlinkSync(marker);
+    const state = openPrivateDirectory(dirname(marker))!;
+    try { fsyncSync(state); } finally { closeSync(state); }
+  } catch (cause) {
+    throw new Error(`Working Context retirement failed. Preserve ${path} and ${marker} before retrying.`, { cause });
+  } finally { if (dir !== undefined) closeSync(dir); }
+}
+
+function recoverPreservation(parent: number, directory: string, target: FileTarget, preserved: FileTarget, preservedPath: string, marker: string, record: PreservationRecord, maxBytes: number, keep: (read: WorkingContextRead) => boolean): void {
+  if (record.stage === 'retired') return retirePreservation(parent, directory, preserved, marker, record);
+  let retirement: number | undefined;
+  try {
+    let artifact = preserved, artifactPath = preservedPath;
+    if (record.stage === 'retiring') {
+      retirement = openRetirement(directory, record);
+      if (retirement === undefined) throw new Error('Working Context retirement directory is missing');
+      const moved = childTarget(anchor(retirement), 'predecessor');
+      if (existsSync(moved)) {
+        if (existsSync(preserved)) throw new Error('Working Context recovery artifact names conflict; preserving both entries');
+        artifact = moved; artifactPath = join(directory, record.retirement.name, 'predecessor');
+      }
+    }
+    if (existsSync(artifact)) {
+      const fd = openSync(artifact, 'read');
+      try {
+        const st = fstatSync(fd), named = lstatSync(artifact);
+        const current = existsSync(target) ? lstatSync(target) : undefined;
+        const ownPair = st.nlink === 2 && current?.isFile() && current.dev === st.dev && current.ino === st.ino && current.nlink === 2;
+        if (!st.isFile() || st.owner !== 'current' || !st.privateAccess || isCredential(artifactPath, st)
+          || st.dev !== record.dev || st.ino !== record.ino
+          || openedPath(fd) !== artifactPath || named.dev !== st.dev || named.ino !== st.ino
+          || !(st.nlink === 1 || ownPair)) throw new Error('unverified Working Context recovery artifact; refusing payload');
+        keep(readOpened(fd, maxBytes));
+        const latest = lstatSync(artifact);
+        if (latest.dev !== st.dev || latest.ino !== st.ino) throw new Error('Working Context recovery artifact changed before removal');
+      } finally { closeSync(fd); }
+    } else if (record.stage === 'linked') throw new Error('Working Context recovery artifact is missing; preserving its marker');
+    retirePreservation(parent, directory, preserved, marker, record);
+  } finally { if (retirement !== undefined) closeSync(retirement); }
+}
+
 /**
  * Writes `data` over the Working Context. Just before the rename, `keep` sees what the file holds.
  * Keeping an edit appends to the Event Log and takes time, so while `keep` returns true the file is
@@ -486,7 +651,7 @@ function readOpened(fd: number, maxBytes: number): Buffer | 'too-large' {
  * file over the Working Context after the last check is still overwritten unseen, because Node
  * offers no renameat2(RENAME_EXCHANGE) and the core has no native dependencies.
  */
-export function replaceWorkingContext(wc: string, data: string, maxBytes: number, keep: (read: WorkingContextRead) => boolean): void {
+export function replaceWorkingContext(wc: string, data: string, maxBytes: number, keep: (read: WorkingContextRead) => boolean, marker: string): void {
   assertWorkingContextDir(wc);
   const directory = dirname(wc), parent = openSync(directory, 'directory');
   const target = childTarget(anchor(parent), basename(wc));
@@ -501,22 +666,9 @@ export function replaceWorkingContext(wc: string, data: string, maxBytes: number
     // A previous publication can die before rename (two names for one inode) or
     // after it (only the recovery name). Only this exact, verified pair permits
     // a two-link read. Ordinary Working Context reads retain their one-link rule.
-    if (existsSync(preserved)) {
-      const fd = openSync(preserved, 'read');
-      try {
-        const st = fstatSync(fd), named = lstatSync(preserved);
-        const current = existsSync(target) ? lstatSync(target) : undefined;
-        const ownPair = st.nlink === 2 && current?.isFile() && current.dev === st.dev && current.ino === st.ino && current.nlink === 2;
-        if (!st.isFile() || st.owner !== 'current' || !st.privateAccess || isCredential(preservedPath, st)
-          || openedPath(fd) !== preservedPath || named.dev !== st.dev || named.ino !== st.ino
-          || !(st.nlink === 1 || ownPair)) throw new Error('unverified Working Context recovery artifact; refusing payload');
-        keep(readOpened(fd, maxBytes));
-        const latest = lstatSync(preserved);
-        if (latest.dev !== st.dev || latest.ino !== st.ino) throw new Error('Working Context recovery artifact changed before removal');
-        unlinkSync(preserved);
-        fsyncSync(parent);
-      } finally { closeSync(fd); }
-    }
+    const record = preservationRecord(marker, sha(data));
+    if (existsSync(preserved) && !record) throw new Error('unauthenticated Working Context recovery artifact; refusing preservation-name collision');
+    if (record) recoverPreservation(parent, directory, target, preserved, preservedPath, marker, record, maxBytes, keep);
     tmp = writeTemp(target, data, 'wc-tmp');
     for (let look = 0; look < 4; look++) {
       if (last.fd !== undefined) { closeSync(last.fd); last.fd = undefined; }
@@ -532,11 +684,10 @@ export function replaceWorkingContext(wc: string, data: string, maxBytes: number
       linkSync(target, preserved);
       const saved = lstatSync(preserved);
       if (!saved.isFile() || saved.dev !== st.dev || saved.ino !== st.ino || saved.nlink !== 2) {
-        unlinkSync(preserved);
-        fsyncSync(parent);
         throw new Error('Working Context changed before preservation; refusing publication');
       }
       fsyncSync(parent);
+      atomicWrite(marker, JSON.stringify({ version: 1, sha: sha(data), dev: st.dev, ino: st.ino, stage: 'linked' } satisfies PreservationRecord), 'preservation-marker-tmp');
     }
     renameSync(tmp, target);
     fsyncSync(parent);
@@ -547,10 +698,9 @@ export function replaceWorkingContext(wc: string, data: string, maxBytes: number
     // remain outside the bounded capture contract.
     const saved = lstatSync(preserved), held = fstatSync(last.fd);
     if (saved.dev !== held.dev || saved.ino !== held.ino) throw new Error('Working Context recovery artifact changed before removal');
-    unlinkSync(preserved);
-    fsyncSync(parent);
+    retirePreservation(parent, directory, preserved, marker, { version: 1, sha: sha(data), dev: held.dev, ino: held.ino, stage: 'linked' });
   } catch (error) {
-    if (existsSync(preserved)) throw new Error(`Working Context publication failed. Preserve the recovery artifact ${preservedPath} and retry after repairing storage.`, { cause: error });
+    if (existsSync(preserved)) throw new Error(`Working Context publication failed. Preserve the recovery artifact ${preservedPath}. Repair its exact artifact and private marker before retrying.`, { cause: error });
     throw error;
   } finally {
     if (tmp) try { unlinkSync(tmp); } catch {}

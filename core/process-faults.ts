@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 
 export interface FaultPlan {
-  call: 'openSync' | 'writeSync' | 'writeFileSync' | 'fsyncSync' | 'renameSync' | 'linkSync';
+  call: 'openSync' | 'writeSync' | 'writeFileSync' | 'fsyncSync' | 'renameSync' | 'linkSync' | 'unlinkSync' | 'rmdirSync';
   /** Regular expression for the resolved absolute path: the opened, written or flushed file, or the destination of a rename or link. */
   path: string;
   /** writeSync: the written bytes contain this text. fsyncSync: a matching earlier write contained it. */
@@ -69,6 +69,8 @@ function install(plan: FaultPlan): void {
   around('fsyncSync', ([fd]) => pattern.test(resolved(fd)));
   around('renameSync', ([, to]) => pattern.test(resolved(to)));
   around('linkSync', ([, to]) => pattern.test(resolved(to)));
+  around('unlinkSync', ([path]) => pattern.test(resolved(path)));
+  around('rmdirSync', ([path]) => pattern.test(resolved(path)));
   fsx.writeSync = (fd: number, data: any, ...rest: any[]) => {
     const pass = () => native.writeSync!(fd, data, ...rest);
     if (fired || typeof data === 'string' || (plan.call !== 'writeSync' && primed)) return pass();

@@ -27,6 +27,7 @@ import {
   removeTemps,
   removeDirectoryEntries,
   replaceWorkingContext,
+  assertWorkingContextHardLinks,
   resolveStateRoot,
   sessionFrameKey,
   sha,
@@ -543,9 +544,10 @@ class Core {
     const prev = this.head();
     if (prev?.rev === Number.MAX_SAFE_INTEGER) throw new Error('revision counter exhausted; start a new session');
     const rev = (prev?.rev ?? 0) + 1;
+    const materialize = kind === 'runner-append' || kind === 'native-compaction';
+    if (materialize) assertWorkingContextHardLinks(this.l.workingContext);
     atomicWrite(join(this.l.revisions, `${rev}.md`), text, 'snapshot-tmp');
     crashPoint('before-head');
-    const materialize = kind === 'runner-append' || kind === 'native-compaction';
     const head: Head = { rev, sha: sha(text), parent: prev?.sha ?? null, through: through ?? prev?.through ?? 0, materialized: !materialize, kind };
     head.prepared = boundaryIdentity(head);
     // This witness must survive even if final revision accounting is interrupted.
@@ -571,7 +573,7 @@ class Core {
     const kept = new Set<string>();
     const bound = Math.min(SNAPSHOT_MAX_BYTES, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size));
     try {
-      replaceWorkingContext(this.l.workingContext, text, bound, (read) => this.keepStaleEdit(head, text.length, read, kept));
+      replaceWorkingContext(this.l.workingContext, text, bound, (read) => this.keepStaleEdit(head, text.length, read, kept), join(this.l.stateDir, 'working-context-preservation.json'));
       head.materialized = true;
       atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
     } catch (error) {
