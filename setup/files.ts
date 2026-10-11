@@ -4,8 +4,14 @@ import { anchor, childTarget, requireSupportedPlatform, targetBasename, type Fil
 // is required, like the core's confined file reads.
 import { closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirPrivateSync, openSync, opendirSync, readSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from '../core/platform.ts';
 import { openPrivateDirectory } from '../core/store.ts';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, join, parse, resolve, sep } from 'node:path';
+
+/** A replace or delete candidate's name ends with this digest of its target's name, so a refusal can name the target. */
+export function candidateDigest(path: string): string {
+  return createHash('sha256').update(basename(path)).digest('hex').slice(0, 16);
+}
+const candidateName = (kind: 'replace' | 'delete', path: string) => `.context-engine-${kind}-${randomBytes(16).toString('hex')}-${candidateDigest(path)}.tmp`;
 
 export function checkComponents(path: string): void {
   requireSupportedPlatform();
@@ -116,7 +122,7 @@ export function safeWrite(path: string, data: string | Buffer, expected?: Buffer
     if(expected===undefined)renameSync(tmp,target);
     else {
       if(expected!==null) {
-        candidate=childTarget(anchored,`.context-engine-replace-${randomBytes(16).toString('hex')}.tmp`);
+        candidate=childTarget(anchored,candidateName('replace',path));
         closeSync(openSync(candidate,'exclusive-nofollow'));
         renameSync(target,candidate);moved=true;fsyncSync(fd);
         const old=openSync(candidate,'read');
@@ -135,8 +141,9 @@ export function safeWrite(path: string, data: string | Buffer, expected?: Buffer
     fsyncSync(fd);
   } catch(error) {
     if(candidate&&moved) {
+      const kept=join(parent,targetBasename(candidate));
       try {linkSync(candidate,childTarget(anchor(fd),basename(path)));unlinkSync(candidate);candidate=undefined;moved=false;fsyncSync(fd);}
-      catch {throw new Error(`setup replacement refused; a newer destination was retained and the captured candidate remains at ${candidate}`,{cause:error});}
+      catch {throw new Error(`setup replacement refused; a newer destination was retained and the captured candidate remains at ${kept}`,{cause:error});}
     }
     throw error;
   } finally {
@@ -153,7 +160,8 @@ export function safeRemoveTree(path: string): void {
   try {parentFd=openSync(parent,'directory');}
   catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
   const budget={paths:0,bytes:0};
-  const remove=(fd:number,expected:string,depth:number):void=>{
+  // A first pass with apply false walks the whole namespace, so a budget refusal removes nothing.
+  const remove=(fd:number,expected:string,depth:number,apply:boolean):void=>{
     assertOwner(fstatSync(fd),expected);
     if(depth>64||realpathSync(anchor(fd))!==expected)throw new Error('setup namespace changed; retained');
     const dir=opendirSync(anchor(fd));
@@ -163,12 +171,12 @@ export function safeRemoveTree(path: string): void {
       const target=childTarget(anchor(fd),entry.name),st=lstatSync(target);assertOwner(st,absolute);
       if(st.isDirectory()) {
         const child=openSync(target,'directory');
-        try {remove(child,absolute,depth+1);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace child changed; retained');rmdirSync(target);}
+        try {remove(child,absolute,depth+1,apply);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace child changed; retained');if(apply)rmdirSync(target);}
         finally {closeSync(child);}
-      } else if(st.isFile()&&st.nlink===1)unlinkSync(target);
+      } else if(st.isFile()&&st.nlink===1){if(apply)unlinkSync(target);}
       else throw new Error('setup namespace contains an unsafe entry; retained');
     }} finally {dir.closeSync();}
-    fsyncSync(fd);
+    if(apply)fsyncSync(fd);
   };
   try {
     assertOwner(fstatSync(parentFd),parent);
@@ -176,7 +184,7 @@ export function safeRemoveTree(path: string): void {
     const target=childTarget(anchor(parentFd),basename(path));let child:number;
     try {child=openSync(target,'directory');}
     catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
-    try {remove(child,resolve(path),0);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace changed; retained');rmdirSync(target);fsyncSync(parentFd);}
+    try {remove(child,resolve(path),0,false);budget.paths=0;budget.bytes=0;remove(child,resolve(path),0,true);const now=lstatSync(target),opened=fstatSync(child);if(now.dev!==opened.dev||now.ino!==opened.ino)throw new Error('setup namespace changed; retained');rmdirSync(target);fsyncSync(parentFd);}
     finally {closeSync(child);}
   } finally {closeSync(parentFd);}
 }
@@ -199,7 +207,7 @@ export function safeRemove(path: string, expected: Buffer | null): void {
     }
     // Reserve a random exclusive candidate, then inspect what rename actually removed.
     // A replacement at the original basename is never deleted based on an earlier read.
-    candidate = childTarget(anchor(dir), `.context-engine-delete-${randomBytes(16).toString('hex')}.tmp`);
+    candidate = childTarget(anchor(dir), candidateName('delete', path));
     closeSync(openSync(candidate, 'exclusive-nofollow')); reserved = true;
     renameSync(anchored, candidate); moved = true; fsyncSync(dir);
     const file = openSync(candidate, 'read');
@@ -250,7 +258,7 @@ export function acquireSetupLock(path: string): () => void {
     if (!fstatSync(dir).isDirectory() || realpathSync(anchor(dir)) !== parent) throw new Error(`setup cannot verify directory: ${parent}`);
     try { lock = openSync(anchored, 'exclusive-nofollow'); }
     catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`setup transaction already locked: ${path}; wait for the active setup to finish. If interrupted, verify no setup process is running before removing this lock.`);
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`setup transaction already locked: ${path}; wait for the active setup to finish. If interrupted, verify no setup process is running, including a runner plugin command it started, before removing this lock.`);
       throw e;
     }
     writeFileSync(lock, `${JSON.stringify({ pid: process.pid })}\n`);

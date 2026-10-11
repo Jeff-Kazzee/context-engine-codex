@@ -72,7 +72,8 @@ function onPath(env: NodeJS.ProcessEnv): string | null {
   return null;
 }
 
-export async function statusText(ctx: SetupContext, projectRoot: string): Promise<{ lines: string[]; json: Record<string, unknown> }> {
+/** `interrupted` names a setup lock and an interrupted install record that may belong to a running install. */
+export async function statusText(ctx: SetupContext, projectRoot: string, interrupted: string | null = null): Promise<{ lines: string[]; json: Record<string, unknown> }> {
   const rootFd = openPrivateDirectory(dirname(ctx.setupDir));
   if (rootFd !== undefined) closeSync(rootFd);
   const p = participation({ projectRoot, stateDir: dirname(ctx.setupDir), env: ctx.env });
@@ -98,7 +99,8 @@ export async function statusText(ctx: SetupContext, projectRoot: string): Promis
   const trusted = codexTrusts(ctx, projectRoot);
   const trust = codex ? await currentCodexTrust(ctx, codexSpec(ctx)) : 0;
   const pluginOn = codex ? codexPluginEnabled(ctx) : false;
-  lines.push(`Codex: ${codex ? `installed ${codex.at} (${ctx.codexHome})` : 'not installed'}`);
+  lines.push(`Codex: ${codex ? `installed ${codex.at} (${ctx.codexHome})` : interrupted ?? 'not installed'}`);
+  if (!codex && interrupted) lines.push('  Delivery Mode: not verified here until that install finishes or is undone');
   let codexInactive: string | undefined;
   let probe: { seen: boolean; detail: string } | null = null;
   if (codex) {
@@ -124,6 +126,7 @@ export async function statusText(ctx: SetupContext, projectRoot: string): Promis
       participation: p,
       killSwitch: killSwitchOn(ctx.env),
       experiments,
+      interruptedInstall: interrupted,
       codex: codex
         ? {
             installed: codex.at,
