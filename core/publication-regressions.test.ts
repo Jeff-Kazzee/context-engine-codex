@@ -90,7 +90,7 @@ test('warm reopen avoids historical payload reads; changed budget and invalid ca
       if (path === log) fullReads++;
       return (nativeRead as any)(path, ...args);
     }) as typeof fs.readFileSync;
-    fs.readSync=((fd:number,...args:any[])=>{if(fs.realpathSync('/proc/self/fd/'+fd)===log && args[0]?.length===65536)historyReads++;return (nativeChunk as any)(fd,...args);}) as typeof fs.readSync;
+    fs.readSync=((fd:number,...args:any[])=>{if(fs.readlinkSync('/proc/self/fd/'+fd)===log && args[0]?.length===65536)historyReads++;return (nativeChunk as any)(fd,...args);}) as typeof fs.readSync;
     syncBuiltinESMExports();
     for (let i = 0; i < 8; i++) {
       const r = openSession(opts); assert.equal(r.status, 'open');

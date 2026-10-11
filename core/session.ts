@@ -26,11 +26,13 @@ import {
   assertWorkingContextDir,
   removeTemps,
   removeDirectoryEntries,
+  replaceWorkingContext,
   resolveStateRoot,
   sessionFrameKey,
   sha,
   truncateTornTail,
   type Layout,
+  type WorkingContextRead,
   type LogRange,
 } from './store.ts';
 import { countHeaders, parseTurns, renderTurns, type Turn } from './turns.ts';
@@ -332,6 +334,7 @@ class Core {
   private closed = false;
   private unloggedCommit: { head: Head; text: string } | undefined;
   private appendUncertain=false;
+  private materializationFailed = false;
   private recoveryReceiptHeads: Array<{rev:number;sha:string}> = [];
   /** The operation index as of this call's lookup, extended by the row the call appends. */
   private operationIndex: OperationLookup | undefined;
@@ -383,6 +386,7 @@ class Core {
     this.assertOpen();
     this.confirmReturnedReceipts();
     if(repair&&this.appendUncertain)throw new Error('Event Log append may have persisted; close and reopen this session before retrying');
+    if (repair && this.materializationFailed) throw new Error('Working Context publication failed; close and reopen this session to recover its preserved predecessor before retrying');
     if (repair && this.unloggedCommit) {
       const { head, text } = this.unloggedCommit;
       const published = this.head();
@@ -430,7 +434,7 @@ class Core {
   }
 
   private saveRecoveryCheckpoint(): void {
-    if(this.appendUncertain)return;
+    if(this.appendUncertain || this.materializationFailed)return;
     try {
       const head = this.head();
       const log = this.checkpointLog();
@@ -556,11 +560,55 @@ class Core {
     return head;
   }
 
+  /**
+   * Writes committed text over the Working Context. A file that is neither the parent this revision
+   * was built on nor the new text holds an edit made since the last sync, or while the adapter was
+   * down. It is not committed over the append. It is kept in the Event Log with a restore receipt.
+   * replaceWorkingContext() says which edits can still be overwritten unseen.
+   */
   private materialize(head: Head, text: string): void {
     crashPoint('before-wc');
-    this.writeWorkingContext(text);
-    head.materialized = true;
-    atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
+    const kept = new Set<string>();
+    const bound = Math.min(SNAPSHOT_MAX_BYTES, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size));
+    try {
+      replaceWorkingContext(this.l.workingContext, text, bound, (read) => this.keepStaleEdit(head, text.length, read, kept));
+      head.materialized = true;
+      atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
+    } catch (error) {
+      this.materializationFailed = true;
+      throw error;
+    }
+  }
+
+  /** Keeps one stale edit. True when it appended a row, which gave other edits time to land. */
+  private keepStaleEdit(head: Head, chars: number, read: WorkingContextRead, kept: Set<string>): boolean {
+    if (read === undefined) return false;
+    const current = Buffer.isBuffer(read) ? decode(read) : null;
+    if (current !== null && ((head.parent === null && !current.trim()) || [head.parent, head.sha].includes(sha(current)))) return false;
+    // Logged as sync() logs an unusable file: the text, the raw bytes, or nothing when it was not read.
+    const rejected: Record<string, unknown> = current !== null ? { rejected: current }
+      : Buffer.isBuffer(read) ? { rejectedBase64: read.toString('base64') }
+      : { rejected: null, ...(read === 'too-large' ? { oversized: true } : {}) };
+    const key = JSON.stringify(rejected);
+    if (kept.has(key)) return false;
+    kept.add(key);
+    // A retry after a crash between this append and the rename finds the edit already kept.
+    let last: Record<string, unknown> | undefined;
+    for (const entry of readLog(this.l.events)) if (entry.type === 'restored' && entry.rev === head.rev) last = entry;
+    const appended = !last || ['rejected', 'rejectedBase64', 'oversized'].some((k) => last[k] !== rejected[k]);
+    if (appended) {
+      try { appendLog(this.l.events, { type: 'restored', rev: head.rev, reason: 'unmaterialized-append', ...rejected }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'CE_LOG_APPEND_AMBIGUOUS') this.appendUncertain = true; throw error; }
+    }
+    const what = Buffer.isBuffer(read)
+      ? 'The intervening edit is kept in the Event Log; read the restored file before editing it again.'
+      : 'The intervening file was oversized or linked, so its bytes were not read or copied, and its rejection is recorded in the Event Log. Read the restored file before editing it again.';
+    const receipt: Receipt = { kind: 'restored', revision: head.rev, reason: 'unmaterialized-append', chars, approxTokens: approxTokens(chars), text: `Context Engine: revision ${head.rev} was restored because committed runner events had not yet reached the Working Context. ${what} ${sizeReadout(chars)}` };
+    // The restore describes the newest revision, so it leads. Earlier notices keep their text first.
+    // One notice covers every edit kept for the same revision.
+    const pending = this.pendingReceipt;
+    if (pending?.kind !== 'restored' || pending.revision !== head.rev) this.pendingReceipt = pending ? { ...receipt, text: `${pending.text}\n${receipt.text}` } : receipt;
+    return appended;
   }
 
   private writeWorkingContext(text: string): void {
@@ -648,7 +696,7 @@ class Core {
       const recorded = this.findOperation(operation.id);
       if (recorded) {
         if (recorded.sha !== operation.sha) throw new Error('record operation identifier was used for different input');
-        return this.result(this.apply(), synced.receipt);
+        return this.result(this.apply(), this.pendingReceipt);
       }
     }
     if (events.length === 0) return synced;
@@ -673,8 +721,9 @@ class Core {
     crashPoint('after-log');
     if (operation) this.indexOperation(operation, row);
     const head = this.apply();
+    // The sync receipt, plus any edit that raced the append (see materialize).
     const r = this.result(head);
-    if (synced.receipt) r.receipt = synced.receipt;
+    if (this.pendingReceipt) r.receipt = this.pendingReceipt;
     return r;
   }
 
@@ -1019,18 +1068,11 @@ class Core {
       const read = readWorkingContextFile(this.l.workingContext, Math.min(SNAPSHOT_MAX_BYTES, Math.max(this.hardLimit * 4, statSync(join(this.l.revisions, `${head.rev}.md`)).size)));
       const current = read && typeof read !== 'string' ? decode(read) : null;
       const currentSha = current === null ? null : sha(current);
-      if (currentSha !== head.sha) {
-        const committed = this.snapshot(head.rev);
-        if (current !== null && current.trim() && currentSha !== head.parent) {
-          appendLog(this.l.events, { type: 'restored', rev: head.rev, reason: 'unmaterialized-append', rejected: current });
-          interruptedReceipt = { kind: 'restored', revision: head.rev, reason: 'unmaterialized-append', chars: committed.length, approxTokens: approxTokens(committed.length), text: `Context Engine: revision ${head.rev} was restored because committed runner events had not yet reached the Working Context. The intervening edit is kept in the Event Log; read the restored file before editing it again. ${sizeReadout(committed.length)}` };
-        }
-        this.materialize(head, committed);
-        rematerialized = true;
-      } else {
-        head.materialized = true;
-        atomicWrite(this.l.head, JSON.stringify(head), 'head-tmp');
-      }
+      // Even an already-current file can have a preserved predecessor from a
+      // failed post-rename log append. Materialization recovers that artifact.
+      this.materialize(head, this.snapshot(head.rev));
+      interruptedReceipt = this.pendingReceipt ?? repairedReceipt;
+      rematerialized = currentSha !== head.sha || interruptedReceipt !== undefined;
     }
 
     if (repairedReceipt && interruptedReceipt && !interruptedReceipt.text.includes(repairedReceipt.text)) interruptedReceipt = {...interruptedReceipt,text:`${repairedReceipt.text}\n${interruptedReceipt.text}`};
