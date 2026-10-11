@@ -16,6 +16,7 @@ import {acquireLock,holderFor,releaseLock} from './lock.ts';
 const indexShards=(state:string)=>fs.readdirSync(state).filter(name=>/^operations-[0-9a-f]{2}\.jsonl$/.test(name)).sort();
 /** The committed index lines. Bytes past a shard's committed length are not part of the index. */
 const indexedText=(state:string)=>Object.entries(JSON.parse(fs.readFileSync(join(state,'operations.json'),'utf8')).shards as Record<string,{bytes:number}>)
+  .filter(([,shard])=>shard.bytes>0)
   .map(([name,shard])=>fs.readFileSync(join(state,name)).subarray(0,shard.bytes).toString('utf8')).join('');
 const shardName=(id:string)=>`operations-${(parseInt(sha(id).slice(0,2),16)>>2).toString(16).padStart(2,'0')}.jsonl`;
 /** Appends a line to an ID's shard and commits it in the head, as the index itself would. */
@@ -338,4 +339,45 @@ test('wave31: an index entry whose row a storage revert removed is never claimed
   assert.equal(fs.statSync(p.events).size,covered);
   recordOnce(options,lost,operationId);
   assert.equal(rowsWith(p.events,'LOST_ROW'),1);
+});
+
+test('wave31: omitted shard metadata cannot turn an exact retry into a new operation',()=>{
+  const options={...fixture(),sessionId:'W31-MISSING-SHARD',runner:'test',hardLimit:1_000_000};
+  const p=layout(options.projectRoot,options.sessionId,options.stateDir);
+  const first='00000000-0000-4000-8000-000000008101',second='00000000-0000-4000-8000-000000008102';
+  recordOnce(options,'MISSING_SHARD_ONCE',first);
+  recordOnce(options,'LATER_RECORD',second);
+  const path=join(p.stateDir,'operations.json'),head=JSON.parse(fs.readFileSync(path,'utf8'));
+  assert.ok(head.shards[shardName(first)]);
+  delete head.shards[shardName(first)];
+  fs.writeFileSync(path,JSON.stringify(head));
+  recordOnce(options,'MISSING_SHARD_ONCE',first);
+  assert.equal(rowsWith(p.events,'MISSING_SHARD_ONCE'),1);
+});
+
+test('wave31: retries persist tail coverage when no identified rows were appended',t=>{
+  const options={...fixture(),sessionId:'W31-TAIL-COVERAGE',runner:'test',hardLimit:1_000_000};
+  const opened=openSession(options);assert.equal(opened.status,'open');
+  const session=opened.session,operationId='00000000-0000-4000-8000-000000008201';
+  const event={role:'tool',text:'TAIL_RETRY_ONCE'},log=join(session.stateDir,'events.jsonl');
+  try {
+    session.record([event],{operationId});
+    session.record([{role:'tool',text:'SECOND_IDENTIFIED'}],{operationId:'00000000-0000-4000-8000-000000008202'});
+    for(let i=0;i<12;i++)appendLog(log,{type:'recall',query:'history',note:'x'.repeat(8192)});
+    const through=fs.statSync(log).size;
+    session.record([event],{operationId});
+    const head=JSON.parse(fs.readFileSync(join(session.stateDir,'operations.json'),'utf8'));
+    assert.equal(head.through,through,'the completed tail scan is durable even without a new index entry');
+    const native=fs.readSync;let logBytes=0;
+    const spy=t.mock.method(fs,'readSync',(...args:unknown[])=>{
+      const n:number=Reflect.apply(native,fs,args),fd=args[0];
+      if(typeof fd==='number'&&fs.realpathSync(`/proc/self/fd/${fd}`)===log)logBytes+=n;
+      return n;
+    });
+    syncBuiltinESMExports();
+    try{session.record([event],{operationId});}
+    finally{spy.mock.restore();syncBuiltinESMExports();}
+    assert.ok(logBytes<=64*1024,`the next retry read ${logBytes} bytes after the tail was already covered`);
+    assert.equal(rowsWith(log,'TAIL_RETRY_ONCE'),1);
+  } finally {session.close();}
 });

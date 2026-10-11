@@ -35,7 +35,7 @@
     "core/renewed-regressions.test.ts": "8d207b1cab82b936226cbc6584ee9cc179d9a55e9afb1dfc701b803677e000c5",
     "core/review-regressions.test.ts": "8c56a053a0353838ee481c388bf2dbf66f2ba7e6dd5ae8f19877e36bd46f988a",
     "core/session.test.ts": "24ab14e448e2f66c9e6e0aa3f9d28516abfd035c103222878cd8dd4a446680d0",
-    "core/session.ts": "58d19d1eae1858a4e57c26d878f30fab17bcfad1f27bbc9c49afdb9deacf01f5",
+    "core/session.ts": "0f6fae1f8694da1cef64aab841a2ab013fcdc824ab4ee4c0c9f57c4ddc81595f",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
     "core/store.ts": "f40922a027198b4cc1dbc68e89aa929c031e8283e22fb3c1002e87777162f3fc",
@@ -48,7 +48,7 @@
     "core/wave16-regressions.test.ts": "a50761ac981cd8f9e722b6953d977048c62b7cad5c3b6322a66335225cfdaabd",
     "core/wave20-regressions.test.ts": "179f9523b48a7e240dc73d8a8a23c2659670bc63de7d642796eb6d0fa9276a47",
     "core/wave29-regressions.test.ts": "c6c1ee9d5b04209e29efc9904a42fb34c147b2865174800886cf8e1cfde2aed8",
-    "core/wave31-regressions.test.ts": "aa56800ec7556213e6cd05d7a4df030c02e2d1f2a2da459ad9321128573aba31",
+    "core/wave31-regressions.test.ts": "6bae9223d53b1f0cf4800c877a588f6f18390b2eaabacd923842f1a8355e1ca6",
     "core/wave51-regressions.test.ts": "dd90041b97d2e6e94ed49100c26877ff6a4b29f4fcda6b497a6dd03518d1183a",
     "core/wave52-cli-bound.test.ts": "0939f1752fc7d62907bb6cbfe81c2a817b34b0fd37a906b6ab1847c33c74cb6f",
     "core/wave52-head-integrity.test.ts": "f128395a63b1de9d3b62a0aad5c96fc31718b30a0d403f2a03525d225adf78f1",
@@ -125,7 +125,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "42056c0bd42bc8734f1bbd9c8a6714d28f59a7ab",
+  "corePatchCommit": "6995afafa5aeaef84fd60d191c0d7b7b6305b93c",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",

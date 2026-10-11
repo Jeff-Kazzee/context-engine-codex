@@ -184,6 +184,8 @@ const OPERATION_SHARD_MAX_BYTES = 4 * 1024 * 1024;
 /** Uncommitted bytes a shard may carry after an interrupted append. More forces a rebuild. */
 const OPERATION_SHARD_SLACK_BYTES = 64 * 1024;
 const digestBytes = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
+const OPERATION_SHARDS = Array.from({ length: 64 }, (_, n) => `operations-${n.toString(16).padStart(2, '0')}.jsonl`);
+const EMPTY_SHARD_SHA = digestBytes(Buffer.alloc(0));
 
 function operationShard(id: string): string {
   return `operations-${(parseInt(sha(id).slice(0, 2), 16) >> 2).toString(16).padStart(2, '0')}.jsonl`;
@@ -701,9 +703,12 @@ class Core {
     if (!Number.isSafeInteger(head.through) || (head.through as number) < 0 || (head.through as number) > log.size) return undefined;
     const shards = head.shards as Record<string, { bytes?: unknown; sha?: unknown }> | undefined;
     if (!shards || typeof shards !== 'object' || Array.isArray(shards)) return undefined;
+    // Every bucket has a commitment, so a missing entry cannot masquerade as an empty shard.
+    if (Object.keys(shards).length !== OPERATION_SHARDS.length || OPERATION_SHARDS.some(name => !Object.hasOwn(shards, name))) return undefined;
     for (const [name, state] of Object.entries(shards)) {
-      if (!OPERATION_SHARD.test(name) || !state || !Number.isSafeInteger(state.bytes) || (state.bytes as number) <= 0
+      if (!OPERATION_SHARD.test(name) || !state || !Number.isSafeInteger(state.bytes) || (state.bytes as number) < 0
           || (state.bytes as number) > OPERATION_SHARD_MAX_BYTES || typeof state.sha !== 'string' || !/^[0-9a-f]{64}$/.test(state.sha)) return undefined;
+      if (state.bytes === 0 && state.sha !== EMPTY_SHARD_SHA) return undefined;
     }
     return { dev: log.dev, ino: log.ino, through: head.through as number, shards: shards as Record<string, ShardState> };
   }
@@ -711,7 +716,8 @@ class Core {
   /** A shard's committed bytes, or undefined unless they match the head's length and digest. */
   private readOperationShard(index: OperationIndex, name: string): Buffer | undefined {
     const state = index.shards[name];
-    if (!state) return Buffer.alloc(0);
+    if (!state) return undefined;
+    if (state.bytes === 0) return Buffer.alloc(0);
     const file = readBytes(join(this.l.stateDir, name), state.bytes + OPERATION_SHARD_SLACK_BYTES);
     if (!file || file.length < state.bytes) return undefined;
     // An omitted, replaced or reordered entry changes the digest, so a miss is never trusted then.
@@ -763,8 +769,10 @@ class Core {
           const grown = this.appendOperationShard(index, target, base, lines);
           if (target === name) committed = grown;
         }
-        index.through = through;
-        if (pending.size) this.writeOperationHead(index);
+        if (through !== index.through) {
+          index.through = through;
+          this.writeOperationHead(index);
+        }
       }
       return { hit, index, shard: { name, committed } };
     } catch { return undefined; }
@@ -807,7 +815,8 @@ class Core {
       // The head goes first and returns last, so an interrupted rebuild leaves no index to trust.
       removeDirectoryEntries(this.l.stateDir, name => name === OPERATION_HEAD || (OPERATION_SHARD.test(name) && !shards.has(name)));
       if (!kept) return { hit };
-      const index: OperationIndex = { dev: log.dev, ino: log.ino, through, shards: {} };
+      const index: OperationIndex = { dev: log.dev, ino: log.ino, through,
+        shards: Object.fromEntries(OPERATION_SHARDS.map(name => [name, { bytes: 0, sha: EMPTY_SHARD_SHA }])) };
       const contents = new Map<string, Buffer>();
       for (const [name, lines] of shards) {
         const bytes = Buffer.from(lines.join(''));
