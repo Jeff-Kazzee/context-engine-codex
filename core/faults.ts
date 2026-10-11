@@ -14,6 +14,7 @@ export type CrashPoint =
   | 'wc-tmp' // Working Context temp file written, not renamed
   | 'lock-tmp' // lock temp file written, not renamed
   | 'recovery-checkpoint-tmp' // optional recovery cache publication
+  | 'operation-index-tmp' // rebuilt operation index temp file written, not renamed
   | 'frame-key-tmp' // frame-key temp file written, not published
   | 'ignore-tmp'; // managed .gitignore repair written, not renamed
 
@@ -37,7 +38,8 @@ export function crashPoint(point: CrashPoint): void {
 export type LockStep =
   | 'stale-seen' // a dead (or unreadable) holder was observed; nothing done about it yet
   | 'stale-removing' // about to remove what is at the lock path
-  | 'live-wait'; // a live holder was observed; about to wait for it
+  | 'live-wait' // a live holder was observed; about to wait for it
+  | 'release-checked'; // the lock record matched the releasing holder; about to remove it
 
 let lockHook: ((step: LockStep, path: string) => void) | null = null;
 
