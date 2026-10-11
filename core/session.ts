@@ -405,6 +405,7 @@ class Core {
     return result;
   }
 
+  // Version 4 invalidates checkpoints from the weaker sequence validator.
   // Cache only fully applied recovery state. It is an optimization, never the
   // source of truth: changed log identity/size/timestamps, HEAD or budget,
   // missing/corrupt cache and interrupted publication all take the full rebuild.
@@ -427,7 +428,7 @@ class Core {
       const log = this.checkpointLog();
       const m = c.memory;
       const nonnegative = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-      if (c.version !== 3 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readHead(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
+      if (c.version !== 4 || !log || JSON.stringify(c.log) !== JSON.stringify(log) || c.head !== sha(readHead(this.l.head)?.toString('utf8') ?? '') || c.budget !== this.budgetTokens || !nonnegative(c.lastSeq) || c.lastSeq !== (head?.through ?? 0) || !m || ![0,25,50,75].includes(m.announced) || !Array.isArray(m.growth) || m.growth.length > 3 || !m.growth.every(nonnegative) || !nonnegative(m.lastTokens) || !(m.loggedBudget === null || (nonnegative(m.loggedBudget) && m.loggedBudget > 0))) return false;
       this.lastSeq = c.lastSeq;
       this.memory = { announced: m.announced, growth: [...m.growth], lastTokens: m.lastTokens, loggedBudget: m.loggedBudget };
       return true;
@@ -440,7 +441,7 @@ class Core {
       const head = this.head();
       const log = this.checkpointLog();
       if (!log || this.unloggedCommit || this.recoveryReceiptHeads.length || this.returnedReceiptHeads.length || this.unapplied.length || this.lastSeq !== (head?.through ?? 0)) return;
-      const payload = { version: 3, log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
+      const payload = { version: 4, log, head: sha(readHead(this.l.head)?.toString('utf8') ?? ''), budget: this.budgetTokens, lastSeq: this.lastSeq, memory: this.memory };
       atomicWrite(join(this.l.stateDir, 'recovery.json'), JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) }), 'recovery-checkpoint-tmp');
     } catch { /* A cache failure never changes the session result; next open rebuilds. */ }
   }
@@ -1024,7 +1025,10 @@ class Core {
     for (const entry of readLog(this.l.events)) {
       if (entry.type === 'runner-events') {
         const events = entry.events as Pending[];
-        if (events.length) lastSequence = events.at(-1)!.seq;
+        for (const pending of events) {
+          if (pending.seq !== lastSequence + 1) throw new Error('missing covered runner-event sequence evidence; refusing recovery');
+          lastSequence = pending.seq;
+        }
       }
       if (!head) continue;
       if (entry.type === 'revision-prepared' && entry.rev === head.rev) {
@@ -1045,9 +1049,10 @@ class Core {
         }
       }
     }
+    if (head && lastSequence < head.through) throw new Error('missing covered runner-event sequence evidence at HEAD; refusing recovery');
     if (head && ((head.prepared !== undefined && !prepared) || (head.prepared === undefined && hasPreparation))) throw new Error('HEAD is missing its independently prepared sequence boundary; refusing recovery');
     // A legacy HEAD with missing accounting has no independent sequence witness.
-    // Preserve its historical recovery behavior until a normal new commit occurs.
+    // Preserve missing-accounting compatibility only with whole runner-event evidence.
   }
 
   recover(): void {
