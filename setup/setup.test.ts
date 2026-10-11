@@ -308,7 +308,7 @@ test('offline default-off isolation: installing codex does not activate an unsel
 });
 
 const realCodexVersion = process.env.CONTEXT_ENGINE_REAL_CODEX_TESTS === '1' ? spawnSync('codex', ['--version'], { encoding: 'utf8', timeout: 5000 }) : null;
-const realCodex = realCodexVersion?.status === 0 && /\bcodex-cli 0\.160\.0\b/.test(realCodexVersion.stdout);
+const realCodex = realCodexVersion?.status === 0 && /\bcodex-cli 0\.161\.0\b/.test(realCodexVersion.stdout);
 
 /** `codex debug prompt-input` in `cwd` (offline), without the per-call ids and timestamps. */
 function realPromptInput(w: ReturnType<typeof world>, cwd: string): unknown {
@@ -321,7 +321,7 @@ function realPromptInput(w: ReturnType<typeof world>, cwd: string): unknown {
 
 nodeTest(
   'real codex (scratch CODEX_HOME): a project nobody enabled gets the same prompt input with the plugin installed as without, while another project is enabled; uninstall restores config.toml byte for byte',
-  { skip: process.env.CONTEXT_ENGINE_REAL_CODEX_TESTS !== '1' ? 'Real Codex integration not requested: requires an authorized supported-host scratch trial' : realCodex ? false : 'supported codex-cli 0.160.0 is not available on PATH' },
+  { skip: process.env.CONTEXT_ENGINE_REAL_CODEX_TESTS !== '1' ? 'Real Codex integration not requested: requires an authorized supported-host scratch trial' : realCodex ? false : 'supported codex-cli 0.161.0 is not available on PATH' },
   () => {
     const w = world();
     const enabled = tempDir('enabled-project');

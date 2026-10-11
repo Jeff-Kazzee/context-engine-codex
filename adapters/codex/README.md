@@ -1,10 +1,10 @@
 # Codex adapter contract
 
-Start with the [agent setup prompt and workflow](../../README.md). Baseline: codex-cli 0.160.0, Node 24+, Linux `/proc`.
+Start with the [agent setup prompt and workflow](../../README.md). Baseline: codex-cli 0.161.0, Node 24+, Linux `/proc`.
 
 The plugin is hooks-only. Install with `context-engine-codex install`; review its five hooks through `/hooks`, or explicitly approve `install --trust-hooks`. Enabling a project writes marked and backed-up `developer_instructions` and `[features.token_budget]` blocks only to its `.codex/config.toml`. Codex must trust the project; an existing incompatible block is left alone and reported.
 
-**Full Replacement at agent-initiated resets (any model step); history grows between resets.** `new_context` resets to the initial instructions; then the agent reads all Working Context parts. The PreToolUse gate refuses an unusable or over-budget file. A token-limit reset is **Compaction-only (Codex token-limit reset; Working Context read back by the agent)**; manual `/compact` is **Compaction-only (Codex manual compaction; Working Context read back by the agent)**. Its backstop does not apply the size gate, since refusing would abort the user's turn.
+**Full Replacement at agent-initiated resets (any model step), with history growing between resets.** `new_context` resets to the initial instructions. The agent then reads all Working Context parts. The PreToolUse gate refuses an unusable or over-budget file. A token-limit reset is **Compaction-only (Codex token-limit reset, Working Context read back by the agent)**. Manual `/compact` is **Compaction-only (Codex manual compaction, Working Context read back by the agent)**. Its backstop does not apply the size gate, since refusing would abort the user's turn. If its sync fails but the file remains readable, it still attempts the reset marker. An edit committed by that marker's record remains in the Event Log for the next hook to notice.
 
 `context-engine-codex status` checks settings/trust/hooks and the offline `codex debug prompt-input`; absent guidance means **inactive here**, not replacement. UnderDevelopment flags may change. Nothing switches paths automatically. Interactive TUI behavior and real hook loading after persistent installation remain unverified.
 
@@ -22,12 +22,56 @@ Prompt retries retain a durable operation ID until recording and the pending che
 
 If an older pending request has no operation ID and no successful-record marker, its committed status is ambiguous. Preserve its session data and disable Context Engine before continuing in the native conversation. Do not delete the marker to force a retry. These offline controls do not prove delivery to a model.
 
-Every completed tool is checked for a Working Context change before its output is recorded, including tools with unfamiliar path fields. A private notice marker preserves an accepted edit across a failed hook output write. An ordinary tool hook can retry the notice. Pending notice work blocks a new prompt or reset before it can hide the edited revision. A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write.
+Each completed tool hook syncs the Working Context before it records the tool's output. A tool that read or wrote the managed file is only synced, so it never echoes the file into itself. The tool's own input decides that:
+
+- a path field, such as `file_path` or an MCP tool's `target_path`, that names a managed file
+- a plain `cat`, `head`, `tail`, truncate or `context-engine read` command
+- a shell command or patch that names `.context-engine` while its sync sees the file change
+
+The hook records every other tool's output, even when its sync commits an edit that a parallel tool made. Codex 0.161.0 runs tools that support parallel calls, such as shell commands, at the same time. Each tool's hook runs when that tool finishes. A shell command that names `.context-engine` while its hook sees a file change is treated as the editor. A script that edits the file without naming it has its command and output recorded like any other tool. If a parallel hook commits a shell edit first, the later edit hook can record its command text too. An append command that contains the appended text can therefore duplicate that text in the Working Context.
+
+Each accepted model edit owes a read notice until the notice reaches hook output. After its sync, a hook finds a notice owed when one is already pending, or HEAD or the Event Log holds a model edit above the last notified revision. It then writes a private pending marker before any call that records past the edit. A prompt syncs before it records for the same reason.
+
+A hook reads the Event Log only past the byte offset that the notice state keeps, and moves that offset past its own appends when it settles. A state from an older hook version without an offset can scan the existing log twice during its first hook. Later hooks return to tail reads. An edit observed by sync becomes a committed revision with a read notice. An in-place edit that lands after sync while the record materializes is instead retained in the Event Log with a restore receipt. It is not the current committed edit. A kill after the Working Context rename can lose that restore receipt while retaining the edit. An editor that renames its own file over the Working Context in the final window can still be overwritten unseen, as the top-level README documents. For committed edits, the read notice survives a failed hook output write, a failed core call and a hook killed between steps, with two exceptions:
+
+- A Stop killed after its record call leaves its intent, which refuses the session as described below. The edit stays owed in the log.
+- A hook killed after it marks its notice delivered, and before it exits, loses the notice. Codex applies none of a killed hook's output, and no hook can see whether Codex applied it.
+
+A Stop cannot deliver a notice. It records its reply and leaves an owed notice pending, and the next prompt or tool hook delivers it. Until then a pending notice refuses a reset and a compaction: the gate denies `new_context`, and PreCompact stops the compaction, which aborts the user's turn. A notice owed only through a model edit at HEAD or in the log refuses neither:
+
+- The gate allows the reset. After it, the agent reads the whole Working Context back, which holds the edit. The `new_context` tool's own PostToolUse hook also carries the notice, but Codex runs that hook before the reset, so that notice lands in history the reset discards.
+- PreCompact writes the notice as pending before its marker and lets the compaction proceed. The next prompt or tool hook delivers it.
+
+The notice names a revision that still holds the edit:
+
+- A tool hook that touched the managed file names the revision its sync committed.
+- An ordinary tool hook records its own output and names the revision that record produced. Until a read-back hook returns the whole current file in the same turn, each ordinary record refreshes that notice to its new revision. This covers parallel tools whose hooks run one after another before the model sees their outputs. The hook recognizes the complete file in raw text or an `output` or `stdout` field. Partial, paged, or transformed results remain unacknowledged and can produce extra notices in that turn.
+- A prompt names the revision it committed. An edit made between turns, which no tool hook saw, gets its notice this way.
+
+A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write.
+
+`notice-sweep.test.ts` checks these rules. Its faults are kills at each hook step, a closed stdout, sync calls that fail with and without committing, and an edit written while a record call runs. It runs parallel tools' hooks one after another and observes their combined outputs, as Codex does when the tools finish at different times. Every fault in a cell must fire, and `SWEEP_PRUNED=1` checks that no pruned fault fires. After a fault the sweep checks the notice and the tool outputs before it sends any event twice. It then sends a faulted tool event again to show the documented way to clear that debt, which Codex does not do on its own. `notice-review.test.ts` checks staggered notice read-back, bounded Event Log reads, and a single compaction refusal after a failed final check.
 
 Completed-tool retries use the host's `tool_use_id`, plus `turn_id` when present, as a stable operation identity. The pending intent and core recording share that identity, so a retry after a committed child loses its reply does not append the tool output twice. The intent stores a SHA-256 digest of the host IDs, so its size does not depend on their length. Distinct tool IDs remain distinct even when their output is identical.
 
 If an earlier pending marker has no verifiable host identity, an identified event cannot be proved distinct from that debt. This includes markers left by older hook versions. The adapter refuses before recording or syncing the event. It preserves the earlier marker, Event Log, HEAD and Working Context, and keeps the refused event's own pending intent. That intent blocks prompts and resets even after the earlier marker clears, until the exact retry records the event once. Preserve the session data and continue with Context Engine disabled in the native conversation.
 
-Stop events have no unique completion ID in Codex 0.161.0. The host can emit multiple Stops during one turn, so `turn_id` alone cannot identify a retry. Successful Stops record independently. After an ambiguous failed Stop recording, Context Engine preserves the pending intent and refuses an unidentified retry. Preserve the session data and continue with Context Engine disabled in the native conversation. Do not delete the marker to force a retry.
+Stop events have no unique completion ID in Codex 0.161.0. The host can emit multiple Stops during one turn, so `turn_id` alone cannot identify a retry. Successful Stops record independently. After a Stop publishes its intent, a refusal or failed recording preserves that intent and refuses an unidentified retry. This includes a Stop refused before recording because another completion acquired debt while it waited. Its unrecorded reply remains debt after the other marker clears, so prompts and resets stay refused. Preserve the session data and continue with Context Engine disabled in the native conversation. Do not delete the marker to force a retry.
+
+Every hook runs under the 30-second `timeout` that `hooks.json` sets. At that limit, Codex 0.161.0 kills the hook's process group, including any core CLI call in flight. It records the run as failed, so the hook's output has no effect ([command runner](https://github.com/openai/codex/blob/rust-v0.161.0/codex-rs/hooks/src/engine/command_runner.rs)). The hook's own timeouts do not keep every event under that limit. Before any output write, the worst cases are:
+
+- Stop: a 10-second lease wait and a 15-second record call, 25 s.
+- Completed tool: a 10-second lease wait, a 7.5-second sync and a 7.5-second record call, 25 s.
+- Prompt: a 1-second lease wait, a 5-second sync and a 15-second record call, 21 s.
+- Reset gate: a 1-second lease wait and one 20-second sync, 21 s.
+- PreCompact: a 1-second lease wait and up to three 5-second core calls, 16 s.
+
+Output adds time. The hook retries a write that would block for up to 5 s. If that write fails, the hook writes a refusal under the same bound. Counting one blocked write, the Stop and completed-tool worst cases total 30 s. Process start, module imports and file I/O, which no figure here counts, push them past the limit. A prompt or the reset gate can exceed it when a refusal follows a failed write.
+
+A test holds the lease for 9.5 s and stalls the core to time the Stop case. The completed-tool case needs its first call to succeed just before its own timeout. A shared CI runner cannot time that reliably, so no test covers it.
+
+A Stop or a completed tool killed at the limit leaves its completion intent marker, as the REC-014 kill test shows for a completed tool. The marker refuses every later prompt, Stop, reset and compaction. After a killed completed tool, other tool events still record. After a killed Stop, Context Engine refuses them too.
+
+Only the same tool event, sent again with the same `tool_use_id` and `turn_id`, records once and clears a completed-tool marker. Codex 0.161.0 does not rerun a failed hook, and a Stop has no identity to retry. Either way, the session stays refused until you disable Context Engine for the project.
 
 Managed-file classification resolves tool paths against the project root. It compares each path as given and in canonical form, so a cwd reached through a symlink still recognizes the Working Context by its canonical path or by the relative path that the hook's notices name. It also resolves each path the way the filesystem does, so a symlink followed by `..` is classified by the directory it actually reaches. A path outside that root or under another directory's `.context-engine` remains ordinary tool output. Setup can remove its final managed instruction block when the file has no trailing newline.

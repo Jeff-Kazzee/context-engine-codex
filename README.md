@@ -23,7 +23,7 @@ independent source review and owner authorization before installation. Do not
 infer approval from a branch name or reuse evidence for a different commit. Read the CURRENT README.md, AGENTS.md, PROVENANCE.md, SOURCE.json and
 adapters/codex/README.md before executing anything. Verify the actual OS,
 Node version, codex version and available plugin/mod commands against those
-docs and their CLI help. The inherited compatibility baseline is codex-cli 0.160.0 (token_budget under development);
+docs and their CLI help. The inherited compatibility baseline is codex-cli 0.161.0 (token_budget under development);
 do not silently install/downgrade a runner or assume another version works.
 If access, licensing or runtime support is blocked, stop and report the reason.
 Explain config changes and hook trust, then use normal approval controls.
@@ -58,7 +58,7 @@ The shared core separates host operations through `core/platform-contract.ts`. I
 Shared core 0.1.5 uses the full SHA-256 of the canonical project path for private state and participation keys. Legacy 0.1.0 directories and backups are preserved, but are not automatically migrated or merged. Uninstall an old installation using its original checkout/CLI first; retain its backups and session data. After coordinated runner updates, re-enable a fresh disposable project and start a fresh session. Do not mix 0.1.0 with 0.1.5 under a shared `CONTEXT_ENGINE_STATE_DIR`; use a separate, consistently configured state root for a trial. Existing legacy data remains available through the old checkout with its old state root. Valid full-digest keys from 0.1.1 remain unchanged in 0.1.2, 0.1.3 and 0.1.5.
 
 - Linux with `/proc` mounted and Node **24 or newer** is the supported stateful target. Native Windows and macOS have no verified host backend. Stateful storage, locking, install and uninstall refuse with `CE_UNSUPPORTED_PLATFORM` before mutation. Use the original supported Linux environment and checkout to remove a prior installation. Do not relax confinement checks or sandbox permissions.
-- Inherited compatibility baseline: **codex-cli 0.160.0 (token_budget under development)**. These are observed baseline versions, not a guarantee that every machine or newer version works. Inspect `codex --version`, `codex --help` and its plugin help first.
+- Inherited compatibility baseline: **codex-cli 0.161.0 (token_budget under development)**. These are observed baseline versions, not a guarantee that every machine or newer version works. Inspect `codex --version`, `codex --help` and its plugin help first.
 - A custom `CONTEXT_ENGINE_STATE_DIR` must be an absolute path, identical in the setup shell and runner launch environment. Relative state roots are refused rather than resolved differently for each project or hook cwd.
 - Setup now requires each ledger's backup copies to remain inside that ledger's own snapshot. Older project-repair ledgers that reference sibling snapshots are refused. Before updating an existing installation, uninstall with its original checkout and preserve its backups; do not edit a refused ledger to bypass this check.
 - Use a dedicated state directory owned by your user with private permissions (`0700`). Existing shared or linked state directories are refused without changing their permissions; never point the override at `/tmp` itself or a shared mount root.

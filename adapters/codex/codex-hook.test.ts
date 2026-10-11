@@ -108,6 +108,38 @@ test('a reminder fired by a user prompt reaches the model with that prompt (epis
   assert.doesNotMatch(r.stdout, /xxxx/);
 });
 
+for (const kind of ['prompt', 'tool'] as const) for (const [tokens, tier] of [[300, 25], [550, 50], [800, 75]]) {
+  test(`a ${kind} preserves the ${tier}% reminder fired by preliminary sync`, () => {
+    const f = enabledFixture();
+    assert.equal(hook(f, prompt('START'), SMALL).status, 0);
+    writeFileSync(wcPath(f), `[[CTX_TURN 1 role=user]]\nPRIVATE_EDIT_${out(tokens!)}\n`);
+    const payload = kind === 'prompt' ? prompt('NEXT') : { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: 'ordinary.txt' }, tool_response: 'ORDINARY_OUTPUT' };
+    const r = hook(f, payload, SMALL);
+    assert.equal(r.status, 0, r.stderr);
+    const text = String(JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? '');
+    assert.equal(text.split(`passed ${tier}% of its budget`).length - 1, 1, text);
+    assert.equal(text.split('Context Engine: Working Context ~').length - 1, 1, 'one current size readout');
+    const size = Math.ceil(wc(f).length / 4).toLocaleString('en-US');
+    assert.ok(text.includes(`Working Context ~${size} tokens`), 'readout describes the final record');
+    assert.doesNotMatch(text, /PRIVATE_EDIT|xxxx|ORDINARY_OUTPUT/);
+    const later = hook(f, prompt('LATER'), SMALL);
+    assert.equal(later.status, 0, later.stderr);
+    assert.doesNotMatch(later.stdout, new RegExp(`passed ${tier}% of its budget`));
+  });
+}
+
+test('preliminary sync and the final record can each deliver a different budget tier', () => {
+  const f = enabledFixture();
+  assert.equal(hook(f, prompt('START'), SMALL).status, 0);
+  writeFileSync(wcPath(f), `[[CTX_TURN 1 role=user]]\n${out(300)}\n`);
+  const r = hook(f, prompt(out(300)), SMALL);
+  assert.equal(r.status, 0, r.stderr);
+  const text = String(JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? '');
+  for (const tier of [25, 50]) assert.equal(text.split(`passed ${tier}% of its budget`).length - 1, 1, text);
+  assert.equal(text.split('Context Engine: Working Context ~').length - 1, 1);
+  assert.ok(text.includes(`Working Context ~${Math.ceil(wc(f).length / 4)} tokens`));
+});
+
 const toolUse = (tool_name: string, tool_input: unknown, tool_response: unknown) => ({
   hook_event_name: 'PostToolUse',
   turn_id: 't1',
@@ -227,7 +259,7 @@ test('stale-refs experiment: stale citations are reported with the output of the
   assert.match(marker, /^⟦src:parser\.ts#L1@[0-9a-f]{8}⟧$/);
   hook(f, prompt('Task: refactor parser.'), on);
   writeFileSync(wcPath(f), `${wc(f)}\n[[CTX_TURN 2 role=assistant]]\na is defined at ${marker}\n`);
-  const fresh = JSON.parse(hook(f, toolUse('Bash', { command: WC_CMD }, 'file text'), on).stdout);
+  const fresh = JSON.parse(hook(f, toolUse('Bash', { command: WC_CMD }, wc(f)), on).stdout);
   assert.equal(fresh.decision, undefined, 'a fresh citation does not block the tool result');
   assert.match(fresh.hookSpecificOutput.additionalContext, /Working Context revision 2 was validated/, 'the accepted edit still gets its static notice');
   assert.equal(fresh.hookSpecificOutput.additionalContext.includes(marker), false, 'the notice contains no editable citation payload');
@@ -583,11 +615,13 @@ test('the session lock is owned by the runner process through controlled shell a
   assert.equal(status(f).revision, 2, 'both prompts were recorded by the same owner');
 });
 
-test('actual shell edit does not resurrect its removed command text or output', () => {
+test('an opaque shell edit keeps the edit and is recorded after it, since its input does not name the Working Context', () => {
   const f = enabledFixture(); hook(f, prompt('REMOVE_THIS_SENTINEL keep active task'));
   writeFileSync(wcPath(f), wc(f).replace('REMOVE_THIS_SENTINEL', 'RETAINED_SENTINEL'));
-  const r = hook(f, toolUse('Bash', { command: 'opaque-script REMOVE_THIS_SENTINEL' }, 'REMOVE_THIS_SENTINEL'));
-  assert.equal(r.status, 0, r.stderr); assert.ok(wc(f).includes('RETAINED_SENTINEL')); assert.ok(!wc(f).includes('REMOVE_THIS_SENTINEL'));
+  const r = hook(f, toolUse('Bash', { command: 'opaque-script REMOVE_THIS_SENTINEL' }, 'SCRIPT_OUTPUT'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(wc(f), /RETAINED_SENTINEL[\s\S]*opaque-script REMOVE_THIS_SENTINEL\nSCRIPT_OUTPUT/, 'the edit is kept and the tool call is recorded after it');
+  assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, new RegExp(`revision ${status(f).revision} was validated`), 'the notice names the revision the record produced');
 });
 test('prompt submission surfaces a discarded-edit restore receipt', () => {
   const f = enabledFixture(); hook(f, prompt('prior task'));
@@ -677,9 +711,12 @@ test('wave49: failed public stdout retains the accepted read notice for an ordin
   assert.equal(wc(f), edited);
   const retry = hook(f, toolUse('Read', { file_path: 'ordinary.txt' }, 'ordinary output'));
   assert.equal(retry.status, 0, retry.stderr);
-  assert.match(retry.stdout, /revision 2 was validated/);
+  assert.match(retry.stdout, /revision 3 was validated/, 'the notice names the revision the tool record produced');
   assert.doesNotMatch(retry.stdout, /RETRY_EDIT_SENTINEL/);
-  assert.equal(wc(f), edited);
+  assert.match(wc(f), /RETRY_EDIT_SENTINEL[\s\S]*ordinary output/, 'the ordinary tool output is recorded after the edit');
+  // The model reads the revision the notice names, which acknowledges it.
+  const sha = /--sha ([0-9a-f]{64})/.exec(retry.stdout)![1]!;
+  assert.equal(hook(f, toolUse('Bash', { command: `context-engine read --session ${SID} --sha ${sha}` }, wc(f))).stdout, '');
   const subsequent = hook(f, toolUse('Read', { file_path: 'ordinary.txt' }, 'NEXT_OUTPUT_SENTINEL'));
   assert.equal(subsequent.status, 0, subsequent.stderr);
   assert.doesNotMatch(subsequent.stdout, /was validated/);
@@ -689,21 +726,22 @@ test('wave49: failed public stdout retains the accepted read notice for an ordin
   assert.equal(reset.stdout, '');
 });
 
-test('wave49: an undelivered read notice blocks a prompt and reset before they can hide its revision', async () => {
+test('wave49: an undelivered read notice blocks a reset, a Stop records its reply and carries it, and the next prompt delivers it', async () => {
   const f = enabledFixture();
   assert.equal(hook(f, prompt('active task')).status, 0);
   const edited = '[[CTX_TURN role=user]]\nPENDING_EDIT_SENTINEL';
   writeFileSync(wcPath(f), edited);
   await interruptNoticeOutput(f);
-  const nextPrompt = hook(f, prompt('must wait'));
-  assert.equal(JSON.parse(nextPrompt.stdout).continue, false);
-  assert.match(nextPrompt.stdout, /read notice/);
-  const stop = hook(f, { hook_event_name: 'Stop', last_assistant_message: 'must not hide the pending edit' });
-  assert.equal(JSON.parse(stop.stdout).continue, false);
-  assert.match(stop.stdout, /read notice/);
+  const stop = hook(f, { hook_event_name: 'Stop', last_assistant_message: 'STOP_REPLY_SENTINEL' });
+  assert.equal(stop.stdout, '', 'the Stop records its reply and carries the notice');
   const reset = hook(f, { hook_event_name: 'PreToolUse', tool_name: 'new_context' });
   assert.equal(JSON.parse(reset.stdout).hookSpecificOutput.permissionDecision, 'deny');
-  assert.equal(wc(f), edited);
+  assert.match(wc(f), /PENDING_EDIT_SENTINEL[\s\S]*STOP_REPLY_SENTINEL/);
+  const nextPrompt = hook(f, prompt('next request'));
+  assert.equal(nextPrompt.status, 0, nextPrompt.stderr);
+  assert.match(JSON.parse(nextPrompt.stdout).hookSpecificOutput.additionalContext, /revision 4 was validated/);
+  assert.doesNotMatch(nextPrompt.stdout, /PENDING_EDIT_SENTINEL/);
+  assert.match(wc(f), /PENDING_EDIT_SENTINEL[\s\S]*STOP_REPLY_SENTINEL[\s\S]*next request/);
 });
 
 for (const file_path of ['vendor/.context-engine/ordinary.txt', '.context-engine/../ordinary.txt', '../another-project/.context-engine/file.txt']) {
