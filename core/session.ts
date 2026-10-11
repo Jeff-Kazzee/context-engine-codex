@@ -456,9 +456,9 @@ class Core {
 
   private guard<T>(fn: () => T, repair = true): T {
     this.assertOpen();
+    if (repair && this.appendUncertain) throw new Error('Event Log append may have persisted; close and reopen this session before retrying');
     this.refreshRestoreState();
     this.confirmReturnedReceipts();
-    if(repair&&this.appendUncertain)throw new Error('Event Log append may have persisted; close and reopen this session before retrying');
     if (repair && this.materializationFailed) throw new Error('Working Context publication failed; close and reopen this session to recover its preserved predecessor before retrying');
     if (repair && this.unloggedCommit) {
       const { head, text } = this.unloggedCommit;

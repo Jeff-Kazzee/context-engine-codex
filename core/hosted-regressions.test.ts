@@ -37,7 +37,12 @@ test('a failed partial log append requires reopening and cannot swallow the next
   }) as typeof fs.writeSync; syncBuiltinESMExports();
   try { assert.throws(() => s.record([{ role: 'tool', text: 'FAILED_APPEND' }]), /incomplete Event Log/); assert.throws(()=>s.sync(),/close and reopen/); }
   finally { fs.writeSync = native; syncBuiltinESMExports(); }
-  assert.throws(()=>s.record([{role:'tool',text:'SUCCESS_AFTER_FAILURE'}]),/close and reopen/);s.close();
+  assert.throws(()=>s.record([{role:'tool',text:'SUCCESS_AFTER_FAILURE'}]),/close and reopen/);
+  const torn = fs.readFileSync(log);
+  assert.throws(() => s.close(), /torn Event Log/);
+  assert.deepEqual(fs.readFileSync(log), torn, 'close cannot acknowledge or repair a torn log');
+  assert.equal(inspectSession({ ...f, sessionId: 'S1' }).lock, null);
+  assert.throws(() => s.sync(), /closed/);
   const reopened=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(reopened.status,'open');assert.equal(reopened.session.sync().revision,before);
   reopened.session.record([{ role: 'tool', text: 'SUCCESS_AFTER_FAILURE' }]); reopened.session.close();
   assert.equal(recall({ ...f, sessionId: 'S1', query: 'SUCCESS_AFTER_FAILURE' }).total, 1);

@@ -158,7 +158,7 @@ test('[CORE-023] a CLI process killed inside the operation lock and append lease
   eventLog(l.events);
 });
 
-test('[CORE-005] a recovery killed after keeping a stale edit keeps it once on retry', { timeout: 30_000 }, async () => {
+test('[CORE-005] an ambiguous recovery retry retains distinct intents and a stable retry adds none', { timeout: 30_000 }, async () => {
   const f = fixture();
   const owner = ownerProcess();
   try {
@@ -168,15 +168,29 @@ test('[CORE-005] a recovery killed after keeping a stale edit keeps it once on r
     assert.equal(halted.signal, 'SIGKILL', halted.stderr);
     const l = layout(f.projectRoot, 'S1', f.stateDir);
     writeFileSync(l.workingContext, `${readFileSync(l.workingContext, 'utf8')}\n[[CTX_TURN 2 role=notes]]\nSTALE_EDIT\n`);
-    const kept = () => eventLog(l.events).filter((r) => r.type === 'restored' && String(r.rejected).includes('STALE_EDIT')).length;
+    const keptRows = () => eventLog(l.events).filter((r) => r.type === 'restored' && String(r.rejected).includes('STALE_EDIT'));
+    const kept = () => keptRows().length;
 
     const crashed = await startCli(f, ['sync', ...own], { fault: { call: 'renameSync', path: '/context\\.md$', at: 'before', action: 'kill' } }).done;
     assert.equal(crashed.signal, 'SIGKILL', crashed.stderr);
     assert.equal(kept(), 1, 'the first recovery kept the edit before it died');
-    const retried = await startCli(f, ['sync', ...own]).done;
+    const retried = await startCli(f, ['sync', ...own, '--defer-restore-ack']).done;
     assert.equal(retried.code, 0, retried.stdout + retried.stderr);
-    assert.equal(kept(), 1, 'the retried recovery does not keep the same edit twice');
-    assert.equal(JSON.parse(retried.stdout).receipt?.kind, 'restored', 'the retry still reports the restore');
+    assert.equal(kept(), 2, 'the ambiguous retry retains a second restore attempt');
+    const retryResult = JSON.parse(retried.stdout);
+    assert.equal(retryResult.receipt?.kind, 'restored', 'the retry still reports the restore');
+    const ids = keptRows().map(row => {
+      const notice = row.notice;
+      assert.ok(notice && typeof notice === 'object' && 'id' in notice && typeof notice.id === 'string');
+      assert.match(notice.id, /^[a-f0-9]{32}$/);
+      return notice.id;
+    }).sort();
+    assert.equal(new Set(ids).size, 2, 'ambiguous attempts have distinct intent IDs');
+    assert.deepEqual(retryResult.restoreNotices.map((notice: { id: string }) => notice.id).sort(), ids);
+    const stable = await startCli(f, ['sync', ...own, '--defer-restore-ack']).done;
+    assert.equal(stable.code, 0, stable.stdout + stable.stderr);
+    assert.equal(kept(), 2, 'stable retry adds no third retained edit');
+    assert.deepEqual(JSON.parse(stable.stdout).restoreNotices.map((notice: { id: string }) => notice.id).sort(), ids, 'both pending intents survive the stable retry');
     assert.equal(count(assertRecovered(f).text, 'SENTINEL'), 1);
   } finally {
     await stopGroup(owner);

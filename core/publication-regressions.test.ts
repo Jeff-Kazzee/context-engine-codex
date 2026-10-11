@@ -84,19 +84,26 @@ test('warm reopen avoids historical payload reads; changed budget and invalid ca
   first.session.record([{ role: 'tool', text: 'x'.repeat(20000) }]); first.session.close();
   const state = first.session.stateDir, log = join(state, 'events.jsonl'), cache = join(state, 'recovery.json');
   const nativeRead = fs.readFileSync,nativeChunk=fs.readSync;
-  let fullReads = 0,historyReads=0;
+  let fullReads = 0, historyReads = 0, historyBoundary = fs.statSync(log).size;
   try {
     fs.readFileSync = ((path: any, ...args: any[]) => {
       if (path === log) fullReads++;
       return (nativeRead as any)(path, ...args);
     }) as typeof fs.readFileSync;
-    fs.readSync=((fd:number,...args:any[])=>{if(fs.readlinkSync('/proc/self/fd/'+fd)===log && args[0]?.length===65536)historyReads++;return (nativeChunk as any)(fd,...args);}) as typeof fs.readSync;
+    fs.readSync = ((fd: number, ...args: any[]) => {
+      const read = (nativeChunk as any)(fd, ...args);
+      if (fs.readlinkSync('/proc/self/fd/' + fd) === log && args[0]?.length === 65536
+          && read > 0 && typeof args[3] === 'number' && args[3] < historyBoundary) historyReads++;
+      return read;
+    }) as typeof fs.readSync;
     syncBuiltinESMExports();
     for (let i = 0; i < 8; i++) {
+      historyBoundary = fs.statSync(log).size;
       const r = openSession(opts); assert.equal(r.status, 'open');
       r.session.record([{ role: 'user', text: `small ${i}` }]); r.session.close();
     }
     assert.equal(fullReads, 0, 'no whole-log read');assert.equal(historyReads,0,'growing normal hooks reuse their fully applied checkpoint');
+    historyBoundary = fs.statSync(log).size;
     const changed = openSession({ ...opts, budgetTokens: 9999 }); assert.equal(changed.status, 'open'); changed.session.sync(); changed.session.close();
     assert.ok(historyReads>0,'budget change scans reminder history');const afterBudget=historyReads;
     const c = JSON.parse(fs.readFileSync(cache, 'utf8')); c.memory.lastTokens++;

@@ -82,10 +82,14 @@ test('projects and sessions are isolated: separate files, nothing leaks', () => 
   const a2 = open(base(f, { sessionId: 'S2' }));
 
   for (const s of [b1, a2]) {
-    assert.deepEqual(s.sync(), { revision: 0, turns: [], chars: 0, workingContextText: '' });
+    const initial = s.sync();
+    assert.match(initial.sessionGeneration ?? '', /^[a-f0-9]{32}$/);
+    assert.deepEqual(initial, { revision: 0, turns: [], chars: 0, workingContextText: '', sessionGeneration: initial.sessionGeneration });
     s.record([{ role: 'user', text: 'own task' }]);
     assert.ok(!readFileSync(s.workingContextPath, 'utf8').includes('PROJECT-A-SECRET'));
   }
+  assert.equal(new Set([a1, b1, a2].map(s => s.sync().sessionGeneration)).size, 3, 'isolated sessions have distinct owner generations');
+  assert.equal(new Set([a1, b1, a2].map(s => s.sync().sessionGeneration)).size, 3, 'isolated sessions have distinct owner generations');
   const paths = new Set([a1, b1, a2].flatMap((s) => [s.workingContextPath, s.stateDir]));
   assert.equal(paths.size, 6);
   assert.equal(a1.sync().revision, 1);
