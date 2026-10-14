@@ -16,7 +16,7 @@ export type CrashPoint =
   | 'recovery-checkpoint-tmp' // optional recovery cache publication
   | 'operation-index-tmp' // rebuilt operation index temp file written, not renamed
   | 'frame-key-tmp' // frame-key temp file written, not published
-  | 'ignore-tmp'; // managed .gitignore repair written, not renamed
+  | 'preservation-marker-tmp'; // predecessor identity marker written, not renamed
 
 export class InjectedCrash extends Error {}
 

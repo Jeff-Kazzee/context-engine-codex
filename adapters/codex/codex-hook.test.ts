@@ -12,6 +12,8 @@ import { fixture, tempDir } from '../../core/testing.ts';
 import { CODEX_TOKEN_LIMIT_RESET, setParticipation } from '../../core/index.ts';
 import { CODEX_DEFAULT_SHARED_BUDGET, projectCodexToml } from './guidance.ts';
 import { createHash } from 'node:crypto';
+import { layout } from '../../core/store.ts';
+import { pendingRestoreNotices } from '../../core/restore-notices.ts';
 
 const HOOK = fileURLToPath(new URL('./plugin/hooks/codex-hook.ts', import.meta.url));
 const CLI = fileURLToPath(new URL('../../core/cli.ts', import.meta.url));
@@ -327,19 +329,43 @@ test('PreCompact (token-limit reset) proceeds silently when the Working Context 
   assert.equal(r.stdout, '');
 });
 
-test('PreCompact stops the reset with an explanation when the Working Context is missing', () => {
+test('PreCompact refuses a fresh restored context until a complete current read', () => {
   const f = enabledFixture();
-  hook(f, prompt('Task: keep SECRET_NOTE_42 in mind.'));
+  assert.equal(hook(f, prompt('Task: keep SECRET_NOTE_42 in mind.')).status, 0);
   const before = wc(f);
   rmSync(wcPath(f));
+  const r = hook(f, { ...preCompact, trigger: 'manual' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).continue, false, 'fresh restoration requires a complete current read');
+  assert.equal(JSON.parse(hook(f, { ...preCompact, trigger: 'manual' }).stdout).continue, false, 'retry cannot bypass the read');
+  assert.equal(wc(f), before, 'refusal preserves the recovered context before any reset marker');
+  const log = layout(f.projectRoot, SID, f.stateDir).events;
+  const pending = [...pendingRestoreNotices(log).keys()];
+  assert.equal(pending.length, 1, 'the restore warning remains pending without a host acknowledgment');
+  const next = hook(f, prompt('AFTER_RESTORE'));
+  assert.equal(next.status, 0, next.stderr);
+  assert.match(next.stdout, /restore request\(s\).*pending/);
+  assert.doesNotMatch(next.stdout, /SECRET_NOTE_42/);
+  const sha = createHash('sha256').update(wc(f)).digest('hex');
+  const read = spawnSync(process.execPath, [CLI, 'read', '--session', SID, '--sha', sha], { cwd: f.projectRoot, encoding: 'utf8', env: env(f) });
+  assert.equal(read.status, 0, read.stderr);
+  assert.match(read.stdout, /SECRET_NOTE_42/);
+  const observed = hook(f, toolUse('Bash', { command: `context-engine read --session ${SID} --sha ${sha}` }, read.stdout));
+  assert.equal(observed.status, 0, observed.stderr);
+  const retry = hook(f, { ...preCompact, trigger: 'manual' });
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.equal(retry.stdout, '', 'complete current read permits compaction without confirming IDs');
+  assert.deepEqual([...pendingRestoreNotices(log).keys()], pending, 'warning output and complete read do not confirm IDs');
+});
+
+test('PreCompact stops the reset when missing context has no revision to restore', () => {
+  const f = enabledFixture();
   const r = hook(f, { ...preCompact, trigger: 'manual' });
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout);
   assert.equal(out.continue, false, 'continue:false is the only PreCompact refusal Codex honours');
   assert.match(out.stopReason, /context window was not reset/i);
-  assert.match(out.stopReason, /the file was missing/);
-  assert.doesNotMatch(r.stdout, /SECRET_NOTE_42/);
-  assert.equal(wc(f), before);
+  assert.match(out.stopReason, /missing or empty/);
 });
 
 // ---- budget and read-back (issue #22) ----

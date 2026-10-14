@@ -6,7 +6,7 @@ export const anchoredPath = Symbol('opened-directory reference');
 /** A backend-owned location relative to an open directory, not a filesystem path. */
 export interface AnchoredPath { readonly [anchoredPath]: true }
 export type FileTarget = string | AnchoredPath;
-export type OpenIntent = 'directory' | 'read' | 'exclusive' | 'exclusive-nofollow' | 'append' | 'read-write';
+export type OpenIntent = 'directory' | 'read' | 'exclusive' | 'exclusive-nofollow' | 'append' | 'append-existing' | 'read-write';
 
 /** Facts inspected by the backend from the actual handle or target. */
 export interface FileInfo {

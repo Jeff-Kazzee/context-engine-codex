@@ -20,7 +20,7 @@ test('wave13: oversized snapshot refuses before payload read in status and recov
 
 for(const next of [1,2])test('wave13: sequence regression/duplicate across log batches refuses '+next,()=>{
   const f=fixture(),r=openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000});assert.equal(r.status,'open');const log=join(r.session.stateDir,'events.jsonl'),wc=r.session.workingContextPath;r.session.close();
-  appendLog(log,{type:'runner-events',events:[{seq:2,event:{role:'user',text:'STALE'}}]});appendLog(log,{type:'runner-events',events:[{seq:next,event:{role:'user',text:'REGRESSED'}}]});
+  appendLog(log,{type:'runner-events',events:[{seq:1,event:{role:'user',text:'EARLIER'}},{seq:2,event:{role:'user',text:'STALE'}}]});appendLog(log,{type:'runner-events',events:[{seq:next,event:{role:'user',text:'REGRESSED'}}]});
   assert.throws(()=>openSession({...f,sessionId:'S1',runner:'test',hardLimit:10000}),/sequence.*regress|non-monotonic/);assert.equal(fs.existsSync(wc),false);
 });
 

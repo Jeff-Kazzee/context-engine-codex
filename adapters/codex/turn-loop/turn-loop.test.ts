@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fixture, tempDir } from '../../../core/testing.ts';
-import { inspectSession } from '../../../core/index.ts';
+import { inspectSession, openSession } from '../../../core/index.ts';
 import { guidance, MODE, OWN_OVERRIDES, startTurnLoop as start, type CodexTurnLoop, type TurnLoopOptions } from './turn-loop.ts';
 import { validateInjectItems } from './items.ts';
 import { FAKE_APP_SERVER } from './testing/fake.ts';
@@ -425,4 +425,34 @@ test('[CDX-021] a turn after a refused injection unsubscribes the old thread and
   assert.equal(third.threadId, 'thread-3');
   assert.deepEqual(t.sent('thread/unsubscribe').map(p => p.threadId), ['thread-2', 'thread-1']);
   assert.deepEqual(t.sent('turn/start').map(p => p.threadId), ['thread-1', 'thread-3']);
+});
+
+for (const failed of [false, true]) test(`issue31: turn loop confirms restore only after successful turn/start (${failed})`, async () => {
+  const t = setup(failed ? { errors: { 'turn/start': { code: -32600, message: 'synthetic refusal' } } } : { turns: [{ reply: 'RESTORED' }] });
+  const opened = openSession({ ...t.opts, runner: 'codex', hardLimit: 400000 }); assert.equal(opened.status, 'open');
+  opened.session.record([{ role: 'user', text: 'INITIAL' }]); opened.session.close();
+  const loop = await startCodexTurnLoop(t.opts);
+  writeFileSync(t.wcPath, '');
+  const result = await loop.runTurn('AFTER_RESTORE');
+  assert.ok(result.receipts.some(r => /restore request\(s\).*pending/.test(r.text)));
+  const { layout, readLog } = await import('../../../core/store.ts');
+  const log = layout(t.f.projectRoot, 'S1', t.f.stateDir).events;
+  const confirmations = [...readLog(log)].filter(r => r.type === 'restore-notice-return-confirmed');
+  assert.equal(confirmations.length, failed ? 0 : 1);
+  if (!failed) assert.match(JSON.stringify(t.sent('turn/start').at(-1)), /restore request\(s\).*pending/);
+  await loop.close();
+});
+
+test('issue31: refused injection retains restore across a resumed loop', async () => {
+  const t = setup({ errors: { 'thread/inject_items': { code: -32600, message: 'synthetic injection refusal' } } });
+  const opened = openSession({ ...t.opts, runner: 'codex', hardLimit: 400000 }); assert.equal(opened.status, 'open');
+  opened.session.record([{ role: 'user', text: 'INITIAL' }]); opened.session.close();
+  const loop = await startCodexTurnLoop(t.opts);
+  writeFileSync(t.wcPath, '');
+  assert.equal((await loop.runTurn('REFUSED')).status, 'refused');
+  await loop.close();
+  t.setScript({ turns: [{ reply: 'RESUMED' }] });
+  const resumed = await startCodexTurnLoop(t.opts), result = await resumed.runTurn('RETRY');
+  assert.ok(result.receipts.some(r => /restore request\(s\).*pending/.test(r.text)));
+  await resumed.close();
 });

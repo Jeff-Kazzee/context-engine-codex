@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
   cite,
+  confirmRestoreNotices,
   inspectSession,
   openSession,
   participation,
@@ -50,6 +51,9 @@ Session commands (for adapters; one JSON object on stdout):
            for record) and make it the whole next revision (kind
            native-compaction): the Compaction-only fallback, for a Working
            Context over its budget. Always syncs first.
+  ack-restores
+           Confirm --notice-ids <id,id,...> after adapter transport succeeds.
+           Requires an existing session owner. Does not sync or repair files.
   close    Release the session lock.
   status   Read-only: revision, size, paths and lock holder. Takes no lock.
   recall   recall --session <id> <query...>
@@ -103,6 +107,9 @@ Options:
                      sync only: include a bounded delivery packet from the
                      committed revision. This prepares data, not proof that
                      a model received it. Oversized packets are not truncated.
+  --defer-restore-ack  Adapter mode: CLI stdout does not confirm restore IDs.
+  --owner-generation <id>  ack-restores only: generation of the offered result.
+  --notice-ids <ids>  ack-restores only: comma-separated carried notice IDs.
   --owner-pid <pid>   Process that owns the session lock (default: the parent
                       process of this CLI). Pass your long-lived adapter pid
                       if you call the CLI through a shell.
@@ -170,6 +177,9 @@ function main(argv: string[]): number {
       'max-context-bytes': { type: 'string' },
       'delivery-max-bytes': { type: 'string' },
       'operation-id': { type: 'string' },
+      'defer-restore-ack': { type: 'boolean' },
+      'notice-ids': { type: 'string' },
+      'owner-generation': { type: 'string' },
       'owner-pid': { type: 'string' },
       budget: { type: 'string' },
       part: { type: 'string' },
@@ -197,7 +207,7 @@ function main(argv: string[]): number {
     process.stdout.write(`${cite(projectRoot, ref.startsWith('commit:') ? ref : resolve(ref))}\n`);
     return 0;
   }
-  if (!['open', 'sync', 'record', 'native-compaction', 'close', 'status', 'recall', 'show', 'read'].includes(command!)) throw new Usage(`unknown command: ${command} (see --help)`);
+  if (!['open', 'sync', 'record', 'native-compaction', 'close', 'status', 'recall', 'show', 'read', 'ack-restores'].includes(command!)) throw new Usage(`unknown command: ${command} (see --help)`);
   if (values.framed && command !== 'read') throw new Usage('--framed is supported only by read');
   if (!values.session) throw new Usage('--session is required');
 
@@ -225,6 +235,12 @@ function main(argv: string[]): number {
   if (command === 'status') return print({ ok: true, ...inspectSession({ projectRoot, sessionId }) });
 
   const ownerPid = values['owner-pid'] ? positiveInt(values['owner-pid'], '--owner-pid') : process.ppid;
+  if (command === 'ack-restores') {
+    if (!values['notice-ids']) throw new Usage('--notice-ids is required by ack-restores');
+    if (!values['owner-generation'] || !/^[a-f0-9]{32}$/.test(values['owner-generation'])) throw new Usage('--owner-generation is required by ack-restores');
+    confirmRestoreNotices({ projectRoot, sessionId, ownerPid, ownerGeneration: values['owner-generation'] }, values['notice-ids'].split(','));
+    return print({ ok: true, confirmedRestoreNoticeIds: values['notice-ids'].split(',') });
+  }
   const events = command === 'record' || command === 'native-compaction' ? readEvents() : [];
   const budgetTokens = values.budget ? positiveInt(values.budget, '--budget') : undefined;
   // One operation at a time per session, even for calls that present the same owner.
@@ -257,7 +273,10 @@ function main(argv: string[]): number {
     }
     resultOutputCompleted=true;
     // Written to the CLI output transport; this does not prove a model received it.
-    try { s.confirmReceiptReturn(); }
+    try {
+      s.confirmReceiptReturn();
+      if (!values['defer-restore-ack'] && result.restoreNotices?.length) s.confirmRestoreNotices(result.restoreNotices.map(n => n.id));
+    }
     catch { process.stderr.write('Context Engine: recovery receipt acknowledgement unverified; a later call may repeat the notice.\n'); }
     return 0;
   });

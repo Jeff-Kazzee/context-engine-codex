@@ -15,7 +15,9 @@ function open(f: { stateDir: string; projectRoot: string }, sessionId = 'S1', ha
 test('happy path: runner turns are recorded, a model edit is committed as the next revision', () => {
   const f = fixture();
   const s = open(f);
-  assert.deepEqual(s.sync(), { revision: 0, turns: [], chars: 0, workingContextText: '' });
+  const initial = s.sync();
+  assert.match(initial.sessionGeneration ?? '', /^[a-f0-9]{32}$/);
+  assert.deepEqual(initial, { revision: 0, turns: [], chars: 0, workingContextText: '', sessionGeneration: initial.sessionGeneration });
 
   const r1 = s.record([
     { role: 'user', text: 'Task: fix the failing date parser.' },
@@ -152,7 +154,9 @@ test('a file written before any revision is committed as revision 1; an unusable
 
   const s2 = open(f, 'S2', 50);
   writeFileSync(s2.workingContextPath, 'my own notes\n');
-  assert.deepEqual(s2.sync(), { revision: 1, revisionKind: 'init', turns: [{ role: 'user', text: 'my own notes' }], chars: 13, workingContextText: 'my own notes\n' });
+  const initialized = s2.sync();
+  assert.match(initialized.sessionGeneration ?? '', /^[a-f0-9]{32}$/);
+  assert.deepEqual(initialized, { revision: 1, revisionKind: 'init', turns: [{ role: 'user', text: 'my own notes' }], chars: 13, workingContextText: 'my own notes\n', sessionGeneration: initialized.sessionGeneration });
 });
 
 test('resume continues from the latest committed revision: deleted content does not come back', () => {

@@ -135,14 +135,20 @@ function crashImages(base: Map<string, Map<string, Inode>>, calls: Call[]): Imag
 
 const imageKey = (image: Image) => JSON.stringify([...image].map(([p, b]) => [p, sha(b.toString('latin1'))]).sort());
 
-test('[REC-011] every crash-consistent prefix of a commit trace recovers', () => {
+test('[REC-011] every revision-publication prefix of a commit trace recovers', () => {
   const f = fixture();
   const s = openS1(f);
   s.record([{ role: 'user', text: 'BASE_EVENT' }]);
   const dirs = [s.stateDir, join(s.stateDir, 'revisions'), dirname(s.workingContextPath)];
   const base = filesIn(dirs);
   const calls = traced(() => s.record([{ role: 'tool', text: 'DURABLE_SENTINEL' }]));
-  const all = crashImages(base, calls);
+  // This byte/name model recreates files with fresh inodes and has no directory-creation model.
+  // Real-process preservation tests cover the identity marker and retirement lifetime instead.
+  const revisionCalls = calls.filter(call => {
+    const path = 'path' in call ? call.path : call.to;
+    return !/working-context-preservation\.json|\.ce-preserved-|\.ce-retired-|\.ce-probe-/.test(path);
+  });
+  const all = crashImages(base, revisionCalls);
   const final = imageKey(all.at(-1)!);
   const images = [...new Map(all.map((image) => [imageKey(image), image])).values()];
   assert.ok(images.length > 5, `${images.length} distinct crash images`);

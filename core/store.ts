@@ -1,6 +1,6 @@
 import { anchor, childTarget, absoluteName, openedPath, sameParent, suffix, targetBasename, requireSupportedPlatform, type FileTarget } from './platform.ts';
-// File primitives and layout for the core. Every write is temp + fsync + rename, so a reader
-// sees the old file or the new one, never a torn one.
+// File primitives and layout for the core. Replacement writes use temp + fsync + rename.
+// The Event Log and empty managed-ignore repair use explicit append protocols.
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
@@ -18,6 +18,7 @@ import {
   readSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   statSync,
   ftruncateSync,
   unlinkSync,
@@ -205,13 +206,31 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
       existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
     }
-    // Still empty: its creator died before writing it. Only that exact state is repaired. Two
-    // repairers publish the same bytes.
+    // Still empty: its creator died before writing it. Append through that inode instead of
+    // replacing the name, so a concurrent in-place edit or rename-save cannot be overwritten.
     const found = Buffer.isBuffer(existing) && existing.length === 0 ? lstatSync(ignore) : undefined;
     if (found?.isFile() && found.nlink === 1 && found.size === 0 && found.owner === 'current') {
-      const tmp = writeTemp(ignore, MANAGED_IGNORE, 'ignore-tmp');
-      try { renameSync(tmp, ignore); } finally { try { unlinkSync(tmp); } catch {} }
-      existing = Buffer.from(MANAGED_IGNORE);
+      const file = openSync(ignore, 'append-existing');
+      try {
+        const verify = () => {
+          const st = fstatSync(file);
+          if (!st.isFile() || st.nlink !== 1 || st.owner !== 'current' || st.dev !== found.dev || st.ino !== found.ino || openedPath(file) !== join(managed, '.gitignore')) throw new Error('managed ignore file changed during repair');
+          return st;
+        };
+        verify();
+        // Another repairer may have completed since the empty sample. Do not append again when observed.
+        const latest = readWorkingContextFile(join(managed, '.gitignore'), 65536);
+        if (Buffer.isBuffer(latest) && latest.length === 0 && verify().size === 0) {
+          const bytes = Buffer.from(`\n${MANAGED_IGNORE}`);
+          const written = writeSync(file, bytes, 0, bytes.length, null);
+          if (written !== bytes.length) throw new Error(`short append (${written}/${bytes.length} bytes)`);
+          fsyncSync(file);
+        }
+        verify();
+      } catch (e) {
+        throw new Error(`managed ignore file repair failed (${e instanceof Error ? e.message : String(e)}). Existing bytes retained. Review .context-engine/.gitignore and make its final effective rule * before retrying.`, { cause: e });
+      } finally { closeSync(file); }
+      existing = readWorkingContextFile(join(managed, '.gitignore'), 65536);
     }
     if (!Buffer.isBuffer(existing)) throw new Error('.context-engine/.gitignore must be a regular, unlinked file');
     const rules = existing.toString('utf8').split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
@@ -221,7 +240,15 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
       const st = fstatSync(file);
       if (!st.isFile() || st.nlink !== 1 || openedPath(file) !== join(managed, '.gitignore')) throw new Error('managed ignore file changed before flush');
       const current = boundedRead(file, st.size, 65536);
-      if (current === 'too-large' || !current.equals(existing)) throw new Error('managed ignore file changed before flush');
+      if (current === 'too-large') throw new Error('managed ignore file changed before flush');
+      // An already-racing repairer may append the same whole block after our sample.
+      // Preserve the sampled prefix and reject every other suffix or conflicting edit.
+      const appended = current.subarray(existing.length), block = Buffer.from(`\n${MANAGED_IGNORE}`);
+      let validRepair = current.subarray(0, existing.length).equals(existing) && appended.length % block.length === 0;
+      for (let offset = 0; validRepair && offset < appended.length; offset += block.length) {
+        validRepair = appended.subarray(offset, offset + block.length).equals(block);
+      }
+      if (!validRepair) throw new Error('managed ignore file changed before flush');
       fsyncSync(file);
     } finally { closeSync(file); }
   }
@@ -478,15 +505,193 @@ function readOpened(fd: number, maxBytes: number): Buffer | 'too-large' {
   }
 }
 
+/** Refuse an unsupported workspace before a materializing commit advances HEAD. */
+export function assertWorkingContextHardLinks(wc: string): void {
+  assertWorkingContextDir(wc);
+  const directory = dirname(wc), parent = openSync(directory, 'directory');
+  const name = `${basename(wc)}.ce-probe-${randomBytes(16).toString('hex')}`;
+  const probe = childTarget(anchor(parent), name), probePath = join(directory, name);
+  let dir: number | undefined, file: number | undefined;
+  try {
+    if (openedPath(parent) !== directory) throw new Error('Working Context parent changed before hard-link preflight');
+    mkdirPrivateSync(probe);
+    dir = openPrivateDirectory(probePath)!;
+    const source = childTarget(anchor(dir), 'source'), linked = childTarget(anchor(dir), 'linked');
+    file = openSync(source, 'exclusive-nofollow');
+    const identity = fstatSync(file);
+    try { linkSync(source, linked); }
+    catch (cause) { throw new Error('Working Context publication requires hard links in its workspace. HEAD was not advanced by this commit.', { cause }); }
+    for (const entry of [linked, source]) {
+      if (!existsSync(entry)) continue;
+      const st = lstatSync(entry);
+      if (st.dev !== identity.dev || st.ino !== identity.ino) throw new Error(`hard-link preflight entry changed. Preserve ${probePath}.`);
+      unlinkSync(entry);
+    }
+  } finally {
+    if (file !== undefined && dir !== undefined) {
+      const identity = fstatSync(file);
+      for (const name of ['linked', 'source']) {
+        const entry = childTarget(anchor(dir), name);
+        if (!existsSync(entry)) continue;
+        const st = lstatSync(entry);
+        if (st.dev === identity.dev && st.ino === identity.ino) unlinkSync(entry);
+      }
+      closeSync(file);
+    }
+    if (dir !== undefined) {
+      const held = fstatSync(dir), named = lstatSync(probe);
+      closeSync(dir);
+      if (held.dev === named.dev && held.ino === named.ino) {
+        try { rmdirSync(probe); fsyncSync(parent); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error; }
+      }
+    }
+    closeSync(parent);
+  }
+}
+
+type PreservationRecord = { version: 1; sha: string; dev: number; ino: number } & (
+  | { stage: 'linked' }
+  | { stage: 'retiring' | 'retired'; retirement: { name: string; dev: number; ino: number } }
+);
+
+function preservationRecord(path: string, digest: string): PreservationRecord | undefined {
+  const bytes = readBytes(path, 4096);
+  if (!bytes) return undefined;
+  const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  const identity = (v: unknown): v is { dev: number; ino: number } => typeof v === 'object' && v !== null
+    && 'dev' in v && Number.isSafeInteger(v.dev) && Number(v.dev) >= 0
+    && 'ino' in v && Number.isSafeInteger(v.ino) && Number(v.ino) > 0;
+  if (!identity(value) || !('version' in value) || value.version !== 1 || !('sha' in value) || value.sha !== digest || !('stage' in value)) {
+    throw new Error('unverified Working Context preservation marker; refusing recovery artifact');
+  }
+  const common = { version: 1, sha: digest, dev: value.dev, ino: value.ino } satisfies Omit<PreservationRecord, 'stage'>;
+  if (value.stage === 'linked') return { ...common, stage: 'linked' };
+  if ((value.stage === 'retiring' || value.stage === 'retired') && 'retirement' in value && identity(value.retirement)
+    && 'name' in value.retirement && typeof value.retirement.name === 'string' && /^context\.md\.ce-retired-[0-9a-f]{32}$/.test(value.retirement.name)) {
+    return { ...common, stage: value.stage, retirement: { name: value.retirement.name, dev: value.retirement.dev, ino: value.retirement.ino } };
+  }
+  throw new Error('unverified Working Context preservation marker; refusing recovery artifact');
+}
+
+type RetiringRecord = Exclude<PreservationRecord, { stage: 'linked' }>;
+
+function openRetirement(directory: string, record: RetiringRecord): number | undefined {
+  const path = join(directory, record.retirement.name), fd = openPrivateDirectory(path);
+  if (fd === undefined) {
+    if (record.stage === 'retired') return undefined;
+    throw new Error(`Working Context retirement directory is missing. Preserve the recovery artifact and marker for ${path}.`);
+  }
+  const st = fstatSync(fd);
+  if (st.dev !== record.retirement.dev || st.ino !== record.retirement.ino) {
+    closeSync(fd);
+    throw new Error(`Working Context retirement directory changed. Preserve ${path}.`);
+  }
+  return fd;
+}
+
+// Exclusively created probe and retirement paths belong to the core, including their parent entries.
+// Mode 0700 excludes other users. Same-user replacement inside this namespace is unsupported,
+// and its pathname deletion is not an atomic inode-conditional operation.
+/** Move before inspecting and deleting, so replacing the public artifact name cannot erase its replacement. */
+function retirePreservation(parent: number, directory: string, preserved: FileTarget, marker: string, record: PreservationRecord): void {
+  let retiring: RetiringRecord;
+  if (record.stage === 'linked') {
+    const name = `context.md.ce-retired-${randomBytes(16).toString('hex')}`;
+    const target = childTarget(anchor(parent), name);
+    mkdirPrivateSync(target);
+    const dir = openPrivateDirectory(join(directory, name))!;
+    const st = fstatSync(dir);
+    closeSync(dir);
+    fsyncSync(parent);
+    retiring = { ...record, stage: 'retiring', retirement: { name, dev: st.dev, ino: st.ino } };
+    atomicWrite(marker, JSON.stringify(retiring), 'preservation-marker-tmp');
+  } else retiring = record;
+  const path = join(directory, retiring.retirement.name), dir = openRetirement(directory, retiring);
+  try {
+    if (record.stage === 'retired' && existsSync(preserved)) throw new Error('retired Working Context recovery artifact name was replaced; preserving its replacement');
+    if (dir !== undefined) {
+      const moved = childTarget(anchor(dir), 'predecessor');
+      if (record.stage === 'retired' && existsSync(moved)) throw new Error(`retired Working Context artifact was replaced. Preserve ${path}/predecessor.`);
+      if (existsSync(moved) && existsSync(preserved)) throw new Error(`Working Context preservation names conflict. Preserve ${path} and the original recovery artifact.`);
+      if (!existsSync(moved) && existsSync(preserved)) {
+        renameSync(preserved, moved);
+        fsyncSync(parent); fsyncSync(dir);
+      }
+      if (existsSync(moved)) {
+        const st = lstatSync(moved);
+        if (!st.isFile() || st.dev !== record.dev || st.ino !== record.ino) throw new Error(`Working Context recovery artifact changed during retirement. Preserve ${path}/predecessor.`);
+        unlinkSync(moved);
+        fsyncSync(dir);
+      }
+      if (existsSync(preserved)) throw new Error('Working Context recovery artifact name was replaced during retirement; preserving its replacement');
+      atomicWrite(marker, JSON.stringify({ ...retiring, stage: 'retired' } satisfies PreservationRecord), 'preservation-marker-tmp');
+      const named = lstatSync(childTarget(anchor(parent), retiring.retirement.name)), held = fstatSync(dir);
+      if (named.dev !== held.dev || named.ino !== held.ino || openedPath(dir) !== path) throw new Error(`Working Context retirement directory changed. Preserve ${path}.`);
+      rmdirSync(childTarget(anchor(parent), retiring.retirement.name));
+      fsyncSync(parent);
+    }
+    unlinkSync(marker);
+    const state = openPrivateDirectory(dirname(marker))!;
+    try { fsyncSync(state); } finally { closeSync(state); }
+  } catch (cause) {
+    throw new Error(`Working Context retirement failed. Preserve ${path} and ${marker} before retrying.`, { cause });
+  } finally { if (dir !== undefined) closeSync(dir); }
+}
+
+/** Logging gives an in-place writer time to finish another chunk. Sample only a bounded window. */
+function keepOpenedChanges(fd: number, maxBytes: number, keep: (read: WorkingContextRead) => boolean, previous?: WorkingContextRead): void {
+  for (let look = 0; look < 4; look++) {
+    const read = readOpened(fd, maxBytes);
+    if (previous !== undefined && (Buffer.isBuffer(read) && Buffer.isBuffer(previous) ? read.equals(previous) : read === previous)) break;
+    previous = read;
+    if (!keep(read)) break;
+  }
+}
+
+function recoverPreservation(parent: number, directory: string, target: FileTarget, preserved: FileTarget, preservedPath: string, marker: string, record: PreservationRecord, maxBytes: number, keep: (read: WorkingContextRead) => boolean): void {
+  if (record.stage === 'retired') return retirePreservation(parent, directory, preserved, marker, record);
+  let retirement: number | undefined;
+  try {
+    let artifact = preserved, artifactPath = preservedPath;
+    if (record.stage === 'retiring') {
+      retirement = openRetirement(directory, record);
+      if (retirement === undefined) throw new Error('Working Context retirement directory is missing');
+      const moved = childTarget(anchor(retirement), 'predecessor');
+      if (existsSync(moved)) {
+        if (existsSync(preserved)) throw new Error('Working Context recovery artifact names conflict; preserving both entries');
+        artifact = moved; artifactPath = join(directory, record.retirement.name, 'predecessor');
+      }
+    }
+    if (existsSync(artifact)) {
+      const fd = openSync(artifact, 'read');
+      try {
+        const st = fstatSync(fd), named = lstatSync(artifact);
+        const current = existsSync(target) ? lstatSync(target) : undefined;
+        const ownPair = st.nlink === 2 && current?.isFile() && current.dev === st.dev && current.ino === st.ino && current.nlink === 2;
+        if (!st.isFile() || st.owner !== 'current' || !st.privateAccess || isCredential(artifactPath, st)
+          || st.dev !== record.dev || st.ino !== record.ino
+          || openedPath(fd) !== artifactPath || named.dev !== st.dev || named.ino !== st.ino
+          || !(st.nlink === 1 || ownPair)) throw new Error('unverified Working Context recovery artifact; refusing payload');
+        keepOpenedChanges(fd, maxBytes, keep);
+        const latest = lstatSync(artifact);
+        if (latest.dev !== st.dev || latest.ino !== st.ino) throw new Error('Working Context recovery artifact changed before removal');
+      } finally { closeSync(fd); }
+    } else if (record.stage === 'linked') throw new Error('Working Context recovery artifact is missing; preserving its marker');
+    retirePreservation(parent, directory, preserved, marker, record);
+  } finally { if (retirement !== undefined) closeSync(retirement); }
+}
+
 /**
  * Writes `data` over the Working Context. Just before the rename, `keep` sees what the file holds.
  * Keeping an edit appends to the Event Log and takes time, so while `keep` returns true the file is
  * opened and checked again, up to four times. After the rename, `keep` also sees anything an
- * in-place write put into the replaced file since the last check. An editor that renames its own
+ * in-place write put into the replaced file since the last check. Successful changed-byte logging
+ * permits another read of that same verified inode, up to four post-rename samples. An editor that renames its own
  * file over the Working Context after the last check is still overwritten unseen, because Node
  * offers no renameat2(RENAME_EXCHANGE) and the core has no native dependencies.
  */
-export function replaceWorkingContext(wc: string, data: string, maxBytes: number, keep: (read: WorkingContextRead) => boolean): void {
+export function replaceWorkingContext(wc: string, data: string, maxBytes: number, keep: (read: WorkingContextRead) => boolean, marker: string): void {
   assertWorkingContextDir(wc);
   const directory = dirname(wc), parent = openSync(directory, 'directory');
   const target = childTarget(anchor(parent), basename(wc));
@@ -501,22 +706,9 @@ export function replaceWorkingContext(wc: string, data: string, maxBytes: number
     // A previous publication can die before rename (two names for one inode) or
     // after it (only the recovery name). Only this exact, verified pair permits
     // a two-link read. Ordinary Working Context reads retain their one-link rule.
-    if (existsSync(preserved)) {
-      const fd = openSync(preserved, 'read');
-      try {
-        const st = fstatSync(fd), named = lstatSync(preserved);
-        const current = existsSync(target) ? lstatSync(target) : undefined;
-        const ownPair = st.nlink === 2 && current?.isFile() && current.dev === st.dev && current.ino === st.ino && current.nlink === 2;
-        if (!st.isFile() || st.owner !== 'current' || !st.privateAccess || isCredential(preservedPath, st)
-          || openedPath(fd) !== preservedPath || named.dev !== st.dev || named.ino !== st.ino
-          || !(st.nlink === 1 || ownPair)) throw new Error('unverified Working Context recovery artifact; refusing payload');
-        keep(readOpened(fd, maxBytes));
-        const latest = lstatSync(preserved);
-        if (latest.dev !== st.dev || latest.ino !== st.ino) throw new Error('Working Context recovery artifact changed before removal');
-        unlinkSync(preserved);
-        fsyncSync(parent);
-      } finally { closeSync(fd); }
-    }
+    const record = preservationRecord(marker, sha(data));
+    if (existsSync(preserved) && !record) throw new Error('unauthenticated Working Context recovery artifact; refusing preservation-name collision');
+    if (record) recoverPreservation(parent, directory, target, preserved, preservedPath, marker, record, maxBytes, keep);
     tmp = writeTemp(target, data, 'wc-tmp');
     for (let look = 0; look < 4; look++) {
       if (last.fd !== undefined) { closeSync(last.fd); last.fd = undefined; }
@@ -532,25 +724,22 @@ export function replaceWorkingContext(wc: string, data: string, maxBytes: number
       linkSync(target, preserved);
       const saved = lstatSync(preserved);
       if (!saved.isFile() || saved.dev !== st.dev || saved.ino !== st.ino || saved.nlink !== 2) {
-        unlinkSync(preserved);
-        fsyncSync(parent);
         throw new Error('Working Context changed before preservation; refusing publication');
       }
       fsyncSync(parent);
+      atomicWrite(marker, JSON.stringify({ version: 1, sha: sha(data), dev: st.dev, ino: st.ino, stage: 'linked' } satisfies PreservationRecord), 'preservation-marker-tmp');
     }
     renameSync(tmp, target);
     fsyncSync(parent);
     if (last.fd === undefined) return;
-    const after = readOpened(last.fd, maxBytes);
-    if (Buffer.isBuffer(after) && Buffer.isBuffer(last.read) ? !after.equals(last.read) : after !== last.read) keep(after);
-    // keep() has made the observed edit durable. Writes after this last sample
+    keepOpenedChanges(last.fd, maxBytes, keep, last.read);
+    // Successful keep() calls made each observed edit durable. Writes after the bounded last sample
     // remain outside the bounded capture contract.
     const saved = lstatSync(preserved), held = fstatSync(last.fd);
     if (saved.dev !== held.dev || saved.ino !== held.ino) throw new Error('Working Context recovery artifact changed before removal');
-    unlinkSync(preserved);
-    fsyncSync(parent);
+    retirePreservation(parent, directory, preserved, marker, { version: 1, sha: sha(data), dev: held.dev, ino: held.ino, stage: 'linked' });
   } catch (error) {
-    if (existsSync(preserved)) throw new Error(`Working Context publication failed. Preserve the recovery artifact ${preservedPath} and retry after repairing storage.`, { cause: error });
+    if (existsSync(preserved)) throw new Error(`Working Context publication failed. Preserve the recovery artifact ${preservedPath}. Repair its exact artifact and private marker before retrying.`, { cause: error });
     throw error;
   } finally {
     if (tmp) try { unlinkSync(tmp); } catch {}
@@ -674,13 +863,13 @@ export function appendCommitted(path: string, length: number, data: Buffer): voi
 }
 
 /** Appends one JSON line to the Event Log and fsyncs it. A torn tail is cut on recovery. Returns the row's byte range. */
-export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number } = {}): LogRange {
+export function appendLog(path: string, entry: Record<string, unknown>, opts: { timeoutMs?: number; requireCompleteTail?: boolean } = {}): LogRange {
   const parent = openPrivateDirectory(dirname(resolve(path)));
   if (parent === undefined) throw Object.assign(new Error('Event Log parent is unavailable'), { code: 'ENOENT' });
   let mayHavePersisted=false, range: LogRange | undefined;
   try {
     try {serialized(`${path}.append.lock`,()=>{
-      try {range=appendLogLocked(path,entry,parent);mayHavePersisted=true;}
+      try {range=appendLogLocked(path,entry,parent,opts.requireCompleteTail);mayHavePersisted=true;}
       catch(e){if((e as NodeJS.ErrnoException).code==='CE_LOG_APPEND_AMBIGUOUS')mayHavePersisted=true;throw e;}
     },{...opts,parentFd:parent});}
     finally {closeSync(parent);}
@@ -692,10 +881,17 @@ export function appendLog(path: string, entry: Record<string, unknown>, opts: { 
   return range!;
 }
 
-function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd: number): LogRange {
+function appendLogLocked(path: string, entry: Record<string, unknown>, parentFd: number, requireCompleteTail = false): LogRange {
   let appended=false;
   try {
-  truncateTornTailLocked(path, parentFd);
+  if (requireCompleteTail) {
+    const check = verifiedLogDescriptor(path, false, true, parentFd);
+    try {
+      const size = fstatSync(check).size;
+      const byte = Buffer.alloc(1);
+      if (size && (readSync(check, byte, 0, 1, size - 1) !== 1 || byte[0] !== 10)) throw new Error('torn Event Log refuses restore confirmation without repair');
+    } finally { closeSync(check); }
+  } else truncateTornTailLocked(path, parentFd);
   const line = Buffer.from(`${JSON.stringify({ ...entry, at: new Date().toISOString() })}\n`);
   const fd = verifiedLogDescriptor(path, true, false, parentFd);
   let start: number;
@@ -733,7 +929,7 @@ export function* readLog(path: string): Generator<Record<string,unknown>> {
 }
 
 /** Reads complete records from byte offset `from`, which must start a record, with each record's byte range. */
-export function* readLogRows(path: string, from = 0): Generator<LogRange & { entry: Record<string,unknown> }> {
+export function* readLogRows(path: string, from = 0, requireCompleteTail = false): Generator<LogRange & { entry: Record<string,unknown> }> {
   let fd: number;
   try {fd=verifiedLogDescriptor(path,false,true);}
   catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e;}
@@ -767,7 +963,8 @@ export function* readLogRows(path: string, from = 0): Generator<LogRange & { ent
       }
       position+=n;
     }
-    // Preserve the existing protocol: incomplete final lines are not records.
+    if (requireCompleteTail && bytes) throw new Error('torn Event Log refuses restore confirmation without repair');
+    // Preserve the existing recovery protocol: incomplete final lines are not records.
   } finally {closeSync(fd);}
 }
 
@@ -866,9 +1063,53 @@ export function removeDirectoryEntries(dir: string, own: (name: string) => boole
   } finally { closeSync(parent); }
 }
 
-export function removeTemps(privateDirs: string[], sharedDirs: string[]): string[] {
+/** A legacy ignore repair's PID has no start marker. Keep every present or uncertain PID. */
+function definitelyGone(pid: number): boolean {
+  try { process.kill(pid, 0); return false; }
+  catch (e) { return (e as NodeJS.ErrnoException).code === 'ESRCH'; }
+}
+
+/** Remove only a dead creator's exact private legacy ignore artifact in the core-owned namespace. */
+function removeLegacyIgnoreTemps(dir: string): string[] {
+  const parent = openPrivateDirectory(dir);
+  if (parent === undefined) return [];
+  const removed: string[] = [], bytes = Buffer.from(MANAGED_IGNORE);
+  try {
+    for (const name of readdirSync(anchor(parent))) {
+      const match = /^\.gitignore\.ce-([1-9]\d*)-[0-9a-f]{8}\.tmp$/.exec(name);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      if (!Number.isSafeInteger(pid) || !definitelyGone(pid)) continue;
+      const target = childTarget(anchor(parent), name);
+      let file: number | undefined;
+      try {
+        const found = lstatSync(target);
+        const usable = (st: ReturnType<typeof fstatSync>) => st.isFile() && st.owner === 'current' && st.privateAccess && st.nlink === 1 && st.size === bytes.length;
+        if (!usable(found)) continue;
+        file = openSync(target, 'read');
+        const st = fstatSync(file);
+        if (!usable(st) || st.dev !== found.dev || st.ino !== found.ino || openedPath(file) !== join(dir, name)) continue;
+        const current = boundedRead(file, st.size, bytes.length);
+        if (current === 'too-large' || !current.equals(bytes)) continue;
+        const now = lstatSync(target);
+        if (!usable(now) || now.dev !== st.dev || now.ino !== st.ino || !definitelyGone(pid)) continue;
+        // This reserved internal name remains a pathname unlink. Active same-user substitution
+        // after this final sample is unsupported, as for other core-owned temporary paths.
+        unlinkSync(target);
+        removed.push(join(dir, name));
+      } catch (e) {
+        if (!['ENOENT', 'ELOOP'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e;
+      } finally { if (file !== undefined) closeSync(file); }
+    }
+    if (removed.length) fsyncSync(parent);
+    return removed;
+  } finally { closeSync(parent); }
+}
+
+export function removeTemps(privateDirs: string[], sharedDirs: string[], legacyIgnoreDirs: string[] = []): string[] {
   return [
     ...privateDirs.flatMap(dir => removeDirectoryEntries(dir, name => name.endsWith('.tmp'))),
     ...sharedDirs.flatMap(dir => removeDirectoryEntries(dir, name => CORE_TEMP.test(name))),
+    ...legacyIgnoreDirs.flatMap(removeLegacyIgnoreTemps),
   ];
 }

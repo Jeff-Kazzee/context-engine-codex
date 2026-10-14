@@ -207,3 +207,196 @@ for (const missingAccounting of [false, true]) {
     again.session.close();
   });
 }
+
+for (const loss of ['first-row', 'interior-row', 'final-row', 'all-rows', 'batch-interior', 'interior-with-torn-tail'] as const) {
+  test(`issue27: missing covered runner evidence ${loss} refuses without changing preserved bytes`, () => {
+    const f = fixture();
+    const opts = { ...f, sessionId: 'S1', runner: 'issue27', hardLimit: 10_000 };
+    const paths = layout(f.projectRoot, 'S1', f.stateDir);
+    const opened = openSession(opts);
+    assert.equal(opened.status, 'open');
+    const events = ['LOST_EVIDENCE', 'INTERIOR_EVIDENCE', 'KEPT_EVIDENCE'].map(text => ({ role: 'user', text }));
+    if (loss === 'batch-interior') opened.session.record(events);
+    else for (const event of events) opened.session.record([event]);
+    opened.session.close();
+    const lost = loss === 'first-row' ? 1 : loss === 'final-row' ? 3 : 2;
+    const lines = readFileSync(paths.events, 'utf8').trimEnd().split('\n');
+    const retained = lines.flatMap(line => {
+      const row = JSON.parse(line);
+      if (row.type !== 'runner-events') return [line];
+      if (loss === 'all-rows') return [];
+      if (loss === 'batch-interior') {
+        row.events = row.events.filter((event: { seq: number }) => event.seq !== lost);
+        return [JSON.stringify(row)];
+      }
+      return row.events.some((event: { seq: number }) => event.seq === lost) ? [] : [line];
+    });
+    writeFileSync(paths.events, retained.join('\n') + '\n' + (loss === 'interior-with-torn-tail' ? '{"unfinished":' : ''));
+    // The close checkpoint is retained. Changed log metadata must invalidate it.
+    const preserved = [paths.events, paths.head, paths.workingContext, join(paths.stateDir, 'recovery.json'),
+      ...[1, 2, 3].map(rev => join(paths.revisions, `${rev}.md`)).filter(path => fs.existsSync(path))];
+    const before = preserved.map(path => readFileSync(path));
+    assert.throws(() => openSession(opts), /covered runner-event sequence evidence/);
+    preserved.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+    assert.equal(readLock(paths.lock), null);
+  });
+}
+
+for (const kind of ['model-edit', 'native-compaction'] as const) {
+  for (const lost of [false, true]) {
+    test(`issue27: ${kind} recovery with missing covered row=${lost}`, () => {
+      const f = fixture();
+      const opts = { ...f, sessionId: 'S1', runner: 'issue27', hardLimit: 10_000 };
+      const paths = layout(f.projectRoot, 'S1', f.stateDir);
+      const opened = openSession(opts);
+      assert.equal(opened.status, 'open');
+      opened.session.record([{ role: 'user', text: 'LOST_EVIDENCE' }]);
+      opened.session.record([{ role: 'tool', text: 'KEPT_EVIDENCE' }]);
+      if (kind === 'model-edit') {
+        writeFileSync(paths.workingContext, 'MODEL_EDIT_CONTROL');
+        opened.session.sync();
+      } else opened.session.nativeCompaction([{ role: 'user', text: 'COMPACTION_CONTROL' }]);
+      opened.session.close();
+      if (!lost) priorRecoveryCheckpoint(join(paths.stateDir, 'recovery.json'));
+      const expectedText = readFileSync(paths.workingContext, 'utf8');
+      const rows = readFileSync(paths.events, 'utf8').trimEnd().split('\n');
+      if (lost) writeFileSync(paths.events, rows.filter(line => {
+        const row = JSON.parse(line);
+        return row.type !== 'runner-events' || !row.events.some((event: { seq: number }) => event.seq === 1);
+      }).join('\n') + '\n');
+      const preserved = [paths.events, paths.head, paths.workingContext, join(paths.stateDir, 'recovery.json')];
+      const before = preserved.map(path => readFileSync(path));
+      if (lost) {
+        assert.throws(() => openSession(opts), /covered runner-event sequence evidence/);
+        preserved.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+        assert.equal(readLock(paths.lock), null);
+      } else {
+        const again = openSession(opts);
+        assert.equal(again.status, 'open');
+        assert.equal(again.session.sync().workingContextText, expectedText);
+        again.session.close();
+      }
+    });
+  }
+}
+
+test('issue27: a missing pending sequence refuses before replay publishes another prepared HEAD', (t) => {
+  const f = committed();
+  appendFileSync(f.paths.events, JSON.stringify({ type: 'runner-events', events: [
+    { seq: 2, event: { role: 'tool', text: 'PENDING_BEFORE_LOSS' } },
+    { seq: 4, event: { role: 'tool', text: 'PENDING_AFTER_LOSS' } },
+  ] }) + '\n');
+  const paths = [f.paths.events, f.paths.head, f.paths.workingContext, join(f.paths.stateDir, 'recovery.json')];
+  const before = paths.map(path => readFileSync(path));
+  let error: unknown;
+  let returned: ReturnType<typeof openSession> | undefined;
+  try { returned = openSession(f.opts); } catch (cause) { error = cause; }
+  t.diagnostic(JSON.stringify({ beforeThrough: JSON.parse(before[1]!.toString()).through,
+    afterThrough: JSON.parse(readFileSync(f.paths.head, 'utf8')).through,
+    returned: returned?.status ?? 'refused' }));
+  if (returned?.status === 'open') returned.session.close();
+  assert.match(String(error), /covered runner-event sequence evidence/);
+  paths.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+  assert.equal(readLock(f.paths.lock), null);
+});
+
+function priorRecoveryCheckpoint(path: string, log?: string): void {
+  const { checksum: _checksum, ...payload } = JSON.parse(readFileSync(path, 'utf8'));
+  payload.version = 3;
+  if (log) {
+    const stat = fs.statSync(log, { bigint: true });
+    payload.log = { dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size),
+      mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs) };
+  }
+  writeFileSync(path, JSON.stringify({ ...payload, checksum: sha(JSON.stringify(payload)) }));
+}
+
+test('issue27: a prior weaker checkpoint cannot authorize missing sequence evidence', () => {
+  const f = committed();
+  const opened = openSession(f.opts);
+  assert.equal(opened.status, 'open');
+  opened.session.record([{ role: 'tool', text: 'KEPT_EVIDENCE' }]);
+  opened.session.close();
+  const rows = readFileSync(f.paths.events, 'utf8').trimEnd().split('\n');
+  writeFileSync(f.paths.events, rows.filter(line => {
+    const row = JSON.parse(line);
+    return row.type !== 'runner-events' || !row.events.some((event: { seq: number }) => event.seq === 1);
+  }).join('\n') + '\n');
+  const cache = join(f.paths.stateDir, 'recovery.json');
+  // The old validator could accept this loss and save a metadata-matching v3 cache.
+  priorRecoveryCheckpoint(cache, f.paths.events);
+  const paths = [f.paths.events, f.paths.head, f.paths.workingContext, cache];
+  const before = paths.map(path => readFileSync(path));
+  assert.throws(() => openSession(f.opts), /covered runner-event sequence evidence/);
+  paths.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+  assert.equal(readLock(f.paths.lock), null);
+});
+
+test('issue27: a valid prior checkpoint upgrades after recovery and the current checkpoint reopens', () => {
+  const f = committed();
+  const cache = join(f.paths.stateDir, 'recovery.json');
+  priorRecoveryCheckpoint(cache);
+  const expected = readFileSync(f.paths.workingContext, 'utf8');
+  const opened = openSession(f.opts);
+  assert.equal(opened.status, 'open');
+  assert.equal(opened.session.sync().workingContextText, expected);
+  opened.session.close();
+  assert.equal(JSON.parse(readFileSync(cache, 'utf8')).version, 5);
+  const again = openSession(f.opts);
+  assert.equal(again.status, 'open');
+  assert.equal(again.session.sync().workingContextText, expected);
+  again.session.close();
+});
+
+test('issue27: first-commit pending loss refuses before creating a prepared HEAD', (t) => {
+  const f = fixture();
+  const opts = { ...f, sessionId: 'S1', runner: 'issue27', hardLimit: 10_000 };
+  const paths = layout(f.projectRoot, 'S1', f.stateDir);
+  const first = openSession(opts);
+  assert.equal(first.status, 'open');
+  first.session.close();
+  appendFileSync(paths.events, JSON.stringify({ type: 'runner-events', events: [
+    { seq: 1, event: { role: 'user', text: 'FIRST_PENDING' } },
+    { seq: 3, event: { role: 'tool', text: 'AFTER_MISSING_PENDING' } },
+  ] }) + '\n');
+  const preserved = [paths.events, paths.head, paths.workingContext, join(paths.stateDir, 'recovery.json')];
+  const bytes = (path: string) => fs.existsSync(path) ? readFileSync(path) : null;
+  const before = preserved.map(bytes);
+  let error: unknown;
+  let returned: ReturnType<typeof openSession> | undefined;
+  try { returned = openSession(opts); } catch (cause) { error = cause; }
+  t.diagnostic(JSON.stringify({ beforeHead: null, afterThrough: fs.existsSync(paths.head) ? JSON.parse(readFileSync(paths.head, 'utf8')).through : null,
+    returned: returned?.status ?? 'refused' }));
+  if (returned?.status === 'open') returned.session.close();
+  assert.match(String(error), /covered runner-event sequence evidence/);
+  preserved.forEach((path, index) => assert.deepEqual(bytes(path), before[index]));
+  assert.equal(readLock(paths.lock), null);
+});
+
+for (const transition of ['unchanged', 'pending-replay', 'model-edit', 'all-rows'] as const) {
+  test(`issue27: legacy runner loss refuses before ${transition} recovery changes evidence`, () => {
+    const f = committed();
+    const opened = openSession(f.opts);
+    assert.equal(opened.status, 'open');
+    opened.session.record([{ role: 'tool', text: 'KEPT_LEGACY_EVIDENCE' }]);
+    opened.session.close();
+    legacy(f, transition === 'all-rows');
+    const rows = readFileSync(f.paths.events, 'utf8').trimEnd().split('\n');
+    writeFileSync(f.paths.events, rows.filter(line => {
+      const row = JSON.parse(line);
+      return row.type !== 'runner-events' || (transition !== 'all-rows' && !row.events.some((event: { seq: number }) => event.seq === 1));
+    }).join('\n') + '\n');
+    if (transition === 'pending-replay') appendFileSync(f.paths.events, JSON.stringify({ type: 'runner-events',
+      events: [{ seq: 3, event: { role: 'tool', text: 'NEW_PENDING_LEGACY_EVENT' } }] }) + '\n');
+    if (transition === 'model-edit') writeFileSync(f.paths.workingContext, 'NEW_LEGACY_MODEL_EDIT');
+    const orphan = join(f.paths.revisions, '99.md'), temporary = join(f.paths.stateDir, 'issue27-evidence.tmp');
+    writeFileSync(orphan, 'ORPHAN_REVISION_EVIDENCE');
+    writeFileSync(temporary, 'TEMPORARY_EVIDENCE');
+    const paths = [f.paths.events, f.paths.head, f.paths.workingContext, join(f.paths.stateDir, 'recovery.json'),
+      join(f.paths.revisions, '1.md'), join(f.paths.revisions, '2.md'), orphan, temporary];
+    const before = paths.map(path => readFileSync(path));
+    assert.throws(() => openSession(f.opts), /covered runner-event sequence evidence/);
+    paths.forEach((path, index) => assert.deepEqual(readFileSync(path), before[index]));
+    assert.equal(readLock(f.paths.lock), null);
+  });
+}

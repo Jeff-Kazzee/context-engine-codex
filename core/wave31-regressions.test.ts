@@ -173,7 +173,11 @@ for(const staleEntry of [false,true])test('wave31: a torn identified row is neve
     const bytes=fs.readFileSync(log),start=bytes.lastIndexOf(0x0a)+1;
     commitIndexLine(state,operationId,JSON.stringify({id:operationId,sha:sha(JSON.stringify(events.map(retainRunnerEvent))),start,end:bytes.length})+'\n',bytes.length);
   }
-  first.session.close();
+  const tornBeforeClose = fs.readFileSync(log);
+  assert.throws(() => first.session.close(), /torn Event Log/);
+  assert.deepEqual(fs.readFileSync(log), tornBeforeClose, 'close retains the torn evidence without acknowledgement');
+  assert.equal(fs.existsSync(join(state, 'lock')), false, 'failed close still releases the session lock');
+  assert.throws(() => first.session.sync(), /closed/);
   const next=openSession(options);assert.equal(next.status,'open');
   next.session.record(events,{operationId});
   assert.equal(next.session.sync().workingContextText.match(/TORN_ONCE/g)?.length,1);

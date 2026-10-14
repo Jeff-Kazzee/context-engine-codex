@@ -45,15 +45,12 @@ const inScope = (start: Start, fault: Fault) => start !== 'clean' || RACES.inclu
 const PRUNED: Array<[Start | '*', Kind | '*', Fault[], string]> = [
   ['*', 'own-file tool', ['record', ...RACES], 'a tool that touched the managed file only syncs'],
   ['*', 'new_context', ['state', 'record', 'delivered', ...RACES], 'the reset gate writes no notice state and never records'],
-  ['*', 'PreCompact', ['delivered'], 'compaction never delivers a notice'],
+  ['*', 'PreCompact', ['delivered', 'output', 'lost'], 'compaction carries durable notices and writes no output for safely readable context'],
   ['*', 'Stop', ['sync', 'delivered', 'sync-fail', 'sync-late'], 'a Stop makes no sync call and never delivers a notice'],
   ['idle', 'new_context', ['output', 'lost'], 'the gate allows a reset onto a valid edit and writes no output'],
   ['checking', 'new_context', ['output', 'lost'], 'the gate allows a reset over an edit owed at HEAD and writes no output'],
-  ['idle', 'PreCompact', ['output', 'lost'], 'compaction onto a valid edit writes no output'],
-  ['checking', 'PreCompact', ['output', 'lost'], 'compaction carries an edit owed at HEAD and writes no output'],
   ['*', 'Stop', ['output', 'lost'], 'a Stop carries an owed notice and writes no output'],
   ['pending', 'new_context', ['sync', 'sync-fail', 'sync-late'], 'the gate refuses a pending notice before its sync'],
-  ['pending', 'PreCompact', ['state', 'sync', 'record', 'sync-fail', 'sync-late', ...RACES], 'compaction refuses a pending notice before any state write or core call'],
 ];
 const pruned = (start: Start, kind: Kind, fault: Fault) => PRUNED.some(([s, k, faults]) => (s === '*' || s === start) && (k === '*' || k === kind) && faults.includes(fault));
 

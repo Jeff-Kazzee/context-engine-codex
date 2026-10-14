@@ -37,7 +37,7 @@ A hook reads the Event Log only past the byte offset that the notice state keeps
 - A Stop killed after its record call leaves its intent, which refuses the session as described below. The edit stays owed in the log.
 - A hook killed after it marks its notice delivered, and before it exits, loses the notice. Codex applies none of a killed hook's output, and no hook can see whether Codex applied it.
 
-A Stop cannot deliver a notice. It records its reply and leaves an owed notice pending, and the next prompt or tool hook delivers it. Until then a pending notice refuses a reset and a compaction: the gate denies `new_context`, and PreCompact stops the compaction, which aborts the user's turn. A notice owed only through a model edit at HEAD or in the log refuses neither:
+A Stop cannot deliver a notice. It records its reply and leaves an owed notice pending, and the next prompt or tool hook delivers it. Until then the gate denies `new_context` while its committed-edit read notice is pending. Native PreCompact carries that notice through safely readable compaction, subject to the unrecorded-input checks below. A notice owed only through a model edit at HEAD or in the log refuses neither:
 
 - The gate allows the reset. After it, the agent reads the whole Working Context back, which holds the edit. The `new_context` tool's own PostToolUse hook also carries the notice, but Codex runs that hook before the reset, so that notice lands in history the reset discards.
 - PreCompact writes the notice as pending before its marker and lets the compaction proceed. The next prompt or tool hook delivers it.
@@ -48,7 +48,7 @@ The notice names a revision that still holds the edit:
 - An ordinary tool hook records its own output and names the revision that record produced. Until a read-back hook returns the whole current file in the same turn, each ordinary record refreshes that notice to its new revision. This covers parallel tools whose hooks run one after another before the model sees their outputs. The hook recognizes the complete file in raw text or an `output` or `stdout` field. Partial, paged, or transformed results remain unacknowledged and can produce extra notices in that turn.
 - A prompt names the revision it committed. An edit made between turns, which no tool hook saw, gets its notice this way.
 
-A successful stdout write confirms only hook transport, not ingestion by a model request. Repeated output is possible if acknowledgement fails after the write.
+A successful stdout write shows emitted bytes. Codex applies hook output after a successful exit. Committed-edit read notices retain the post-mark kill limitation above. Durable restore notices stay pending and can repeat across later hooks.
 
 `notice-sweep.test.ts` checks these rules. Its faults are kills at each hook step, a closed stdout, sync calls that fail with and without committing, and an edit written while a record call runs. It runs parallel tools' hooks one after another and observes their combined outputs, as Codex does when the tools finish at different times. Every fault in a cell must fire, and `SWEEP_PRUNED=1` checks that no pruned fault fires. After a fault the sweep checks the notice and the tool outputs before it sends any event twice. It then sends a faulted tool event again to show the documented way to clear that debt, which Codex does not do on its own. `notice-review.test.ts` checks staggered notice read-back, bounded Event Log reads, and a single compaction refusal after a failed final check.
 
@@ -75,3 +75,33 @@ A Stop or a completed tool killed at the limit leaves its completion intent mark
 Only the same tool event, sent again with the same `tool_use_id` and `turn_id`, records once and clears a completed-tool marker. Codex 0.161.0 does not rerun a failed hook, and a Stop has no identity to retry. Either way, the session stays refused until you disable Context Engine for the project.
 
 Managed-file classification resolves tool paths against the project root. It compares each path as given and in canonical form, so a cwd reached through a symlink still recognizes the Working Context by its canonical path or by the relative path that the hook's notices name. It also resolves each path the way the filesystem does, so a symlink followed by `..` is classified by the directory it actually reaches. A path outside that root or under another directory's `.context-engine` remains ordinary tool output. Setup can remove its final managed instruction block when the file has no trailing newline.
+
+
+Restore notices created by this version carry unique durable intent IDs. A restore intent is written before file publication, so replay says restoration was requested and requires a reread. It does not claim that the following rename completed. The rejected edit is retained separately. Sync and unmaterialized runner-append recovery both reoffer pending notices even when the file already matches HEAD, without rewriting it just to replay a notice. Older ID-less restored rows remain readable, but their historical lost notices and delivery outcomes are not reconstructed.
+
+Each new restore attempt has a distinct notice ID, including identical rejected bytes at one revision. Confirmation of an earlier attempt cannot clear a later one. Local samples in one materialization are deduplicated. An ambiguous crash retry can create another attempt and retain another rejected-edit row. Retention in that case is at least once, not exactly once. Invalid-sync recovery of an already-current file needs no new restore attempt. An unmaterialized append can still recover its preserved predecessor and create another independently confirmable intent, even when the public file already matches HEAD.
+
+Each result represents at most 64 pending IDs and reports the total pending count. Model-facing output uses one bounded static summary. The remaining IDs stay durable and advance after successful confirmation of the represented batch. CLI stdout confirms its own transport by default. Native Codex hooks defer that confirmation and keep notices pending. Other adapter transports confirm only carried IDs against the offered session generation after their observed transport succeeds.
+
+Acknowledgment validates the durable HEAD/log boundary and IDs without syncing, materializing, repairing the ignore file, or rewriting Working Context. Unknown IDs or a stale owner generation refuse before confirmation. A repeated confirmed ID is harmless.
+
+The disposable recovery checkpoint moves from version 4 to 5 to cache pending intents. Older checkpoints rebuild from the Event Log. HEAD and historical log records are not migrated.
+
+Native Codex hooks do not confirm restore notices. Codex accepts hook output only after a successful exit, and the hook receives no acceptance acknowledgment. A complete stdout write cannot prove that acceptance. Prompt and tool hooks reoffer durable pending notices. A reset refusal can carry the same warning. Successful native compaction keeps it for the next prompt or tool hook. The represented batch can repeat indefinitely, with additional IDs queued.
+
+Native hooks keep restore IDs pending because the host provides no acceptance callback. Warning delivery and reset safety have separate state. An agent reset can proceed after a complete current Working Context read observed in tool output. The barrier binds the owner generation, revision, content digest and the full pending restore-attempt set. Sequential plain or framed CLI read parts must reconstruct the complete current file. Partial reads, changed content, a new owner or another restore attempt invalidate the barrier.
+
+The barrier does not prove model ingestion or confirm restore IDs. Native manual and token-limit compaction require safely readable, nonempty UTF-8 context within the read limit. Unrecorded input debt refuses compaction. Previously pending warning or committed-edit notices alone do not abort that compaction. The next prompt or tool hook reoffers those notices. After compaction, read every part in the next window.
+
+PreCompact refuses a restoration it first discovers until it observes a complete current restored-state read. The adapter writes a private read intent before the core call. A retry or hook killed after sync cannot bypass that read. Partial or stale reads, a new owner and another restore attempt do not clear it. An interrupted compaction check can conservatively require a read even if no restoration occurred.
+
+A separate caller with observed transport can confirm represented IDs against their offered owner generation. Do not confirm them merely to dismiss a warning. A represented batch can still repeat indefinitely while the host has no acknowledgment API.
+
+The turn loop keeps its separate confirmation after a successful turn/start reply. Refused injection and an uncertain or lost start reply leave notices pending. Delivery is at least once under retry. No exactly-once display or model ingestion guarantee is made. Offline synthetic controls do not establish installed host acceptance.
+
+
+Confirmed restore history uses a disposable lookup with 64 bounded shards. Each shard holds compact identity and row-offset evidence, not rejected edit payloads. A cold rebuild streams compact rows, then processes one shard at a time. Only pending notice bodies remain in session memory.
+
+The lookup binds its source log identity, size and timestamps. Shard hashes and original row checks protect lookups. Missing or safely readable invalid cache data rebuilds from the retained Event Log. Unsafe or oversized cache files refuse with source evidence preserved. Warm refresh processes appended rows. Confirmation still performs the full continuous runner-evidence check. This repair does not make that independent integrity scan incremental.
+
+A serialized shard cannot exceed 4 MiB. Capacity exhaustion refuses with the source evidence retained. Rebuild scratch space grows with compact historical rows and is removed after a completed or failed rebuild. Pending notices, rejected edits and original recovery history are never deleted by this lookup.

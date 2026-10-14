@@ -229,7 +229,8 @@ class TurnLoop {
   private async runOneTurn(prompt: string): Promise<TurnResult> {
     const turn = ++this.turns;
     const synced = this.session.sync();
-    const receipts = [...this.pendingReceipts, ...(synced.receipt ? [synced.receipt] : [])];
+    const restoreNoticeIds = (synced.restoreNotices ?? []).map(n => n.id);
+    const receipts = [...this.pendingReceipts, ...(synced.receipt ? [synced.receipt] : []), ...(synced.restoreNotices?.[0] && synced.restoreNoticeSummary ? [{kind: 'restored' as const, revision: synced.restoreNotices[0].revision, reason: synced.restoreNotices[0].reason, chars: synced.restoreNotices[0].chars, approxTokens: Math.ceil(synced.restoreNotices[0].chars / 4), text: synced.restoreNoticeSummary}] : [])];
     this.pendingReceipts = [];
 
     let replaced = false;
@@ -271,7 +272,7 @@ class TurnLoop {
     this.threadId = threadId;
 
     const input = [...receipts.map((r) => ({ type: 'text', text: r.text })), { type: 'text', text: prompt }];
-    const { turnId, status, items, usage, error } = await this.startAndWait(threadId, input);
+    const { turnId, status, items, usage, error } = await this.startAndWait(threadId, input, restoreNoticeIds);
     const finalMessage = agentMessages(items).at(-1) ?? '';
     let recorded;
     try { recorded = this.session.record([{ role: 'user', text: prompt }, ...items.flatMap(toEvents)]); }
@@ -301,7 +302,7 @@ class TurnLoop {
 
   private refused(turn: number, revision: number, receipts: TurnLoopReceipt[]): TurnResult {
     // The core's receipts are kept for the next turn, so the model still gets them once a turn runs.
-    this.pendingReceipts = receipts.filter((r) => r.kind !== 'not-replaced');
+    this.pendingReceipts = receipts.filter((r) => r.kind !== 'not-replaced' && !r.text.includes('restore request(s) remain pending.'));
     return {
       mode: null,
       turn,
@@ -319,7 +320,7 @@ class TurnLoop {
     };
   }
 
-  private async startAndWait(threadId: string, input: object[]) {
+  private async startAndWait(threadId: string, input: object[], restoreNoticeIds: string[]) {
     const items: any[] = [];
     let usage: unknown = null;
     let turnId: string | null = null;
@@ -338,6 +339,10 @@ class TurnLoop {
     try {
       const started = await this.rpc.request<{ turn: { id: string } }>('turn/start', { threadId, input, ...(this.opts.effort ? { effort: this.opts.effort } : {}) }, { timeoutMs: this.opts.turnTimeoutMs ?? 30 * 60_000 });
       turnId = started.turn.id;
+      if (restoreNoticeIds.length) {
+        try { this.session.confirmRestoreNotices(restoreNoticeIds); }
+        catch { /* A successful handoff may repeat its notice if durable confirmation failed. */ }
+      }
       for (const n of early.splice(0)) onNote(n);
       const ms = this.opts.turnTimeoutMs ?? 30 * 60_000;
       let timer: NodeJS.Timeout | undefined;

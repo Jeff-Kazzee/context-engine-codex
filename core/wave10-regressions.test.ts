@@ -59,14 +59,15 @@ test('wave10: direct sync retains restoration after budget accounting fails', ()
   assert.equal(s.sync().receipt?.kind, 'restored'); s.close();
 });
 
-test('wave10: exhausted event sequence refuses before appending or invalidating HEAD', () => {
+test('wave10: a skipped exhausted sequence refuses recovery before changing log or HEAD', () => {
   const { f, s } = opened(), state = s.stateDir; s.close();
   appendLog(join(state, 'events.jsonl'), { type: 'runner-events', events: [{ seq: Number.MAX_SAFE_INTEGER, event: { role: 'user', text: 'LAST_VALID_SEQUENCE' } }] });
-  const r = openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }); assert.equal(r.status, 'open');
-  const before = fs.readFileSync(join(state, 'events.jsonl')), head = fs.readFileSync(join(state, 'HEAD'));
-  assert.throws(() => r.session.record([{ role: 'user', text: 'OVERFLOW' }]), /sequence exhausted/);
+  const before = fs.readFileSync(join(state, 'events.jsonl')), head = join(state, 'HEAD');
+  assert.equal(fs.existsSync(head), false, 'no revision existed before the skipped sequence');
+  assert.throws(() => openSession({ ...f, sessionId: 'S1', runner: 'test', hardLimit: 10000 }), /missing covered runner-event sequence evidence/);
   assert.deepEqual(fs.readFileSync(join(state, 'events.jsonl')), before);
-  assert.deepEqual(fs.readFileSync(join(state, 'HEAD')), head); r.session.close();
+  assert.equal(fs.existsSync(head), false, 'refused recovery cannot create a revision');
+  assert.equal(fs.existsSync(join(state, 'lock')), false, 'refused recovery releases its lock');
 });
 
 test('wave10: exhausted revision counter refuses before adding a runner event', () => {
