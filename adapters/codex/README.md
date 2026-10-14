@@ -37,7 +37,7 @@ A hook reads the Event Log only past the byte offset that the notice state keeps
 - A Stop killed after its record call leaves its intent, which refuses the session as described below. The edit stays owed in the log.
 - A hook killed after it marks its notice delivered, and before it exits, loses the notice. Codex applies none of a killed hook's output, and no hook can see whether Codex applied it.
 
-A Stop cannot deliver a notice. It records its reply and leaves an owed notice pending, and the next prompt or tool hook delivers it. Until then a pending notice refuses a reset and a compaction: the gate denies `new_context`, and PreCompact stops the compaction, which aborts the user's turn. A notice owed only through a model edit at HEAD or in the log refuses neither:
+A Stop cannot deliver a notice. It records its reply and leaves an owed notice pending, and the next prompt or tool hook delivers it. Until then the gate denies `new_context` while its committed-edit read notice is pending. Native PreCompact carries that notice through safely readable compaction, subject to the unrecorded-input checks below. A notice owed only through a model edit at HEAD or in the log refuses neither:
 
 - The gate allows the reset. After it, the agent reads the whole Working Context back, which holds the edit. The `new_context` tool's own PostToolUse hook also carries the notice, but Codex runs that hook before the reset, so that notice lands in history the reset discards.
 - PreCompact writes the notice as pending before its marker and lets the compaction proceed. The next prompt or tool hook delivers it.
