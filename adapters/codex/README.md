@@ -91,7 +91,9 @@ Native Codex hooks do not confirm restore notices. Codex accepts hook output onl
 
 Native hooks keep restore IDs pending because the host provides no acceptance callback. Warning delivery and reset safety have separate state. An agent reset can proceed after a complete current Working Context read observed in tool output. The barrier binds the owner generation, revision, content digest and the full pending restore-attempt set. Sequential plain or framed CLI read parts must reconstruct the complete current file. Partial reads, changed content, a new owner or another restore attempt invalidate the barrier.
 
-The barrier does not prove model ingestion or confirm restore IDs. Native manual and token-limit compaction require safely readable, nonempty UTF-8 context within the read limit and no unrecorded-input debt. Pending warning or committed-edit notices alone do not abort that compaction. The next prompt or tool hook reoffers them. Complete read-back in the next window remains required.
+The barrier does not prove model ingestion or confirm restore IDs. Native manual and token-limit compaction require safely readable, nonempty UTF-8 context within the read limit. Unrecorded input debt refuses compaction. Previously pending warning or committed-edit notices alone do not abort that compaction. The next prompt or tool hook reoffers those notices. After compaction, read every part in the next window.
+
+PreCompact refuses a restoration it first discovers until it observes a complete current restored-state read. The adapter writes a private read intent before the core call. A retry or hook killed after sync cannot bypass that read. Partial or stale reads, a new owner and another restore attempt do not clear it. An interrupted compaction check can conservatively require a read even if no restoration occurred.
 
 A separate caller with observed transport can confirm represented IDs against their offered owner generation. Do not confirm them merely to dismiss a warning. A represented batch can still repeat indefinitely while the host has no acknowledgment API.
 

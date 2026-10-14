@@ -35,7 +35,10 @@ const RUNNER = 'codex';
 const DEFAULT_HARD_LIMIT = (272_000 - 32_000) * 4;
 
 /** The core could not be reached or refused the call. The event's handler selects its refusal/fallback. */
-class CoreUnavailable extends Error {}
+class CoreUnavailable extends Error {
+  readonly mayHaveMutated: boolean;
+  constructor(message: string, mayHaveMutated = true) { super(message); this.mayHaveMutated = mayHaveMutated; }
+}
 /** Context Engine is not active for this project (not enabled, or the kill switch): stand aside silently. */
 class Inactive extends Error {}
 class PendingPrompt extends Error {}
@@ -474,6 +477,7 @@ async function main(input: HookInput): Promise<void> {
     if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: the context window was NOT reset. An earlier user request was not recorded; retry that exact request after repairing storage, or disable Context Engine.');
       const refusal = resetRefusal(input);
       requireRecorded(input);
+      if (!refusal && compactReadIntent(input) !== undefined) clearCompactReadIntent(input);
       advanceLogOffset(input);
       return refusal;
     });
@@ -508,7 +512,8 @@ async function main(input: HookInput): Promise<void> {
     // check: this reset is Codex's own, made because the window is already full, so refusing it for
     // size would abort the user's turn and free nothing; and `context-engine read` pages a file of
     // up to 16 MiB; larger payloads must be offloaded (budget reminders warn earlier).
-    let refusal = resetRefusal(input, { budget: false });
+    const earlierReadIntent = compactReadIntent(input) !== undefined;
+    let refusal = resetRefusal(input, { budget: false, restoreRead: earlierReadIntent });
     // An edit owed a notice at HEAD is made durable before the marker moves HEAD past it. The next
     // hook after the compaction delivers it.
     if (lastSync) settleNotice(input, readNoticeState(input), lastSync);
@@ -520,16 +525,28 @@ async function main(input: HookInput): Promise<void> {
     if (!refusal && !lastTurnIsReset) {
       const manual = input.trigger === 'manual';
       const delivery = manual ? lib.CODEX_MANUAL_COMPACTION.label : lib.CODEX_TOKEN_LIMIT_RESET.label;
-      try {core(input, 'record', [{ role: 'tool', text: backstopMarker(delivery, manual), delivery }],lib.READ_MAX_FILE_BYTES);}
+      try {
+        const observed = lastSync;
+        const recorded = core(input, 'record', [{ role: 'tool', text: backstopMarker(delivery, manual), delivery }], lib.READ_MAX_FILE_BYTES);
+        // The marker's own sync can restore a racing edit or finish an uncertain earlier sync.
+        if (recorded.receipt?.kind === 'restored' || recorded.restoreNoticeGeneration !== observed?.restoreNoticeGeneration
+          || (compactionMutationUncertain && !restoreReadComplete(input, recorded))) {
+          writeCompactReadIntent(input, 'required');
+          refusal = restoredReadRefusal(input, recorded);
+        }
+        lastSync = recorded;
+      }
       catch(e) {
         // A marker may be omitted; a reset onto an unreadable context may not proceed.
-        const after=resetRefusal(input,{budget:false});
+        if (e instanceof CoreUnavailable && !e.mayHaveMutated && !compactionMutationUncertain && !earlierReadIntent && !lastSync) clearCompactReadIntent(input);
+        const after=resetRefusal(input,{budget:false,restoreRead:compactReadIntent(input)!==undefined});
         if(after)refusal=after;
         else if(!(e instanceof CoreUnavailable))throw e;
       }
     }
     // Completion debt can appear while compaction waits. A notice this hook made pending is carried.
     requireNoCompletionDebt(input);
+    if (!refusal && lastSync) clearCompactReadIntent(input);
     advanceLogOffset(input);
     return refusal;
     });
@@ -541,7 +558,7 @@ async function main(input: HookInput): Promise<void> {
 }
 
 /** Syncs the Working Context before a reset. Returns why the reset must not happen, or null. */
-function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: true }): string | null {
+function resetRefusal(input: HookInput, check: { budget: boolean; restoreRead?: boolean } = { budget: true }): string | null {
   const notReset = NOT_RESET;
   let result: CoreResult;
   lastSync = undefined;
@@ -556,6 +573,8 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
     if (check.budget) {
       return `${notReset} The Context Engine core could not be reached, so your Working Context ${path} could not be checked, and resetting onto a file that cannot be delivered would lose the conversation. Carry on in this window for now.`;
     }
+    if (check.restoreRead) return `${notReset} A compaction check may have restored your Working Context. The core could not verify a complete current read. Repair the core and read every part before retrying.`;
+    if (e instanceof CoreUnavailable && !e.mayHaveMutated && !compactionMutationUncertain) clearCompactReadIntent(input);
     // Codex's own reset (PreCompact) happens because the window is full; stopping it aborts the
     // user's turn. Without the core, require a safely readable file within the multipart byte bound.
     let text = '';
@@ -572,8 +591,10 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
   const lastTurn = String(result.turns?.at(-1)?.text ?? '');
   lastTurnIsReset = (lastTurn.split(/\n[ \t]*\n/).at(-1) ?? '').trimStart().startsWith('Context window reset');
   const path = relative(input.cwd, result.workingContext ?? '') || lib.workingContextRelPath(input.session_id);
-  if (check.budget && (result.receipt?.kind === 'restored' || result.restoreNotices?.length) && !restoreReadComplete(input, result)) {
-    return `${notReset} ${[...(result.receipt ? [result.receipt.text] : []), ...restoreSummary(result)].join('\n')} Run \`context-engine read --session ${JSON.stringify(input.session_id)} --sha ${store.sha(result.workingContextText ?? '')}\` and read every part before retrying. Keep the same digest for later parts and make sure the file holds the current task.`;
+  const freshRestore = result.receipt?.kind === 'restored';
+  if (!check.budget && freshRestore) writeCompactReadIntent(input, 'required');
+  if ((freshRestore || check.restoreRead || (check.budget && (result.restoreNotices?.length || compactReadIntent(input) !== undefined))) && !restoreReadComplete(input, result)) {
+    return restoredReadRefusal(input, result);
   }
   if (!result.revision || !result.turns?.some(turn => turn.text.trim() !== '')) {
     return `${notReset} Your Working Context ${path} is missing or empty and there is no earlier revision to restore. Write the current task, decisions and next step into it.`;
@@ -594,6 +615,28 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
   return null;
 }
 
+type CompactReadIntent = 'checking' | 'required';
+function compactReadPath(input: HookInput): string {
+  return join(store.layout(input.cwd, input.session_id, store.resolveStateRoot()).stateDir, 'codex-precompact-read.json');
+}
+function compactReadIntent(input: HookInput): CompactReadIntent | undefined {
+  const bytes = store.readBytes(compactReadPath(input), 128);
+  if (!bytes) return undefined;
+  const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  if (!value || (value.kind !== 'checking' && value.kind !== 'required')) throw new Error('invalid compaction read intent');
+  return value.kind;
+}
+function writeCompactReadIntent(input: HookInput, kind: CompactReadIntent): void {
+  store.atomicWrite(compactReadPath(input), JSON.stringify({ kind }), 'frame-key-tmp');
+}
+function clearCompactReadIntent(input: HookInput): void {
+  const path = compactReadPath(input);
+  store.removeDirectoryEntries(dirname(path), name => name === basename(path));
+}
+function restoredReadRefusal(input: HookInput, result: CoreResult): string {
+  return `${NOT_RESET} ${[...(result.receipt ? [result.receipt.text] : []), ...restoreSummary(result)].join('\n')} Run \`context-engine read --session ${JSON.stringify(input.session_id)} --sha ${store.sha(result.workingContextText ?? '')}\` and read every part before retrying. Keep the same digest for later parts and make sure the file holds the current task.`;
+}
+
 // This barrier records observed tool bytes. It never acknowledges host acceptance or retires IDs.
 type RestoreRead = { owner: string; restore: string; revision: number; sha256: string; offset: number; nextPart: number; parts: number; complete: boolean };
 function restoreReadPath(input: HookInput): string {
@@ -610,7 +653,7 @@ function restoreReadState(input: HookInput): RestoreRead | undefined {
   return v;
 }
 function sameRestoreRead(state: RestoreRead | undefined, result: CoreResult): boolean {
-  return !!state && state.owner === result.sessionGeneration && state.restore === result.restoreNoticeGeneration
+  return !!state && state.owner === result.sessionGeneration && state.restore === (result.restoreNoticeGeneration ?? store.sha(''))
     && state.revision === result.revision && state.sha256 === store.sha(result.workingContextText ?? '');
 }
 function restoreReadComplete(input: HookInput, result: CoreResult): boolean {
@@ -618,7 +661,7 @@ function restoreReadComplete(input: HookInput, result: CoreResult): boolean {
   return sameRestoreRead(state, result) && state!.complete;
 }
 function observeRestoreRead(input: HookInput, result: CoreResult): void {
-  if (!result.restoreNotices?.length || !result.sessionGeneration || !result.restoreNoticeGeneration || !result.revision || !result.workingContextText) return;
+  if ((!result.restoreNotices?.length && compactReadIntent(input) === undefined) || !result.sessionGeneration || !result.revision || !result.workingContextText) return;
   const whole = Buffer.from(result.workingContextText), digest = store.sha(result.workingContextText);
   const previous = restoreReadState(input), current = sameRestoreRead(previous, result) ? previous : undefined;
   const response = input.tool_response;
@@ -626,7 +669,7 @@ function observeRestoreRead(input: HookInput, result: CoreResult): void {
     ? ['stdout', 'output'].flatMap(k => k in response && typeof response[k as keyof typeof response] === 'string' ? [String(response[k as keyof typeof response])] : []) : [];
   for (const output of outputs) {
     if (Buffer.byteLength(output) > lib.READ_MAX_BYTES) continue;
-    const base = { owner: result.sessionGeneration, restore: result.restoreNoticeGeneration, revision: result.revision, sha256: digest };
+    const base = { owner: result.sessionGeneration, restore: result.restoreNoticeGeneration ?? store.sha(''), revision: result.revision, sha256: digest };
     if (output.includes(result.workingContextText)) {
       store.atomicWrite(restoreReadPath(input), JSON.stringify({ ...base, offset: whole.length, nextPart: 2, parts: 1, complete: true }), 'frame-key-tmp');
       return;
@@ -758,6 +801,8 @@ const backstopMarker = (delivery: string, manual: boolean): string =>
 let lastTurnIsReset = false;
 /** Set by resetRefusal: its sync result, when the core answered. */
 let lastSync: CoreResult | undefined;
+/** A lost result stays uncertain for this hook invocation, even if a later spawn fails. */
+let compactionMutationUncertain = false;
 
 function renderToolCall(input: HookInput): string {
   // After a reset the recorded user request is the only request the model sees, and it reads like a
@@ -805,6 +850,8 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], 
   // A prompt syncs then records: 1s lease + 5s + 15s matches the reset gate's single 20s call.
   const timeout=input.hook_event_name==='PreCompact'?5000:input.hook_event_name==='PostToolUse'?7500:input.hook_event_name==='Stop'?15_000
     :input.hook_event_name==='UserPromptSubmit'?(command==='sync'?5000:15_000):20_000;
+  // Arm every compaction core call, including marker records and fallback rechecks.
+  if (input.hook_event_name === 'PreCompact') writeCompactReadIntent(input, compactReadIntent(input) ?? 'checking');
   const r = spawnSync(file, argv, { maxBuffer, input: events ? JSON.stringify(events) : '', encoding: 'utf8', timeout });
   let out: CoreResult | undefined;
   try {
@@ -813,7 +860,9 @@ function core(input: HookInput, command: 'record' | 'sync', events?: unknown[], 
   if (out?.ok && (out as { active?: boolean }).active === false) throw new Inactive();
   if (!out?.ok) {
     const why = r.error?.message ?? (out ? JSON.stringify(out) : r.stderr.trim() || `exit ${r.status}`);
-    throw new CoreUnavailable(`context-engine ${command} failed: ${why}`);
+    const mayHaveMutated = (r.error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT';
+    if (input.hook_event_name === 'PreCompact' && mayHaveMutated) compactionMutationUncertain = true;
+    throw new CoreUnavailable(`context-engine ${command} failed: ${why}`, mayHaveMutated);
   }
   return out;
 }

@@ -329,19 +329,20 @@ test('PreCompact (token-limit reset) proceeds silently when the Working Context 
   assert.equal(r.stdout, '');
 });
 
-test('PreCompact restores a missing Working Context and carries its pending warning', () => {
+test('PreCompact refuses a fresh restored context until a complete current read', () => {
   const f = enabledFixture();
   assert.equal(hook(f, prompt('Task: keep SECRET_NOTE_42 in mind.')).status, 0);
   const before = wc(f);
   rmSync(wcPath(f));
   const r = hook(f, { ...preCompact, trigger: 'manual' });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, '', 'readable recovered context permits native compaction without warning output');
-  assert.ok(wc(f).startsWith(before), 'the restored context survives before the compaction marker');
+  assert.equal(JSON.parse(r.stdout).continue, false, 'fresh restoration requires a complete current read');
+  assert.equal(JSON.parse(hook(f, { ...preCompact, trigger: 'manual' }).stdout).continue, false, 'retry cannot bypass the read');
+  assert.equal(wc(f), before, 'refusal preserves the recovered context before any reset marker');
   const log = layout(f.projectRoot, SID, f.stateDir).events;
   const pending = [...pendingRestoreNotices(log).keys()];
   assert.equal(pending.length, 1, 'the restore warning remains pending without a host acknowledgment');
-  const next = hook(f, prompt('AFTER_COMPACTION'));
+  const next = hook(f, prompt('AFTER_RESTORE'));
   assert.equal(next.status, 0, next.stderr);
   assert.match(next.stdout, /restore request\(s\).*pending/);
   assert.doesNotMatch(next.stdout, /SECRET_NOTE_42/);
@@ -349,6 +350,11 @@ test('PreCompact restores a missing Working Context and carries its pending warn
   const read = spawnSync(process.execPath, [CLI, 'read', '--session', SID, '--sha', sha], { cwd: f.projectRoot, encoding: 'utf8', env: env(f) });
   assert.equal(read.status, 0, read.stderr);
   assert.match(read.stdout, /SECRET_NOTE_42/);
+  const observed = hook(f, toolUse('Bash', { command: `context-engine read --session ${SID} --sha ${sha}` }, read.stdout));
+  assert.equal(observed.status, 0, observed.stderr);
+  const retry = hook(f, { ...preCompact, trigger: 'manual' });
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.equal(retry.stdout, '', 'complete current read permits compaction without confirming IDs');
   assert.deepEqual([...pendingRestoreNotices(log).keys()], pending, 'warning output and complete read do not confirm IDs');
 });
 
