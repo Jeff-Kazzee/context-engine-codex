@@ -43,10 +43,12 @@
     "core/recovery.test.ts": "5047b2ca9410c1d572c244155bd3e9d2f6948555c0402e10b5f48b1c53d360f3",
     "core/refs.ts": "3133705ded7429580212f02ab98ec52e76271bf7d968878b2e33a1bd8702ea3f",
     "core/renewed-regressions.test.ts": "8d207b1cab82b936226cbc6584ee9cc179d9a55e9afb1dfc701b803677e000c5",
-    "core/restore-notices.ts": "57e7774039f07296c1ba44b1380dfa37b2883880f6457a57ab1a1577c9df1bef",
+    "core/restore-history.test.ts": "3b19685ce56b794337c4878c461cee8424579280fc41c4677b7619a443cacd36",
+    "core/restore-lookup.ts": "2ced60f701b83fa51f12853f80f831c61857ff809c21ae67a185e867e13de5fc",
+    "core/restore-notices.ts": "d4853cb387e1f4c5eb28a139dfc45802094c1305168bda71e4304c29ddc7d9da",
     "core/review-regressions.test.ts": "46999bc11abfcf0a9e22ca17125d1d12a8335881ce3b99c5025b207bd851e525",
     "core/session.test.ts": "a81e8e37b62e3cde70abeba5fe869d483b1f0939a9fb1e82a80c34cbf3b141a7",
-    "core/session.ts": "d25e30b73e98e58bbf2fb66dd1b685643633224a2209c5ce9f71f87d91ea3c01",
+    "core/session.ts": "289eb68b9db8ab044506035e0f1e48acafbb7ec1e3842c6493cfc22fc70dd33b",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
     "core/store.ts": "c45f31b360bf8e6d8737ca54906448ba2688b99dfc3db432bfef03d9daa77a0b",
@@ -137,7 +139,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "6e893ea12b6a85810fd0d88d8cab38f25bfa39d3",
+  "corePatchCommit": "a58503a9d3565807fa7debee8f6821170854bcb5",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -172,6 +174,7 @@
     "Issue 30 adds separate legacy-ignore-temp cleanup after recovery validation. Only exact reserved names, exact legacy managed bytes, private current-user regular files with one link and PIDs proven absent are removed. Live or uncertain PIDs, malformed names, unknown bytes, oversized files, unsafe links and uncertain ownership are retained. Opened inode and final name identity are checked through a verified parent descriptor. Concurrent removal or detected replacement is harmless. Directory flush failures remain explicit. This reserved core-owned temporary namespace retains the final-sample limitation of pathname unlink. No generic sweep of the managed parent, format migration or arbitrary same-user substitution guarantee is introduced.",
     "Issue 31 adds unique durable restore-intent identities before publication and explicit carried-ID confirmation after adapter transport, separate from fresh operation receipts and revision delivery. Results carry at most 64 pending IDs and a bounded static summary with total count. Unrepresented IDs stay durable. Confirmation binds the offered owner generation and validates HEAD/log evidence without Working Context or ignore repair. Pending intents survive recovery/cache and external acknowledgments refresh through complete appended rows. Disposable cache 4 becomes 5, with no historical rewrite or HEAD migration. New attempts always get distinct IDs, including identical rejected bytes. Ambiguous crash retries may duplicate retained rejected-edit rows. Existing local materialization sample dedup remains. Claude compact/tool carriers conservatively reoffer without automatic acknowledgment, while per-step, Codex hooks and turn-loop confirm their observed transport boundaries. No model ingestion or exactly-once delivery claim is made.",
     "Issue 32 samples a verified predecessor descriptor up to four times after Working Context publication and during preserved-artifact recovery, continuing only after durable changed-byte logging. Stable or locally deduplicated samples stop. Append failure retains the artifact and marker and refuses completion. Controlled suffixes completed during logging are captured, while a suffix after the fourth sample remains outside the explicit final-sample contract. No arbitrary writer-completion, complete-capture or power-loss guarantee is introduced. No format or cache version change is needed.",
-    "CI integration repair: uncertain-append refusal precedes restore refresh. Maintained fixtures verify owner generations, distinct at-least-once retry intents, torn-log close refusal and released locks, warm tail reads without historical payload, and continuous-evidence refusal before HEAD creation. Direct numeric sequence overflow is not exercised by the invalid skipped-prefix fixture. No model or account acceptance is inferred."
+    "CI integration repair: uncertain-append refusal precedes restore refresh. Maintained fixtures verify owner generations, distinct at-least-once retry intents, torn-log close refusal and released locks, warm tail reads without historical payload, and continuous-evidence refusal before HEAD creation. Direct numeric sequence overflow is not exercised by the invalid skipped-prefix fixture. No model or account acceptance is inferred.",
+    "2026-10-14 confirmed-history repair: bounded disposable restore lookup shards retain only pending notice bodies in memory. Cold conflict and unknown-confirmation refusal, source-row verification, corrupt-cache rebuild and the independent full runner-evidence scan remain required. Unsafe or oversized cache files refuse. No Event Log or HEAD migration, model/provider trial or ordinary-profile acceptance is inferred."
   ]
 }

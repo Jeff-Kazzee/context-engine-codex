@@ -115,6 +115,8 @@ export interface SyncResult {
   /** Owed until the adapter confirms these IDs after transport succeeds. */
   restoreNotices?: RestoreNotice[];
   restoreNoticesTotal?: number;
+  /** Identity of the full pending restore-attempt set, independent of transport acknowledgment. */
+  restoreNoticeGeneration?: string;
   restoreNoticeSummary?: string;
   sessionGeneration?: string;
   /** Present when the session was opened with a budget: where the Working Context stands against it. */
@@ -391,7 +393,6 @@ class Core {
   private unapplied: Pending[] = [];
   private pendingReceipt: Receipt | undefined;
   private restoreNotices = new Map<string, RestoreNotice>();
-  private restoreKnown = new Map<string, RestoreNotice>();
   private restoreCursor = 0;
   private restoreIdentity: string | undefined;
   private closed = false;
@@ -497,7 +498,8 @@ class Core {
     }
     const identity = `${before.dev}:${before.ino}`;
     if ((this.restoreIdentity !== undefined && identity !== this.restoreIdentity) || Number(before.size) < this.restoreCursor) throw new Error('restore notice log was replaced or truncated, close and reopen before retrying');
-    const end = refreshRestoreNotices(this.l.events, this.restoreCursor, this.restoreNotices, this.restoreKnown);
+    if (this.restoreIdentity === identity && Number(before.size) === this.restoreCursor) return;
+    const end = refreshRestoreNotices(this.l.events, this.restoreCursor, this.restoreNotices);
     const after = this.checkpointLog();
     if (!after || `${after.dev}:${after.ino}` !== identity || Number(after.size) < end) throw new Error('restore notice log changed during refresh, close and reopen before retrying');
     this.restoreIdentity = identity;
@@ -520,7 +522,6 @@ class Core {
       const notices = c.restoreNotices.map(decodeRestoreNotice);
       if (new Set(notices.map((n: RestoreNotice) => n.id)).size !== notices.length) return false;
       this.restoreNotices = new Map(notices.map((n: RestoreNotice) => [n.id, n]));
-      this.restoreKnown = new Map(this.restoreNotices);
       this.restoreCursor = Number(log.size);
       this.restoreIdentity = `${log.dev}:${log.ino}`;
       this.lastSeq = c.lastSeq;
@@ -565,6 +566,7 @@ class Core {
     if (this.restoreNotices.size) {
       r.restoreNotices = [...this.restoreNotices.values()].slice(0, 64);
       r.restoreNoticesTotal = this.restoreNotices.size;
+      r.restoreNoticeGeneration = sha([...this.restoreNotices.keys()].sort().join(','));
       r.restoreNoticeSummary = restoreNoticeSummary(r.restoreNotices.length, r.restoreNoticesTotal);
     }
     return r;
@@ -1129,8 +1131,7 @@ class Core {
     if (!cached) {
       this.validateHeadBoundary(head);
       const state = restoreNoticeState(this.l.events);
-      this.restoreKnown = state.notices;
-      this.restoreNotices = new Map([...state.notices].filter(([id]) => !state.confirmed.has(id)));
+      this.restoreNotices = state.notices;
       this.restoreCursor = state.end;
       const log = this.checkpointLog();
       this.restoreIdentity = log ? `${log.dev}:${log.ino}` : undefined;

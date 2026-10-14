@@ -458,9 +458,10 @@ async function main(input: HookInput): Promise<void> {
       notices.push(guidance.editedContextReadNotice(input.session_id, pending.revision, pending.sha256));
     }
     if (notices.length) out.hookSpecificOutput = { hookEventName: 'PostToolUse', additionalContext: notices.join('\n') };
-    return { out, pending, read };
-    }, ({ out, pending, read }) => {
+    return { out, pending, read, observed, ownFile };
+    }, ({ out, pending, read, observed, ownFile }) => {
       if (Object.keys(out).length) emit(out);
+      if (ownFile && workingContextAccess(input) === 'read') observeRestoreRead(input, observed);
       // Committed-edit read notices retain their separate delivery state.
       if (pending) markDelivered(input, pending.revision, read);
       advanceLogOffset(input);
@@ -498,7 +499,8 @@ async function main(input: HookInput): Promise<void> {
     }
   } else if (input.hook_event_name === 'PreCompact') {
     const refusal = withPromptLease(input,()=>{
-    requireRecorded(input);
+    // Durable read notices survive compaction. Only unrecorded input blocks this backstop.
+    requireNoCompletionDebt(input);
     if(pendingPrompt(input).hash)throw new PendingPrompt('Context Engine: compaction was stopped because an earlier user request was not recorded. Retry that exact request after repairing storage, or disable Context Engine.');
     // Backstop for resets the gate above never sees (the token limit, a manual /compact). Codex
     // only honours `continue:false`; it aborts the turn, and the user sees the stop reason. So it
@@ -570,8 +572,8 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
   const lastTurn = String(result.turns?.at(-1)?.text ?? '');
   lastTurnIsReset = (lastTurn.split(/\n[ \t]*\n/).at(-1) ?? '').trimStart().startsWith('Context window reset');
   const path = relative(input.cwd, result.workingContext ?? '') || lib.workingContextRelPath(input.session_id);
-  if (result.receipt?.kind === 'restored' || result.restoreNotices?.length) {
-    return `${notReset} ${[...(result.receipt ? [result.receipt.text] : []), ...restoreSummary(result)].join('\n')} Read ${path} again and make sure it holds the current task.`;
+  if (check.budget && (result.receipt?.kind === 'restored' || result.restoreNotices?.length) && !restoreReadComplete(input, result)) {
+    return `${notReset} ${[...(result.receipt ? [result.receipt.text] : []), ...restoreSummary(result)].join('\n')} Run \`context-engine read --session ${JSON.stringify(input.session_id)} --sha ${store.sha(result.workingContextText ?? '')}\` and read every part before retrying. Keep the same digest for later parts and make sure the file holds the current task.`;
   }
   if (!result.revision || !result.turns?.some(turn => turn.text.trim() !== '')) {
     return `${notReset} Your Working Context ${path} is missing or empty and there is no earlier revision to restore. Write the current task, decisions and next step into it.`;
@@ -592,7 +594,69 @@ function resetRefusal(input: HookInput, check: { budget: boolean } = { budget: t
   return null;
 }
 
-/** A complete current file in tool output acknowledges a notice. Command intent alone does not. */
+// This barrier records observed tool bytes. It never acknowledges host acceptance or retires IDs.
+type RestoreRead = { owner: string; restore: string; revision: number; sha256: string; offset: number; nextPart: number; parts: number; complete: boolean };
+function restoreReadPath(input: HookInput): string {
+  return join(store.layout(input.cwd, input.session_id, store.resolveStateRoot()).stateDir, 'codex-restore-read.json');
+}
+function restoreReadState(input: HookInput): RestoreRead | undefined {
+  const bytes = store.readBytes(restoreReadPath(input), 2048);
+  if (!bytes) return undefined;
+  const v = JSON.parse(bytes.toString('utf8'));
+  if (!v || !['owner', 'restore', 'sha256'].every(k => typeof v[k] === 'string' && /^[a-f0-9]+$/.test(v[k]))
+      || v.owner.length !== 32 || v.restore.length !== 64 || v.sha256.length !== 64
+      || !['revision', 'offset', 'nextPart', 'parts'].every(k => Number.isSafeInteger(v[k]) && v[k] >= 0)
+      || v.offset > lib.READ_MAX_FILE_BYTES || v.parts > 1024 || typeof v.complete !== 'boolean') throw new Error('invalid restore read barrier');
+  return v;
+}
+function sameRestoreRead(state: RestoreRead | undefined, result: CoreResult): boolean {
+  return !!state && state.owner === result.sessionGeneration && state.restore === result.restoreNoticeGeneration
+    && state.revision === result.revision && state.sha256 === store.sha(result.workingContextText ?? '');
+}
+function restoreReadComplete(input: HookInput, result: CoreResult): boolean {
+  const state = restoreReadState(input);
+  return sameRestoreRead(state, result) && state!.complete;
+}
+function observeRestoreRead(input: HookInput, result: CoreResult): void {
+  if (!result.restoreNotices?.length || !result.sessionGeneration || !result.restoreNoticeGeneration || !result.revision || !result.workingContextText) return;
+  const whole = Buffer.from(result.workingContextText), digest = store.sha(result.workingContextText);
+  const previous = restoreReadState(input), current = sameRestoreRead(previous, result) ? previous : undefined;
+  const response = input.tool_response;
+  const outputs = typeof response === 'string' ? [response] : response && typeof response === 'object'
+    ? ['stdout', 'output'].flatMap(k => k in response && typeof response[k as keyof typeof response] === 'string' ? [String(response[k as keyof typeof response])] : []) : [];
+  for (const output of outputs) {
+    if (Buffer.byteLength(output) > lib.READ_MAX_BYTES) continue;
+    const base = { owner: result.sessionGeneration, restore: result.restoreNoticeGeneration, revision: result.revision, sha256: digest };
+    if (output.includes(result.workingContextText)) {
+      store.atomicWrite(restoreReadPath(input), JSON.stringify({ ...base, offset: whole.length, nextPart: 2, parts: 1, complete: true }), 'frame-key-tmp');
+      return;
+    }
+    const bytes = Buffer.from(output), lf = bytes.indexOf(10);
+    if (lf < 0) continue;
+    const header = bytes.subarray(0, lf).toString('utf8');
+    let part: number, parts: number, payload: Buffer;
+    const frame = /^\[Context Engine: framed Working Context v1; sha256 ([a-f0-9]{64}); part (\d+) of (\d+); payload-bytes (\d+); total-bytes (\d+)\]$/.exec(header);
+    const plain = header.startsWith(`[Context Engine: Working Context ${lib.workingContextRelPath(input.session_id)}, part `) ? /, part (\d+) of (\d+) \(/.exec(header) : null;
+    if (frame) {
+      part = Number(frame[2]); parts = Number(frame[3]);
+      const count = Number(frame[4]);
+      if (frame[1] !== digest || Number(frame[5]) !== whole.length || !Number.isSafeInteger(count) || count < 1 || count > lib.READ_MAX_BYTES) continue;
+      payload = bytes.subarray(lf + 1, lf + 1 + count);
+      if (!bytes.subarray(lf + 1 + count).toString('utf8').startsWith(`\n[Context Engine: end framed Working Context v1; sha256 ${digest}; part ${part} of ${parts}]\n`)) continue;
+    } else if (plain) {
+      part = Number(plain[1]); parts = Number(plain[2]); payload = bytes.subarray(lf + 1);
+    } else continue;
+    if (!Number.isSafeInteger(part) || !Number.isSafeInteger(parts) || part < 1 || part > parts || parts > 1024 || !payload.length) continue;
+    const offset = part === 1 ? 0 : current && current.nextPart === part && current.parts === parts && !current.complete ? current.offset : -1;
+    if (offset < 0 || !payload.equals(whole.subarray(offset, offset + payload.length))) continue;
+    const end = offset + payload.length;
+    if (end > whole.length || (part === parts) !== (end === whole.length)) continue;
+    store.atomicWrite(restoreReadPath(input), JSON.stringify({ ...base, offset: end, nextPart: part + 1, parts, complete: part === parts }), 'frame-key-tmp');
+    return;
+  }
+}
+
+/** A complete current file in tool output acknowledges a read notice. Command intent alone does not. */
 function returnedWorkingContext(input: HookInput, whole: string | undefined): boolean {
   if (!whole) return false;
   const response = input.tool_response;
@@ -713,6 +777,7 @@ interface CoreResult {
   budget?: Core.BudgetReport;
   restoreNotices?: Array<{ id: string; text: string }>;
   restoreNoticesTotal?: number;
+  restoreNoticeGeneration?: string;
   sessionGeneration?: string;
   turns?: Array<{ role: string; text: string }>;
   /** The committed revision's exact text. */

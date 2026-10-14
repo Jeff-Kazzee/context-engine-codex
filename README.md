@@ -157,9 +157,13 @@ Acknowledgment validates the durable HEAD/log boundary and IDs without syncing, 
 
 The disposable recovery checkpoint moves from version 4 to 5 to cache pending intents. Older checkpoints rebuild from the Event Log. HEAD and historical log records are not migrated.
 
-Native Codex hooks do not confirm restore notices. Codex accepts hook output only after a successful exit, and the hook receives no acceptance acknowledgment. A complete stdout write cannot prove that acceptance. Prompt, tool, reset, and compaction hooks therefore reoffer durable pending notices. The represented batch can repeat indefinitely, with additional IDs queued.
+Native Codex hooks do not confirm restore notices. Codex accepts hook output only after a successful exit, and the hook receives no acceptance acknowledgment. A complete stdout write cannot prove that acceptance. Prompt and tool hooks reoffer durable pending notices. A reset refusal can carry the same warning. Successful native compaction keeps it for the next prompt or tool hook. The represented batch can repeat indefinitely, with additional IDs queued.
 
-A reset or compaction stays refused while a restore notice is pending. A separate caller with observed transport can confirm the represented IDs against their offered owner generation. Do not confirm them merely to dismiss a warning.
+Native hooks keep restore IDs pending because the host provides no acceptance callback. Warning delivery and reset safety have separate state. An agent reset can proceed after a complete current Working Context read observed in tool output. The barrier binds the owner generation, revision, content digest and the full pending restore-attempt set. Sequential plain or framed CLI read parts must reconstruct the complete current file. Partial reads, changed content, a new owner or another restore attempt invalidate the barrier.
+
+The barrier does not prove model ingestion or confirm restore IDs. Native manual and token-limit compaction require safely readable, nonempty UTF-8 context within the read limit and no unrecorded-input debt. Pending warning or committed-edit notices alone do not abort that compaction. The next prompt or tool hook reoffers them. Complete read-back in the next window remains required.
+
+A separate caller with observed transport can confirm represented IDs against their offered owner generation. Do not confirm them merely to dismiss a warning. A represented batch can still repeat indefinitely while the host has no acknowledgment API.
 
 The turn loop keeps its separate confirmation after a successful turn/start reply. Refused injection and an uncertain or lost start reply leave notices pending. Delivery is at least once under retry. No exactly-once display or model ingestion guarantee is made. Offline synthetic controls do not establish installed host acceptance.
 
@@ -248,3 +252,10 @@ Record operation IDs are found through an index beside the Event Log: a head, `o
 If Working Context publication or restoration logging fails, a private `context.md.ce-preserved-<revision-sha>.bak` recovery artifact can remain beside the file. Keep it until recovery finishes. After repairing storage, close and reopen the session before retrying. Recovery checks that artifact before reading it, preserves an intervening edit in the Event Log and removes the artifact after the log write succeeds. It refuses an unverified artifact. This does not capture arbitrary writes that finish after the final sample.
 
 Issue 27 recovery requires every complete runner-event sequence from 1 onward, including pending replay, and refuses when HEAD covers a sequence absent from durable rows. Validation precedes torn-tail repair, temporary cleanup and materialization. Healthy legacy sessions retain missing revision-accounting compatibility. Legacy sessions with missing runner evidence now refuse with their evidence retained. Disposable recovery checkpoints advance from version 3 to 4 so an older weaker proof cannot bypass the full scan. No HEAD or Event Log schema migration. Offset-tail readers are unchanged. Synthetic offline controls do not establish power-loss durability or live delivery.
+
+
+Confirmed restore history uses a disposable lookup with 64 bounded shards. Each shard holds compact identity and row-offset evidence, not rejected edit payloads. A cold rebuild streams compact rows, then processes one shard at a time. Only pending notice bodies remain in session memory.
+
+The lookup binds its source log identity, size and timestamps. Shard hashes and original row checks protect lookups. Missing or safely readable invalid cache data rebuilds from the retained Event Log. Unsafe or oversized cache files refuse with source evidence preserved. Warm refresh processes appended rows. Confirmation still performs the full continuous runner-evidence check. This repair does not make that independent integrity scan incremental.
+
+A serialized shard cannot exceed 4 MiB. Capacity exhaustion refuses with the source evidence retained. Rebuild scratch space grows with compact historical rows and is removed after a completed or failed rebuild. Pending notices, rejected edits and original recovery history are never deleted by this lookup.

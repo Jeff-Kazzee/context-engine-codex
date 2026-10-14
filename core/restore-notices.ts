@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { appendLog, readLogRows, sha } from './store.ts';
+import { RestoreLookup, validateRestoreSequences } from './restore-lookup.ts';
 import type { RestoreReason } from './session.ts';
 
 /** A durable request to restore, not proof that its following rename completed. */
@@ -28,32 +29,31 @@ export function decodeRestoreNotice(value: unknown): RestoreNotice {
   return { ...notice, text: `Context Engine: restoration of Working Context revision ${notice.revision} was requested (${notice.reason}). The durable request does not prove the later file rename completed. The rejected edit or its rejection is retained in the Event Log. Read the current Working Context file before editing it again.` };
 }
 
-/** Old ID-less restored rows, including revision zero rejections, remain readable. */
+function loggedNotice(row: Record<string, unknown>): { id: string; hash: string } | undefined {
+  if (row.type !== 'restored' || row.notice === undefined) return undefined;
+  const n = decodeRestoreNotice(row.notice);
+  const rejected = { ...(row.rejected !== undefined ? { rejected: row.rejected } : {}), ...(row.rejectedBase64 !== undefined ? { rejectedBase64: row.rejectedBase64 } : {}), ...(row.oversized !== undefined ? { oversized: row.oversized } : {}) };
+  if (row.rev !== n.revision || row.reason !== n.reason || sha(JSON.stringify(rejected)) !== n.rejectedSha256) throw new Error('restore notice identity conflicts with its retained edit');
+  return { id: n.id, hash: sha(JSON.stringify(n)) };
+}
+
+function noticeAt(log: string, index: RestoreLookup, id: string): { notice: RestoreNotice; start: number } {
+  const hit = index.get(id);
+  if (!hit) throw new Error('unknown restore notice ID');
+  for (const row of readLogRows(log, hit.start)) return { notice: decodeRestoreNotice(row.entry.notice), start: hit.start };
+  throw new Error('missing retained restore notice');
+}
+
+/** Only pending payloads remain in memory. Confirmed identity evidence stays in bounded shards. */
 export function restoreNoticeState(log: string, strict = false): { notices: Map<string, RestoreNotice>; confirmed: Set<string>; end: number } {
-  const notices = new Map<string, RestoreNotice>(), confirmed = new Set<string>();
-  let expectedSequence = 1, end = 0;
-  for (const { entry: row, end: rowEnd } of readLogRows(log, 0, strict)) {
-    end = rowEnd;
-    if (strict && row.type === 'runner-events') for (const event of row.events as Array<{ seq: number }>) {
-      if (event.seq !== expectedSequence++) throw new Error('runner evidence gap refuses restore confirmation without repair');
-    }
-    if (row.type === 'restored' && row.notice !== undefined) {
-      const notice = decodeRestoreNotice(row.notice);
-      if (row.rev !== notice.revision || row.reason !== notice.reason || notice.rejectedSha256 !== sha(JSON.stringify({ ...(row.rejected !== undefined ? { rejected: row.rejected } : {}), ...(row.rejectedBase64 !== undefined ? { rejectedBase64: row.rejectedBase64 } : {}), ...(row.oversized !== undefined ? { oversized: row.oversized } : {}) }))) throw new Error('restore notice identity conflicts with its retained edit');
-      const prior = notices.get(notice.id);
-      if (prior && JSON.stringify(prior) !== JSON.stringify(notice)) throw new Error('conflicting durable restore notice identity');
-      notices.set(notice.id, notice);
-    } else if (row.type === 'restore-notice-return-confirmed') {
-      if (!Array.isArray(row.noticeIds) || !row.noticeIds.length || row.noticeIds.some(id => typeof id !== 'string' || !notices.has(id))) throw new Error('unknown durable restore notice confirmation');
-      for (const id of row.noticeIds as string[]) confirmed.add(id);
-    }
-  }
-  return { notices, confirmed, end };
+  if (strict) validateRestoreSequences(log);
+  const index = RestoreLookup.open(log, loggedNotice);
+  const pending = [...index.pending()].map(id => noticeAt(log, index, id)).sort((a, b) => a.start - b.start);
+  return { notices: new Map(pending.map(p => [p.notice.id, p.notice])), confirmed: new Set(), end: index.end };
 }
 
 export function pendingRestoreNotices(log: string): Map<string, RestoreNotice> {
-  const { notices, confirmed } = restoreNoticeState(log);
-  return new Map([...notices].filter(([id]) => !confirmed.has(id)));
+  return restoreNoticeState(log).notices;
 }
 
 export function keepRestoreIntent(log: string, pending: Map<string, RestoreNotice>, head: { rev: number; sha: string }, reason: RestoreReason, chars: number, rejected: Record<string, unknown>): { notice: RestoreNotice; appended: boolean } {
@@ -67,9 +67,13 @@ export function keepRestoreIntent(log: string, pending: Map<string, RestoreNotic
 /** Validate the whole batch before one append. A repeated confirmed ID is harmless. */
 export function confirmRestoreNoticeIds(log: string, ids: readonly string[]): void {
   if (!Array.isArray(ids) || ids.length > 1024 || ids.some(id => !hex(id, 32))) throw new Error('invalid restore notice confirmation IDs');
-  const { notices, confirmed } = restoreNoticeState(log, true);
-  if (ids.some(id => !notices.has(id))) throw new Error('unknown restore notice ID, no notice was confirmed');
-  const owed = [...new Set(ids)].filter(id => !confirmed.has(id));
+  validateRestoreSequences(log);
+  const index = RestoreLookup.open(log, loggedNotice), owed: string[] = [];
+  for (const id of new Set(ids)) {
+    const hit = index.get(id);
+    if (!hit) throw new Error('unknown restore notice ID, no notice was confirmed');
+    if (!hit.confirmation) owed.push(id);
+  }
   if (owed.length) appendLog(log, { type: 'restore-notice-return-confirmed', noticeIds: owed }, { requireCompleteTail: true });
 }
 
@@ -78,22 +82,15 @@ export function restoreNoticeSummary(represented: number, total: number): string
 }
 
 /** Process only complete appended rows. The caller binds the log inode and cursor. */
-export function refreshRestoreNotices(log: string, from: number, pending: Map<string, RestoreNotice>, known: Map<string, RestoreNotice>): number {
-  let end = from;
-  for (const { entry: row, end: rowEnd } of readLogRows(log, from, true)) {
-    if (row.type === 'restored' && row.notice !== undefined) {
-      const notice = decodeRestoreNotice(row.notice);
-      const rejected = { ...(row.rejected !== undefined ? { rejected: row.rejected } : {}), ...(row.rejectedBase64 !== undefined ? { rejectedBase64: row.rejectedBase64 } : {}), ...(row.oversized !== undefined ? { oversized: row.oversized } : {}) };
-      if (row.rev !== notice.revision || row.reason !== notice.reason || sha(JSON.stringify(rejected)) !== notice.rejectedSha256) throw new Error('restore notice identity conflicts with its retained edit');
-      const prior = known.get(notice.id);
-      if (prior && JSON.stringify(prior) !== JSON.stringify(notice)) throw new Error('conflicting durable restore notice identity');
-      if (!prior) pending.set(notice.id, notice);
-      known.set(notice.id, notice);
-    } else if (row.type === 'restore-notice-return-confirmed') {
-      if (!Array.isArray(row.noticeIds) || !row.noticeIds.length || row.noticeIds.some(id => typeof id !== 'string' || !known.has(id))) throw new Error('unknown durable restore notice confirmation');
-      for (const id of row.noticeIds as string[]) pending.delete(id);
-    }
-    end = rowEnd;
+export function refreshRestoreNotices(log: string, from: number, pending: Map<string, RestoreNotice>): number {
+  const index = RestoreLookup.refresh(log, from, loggedNotice);
+  if (index.rebuilt) {
+    const current = restoreNoticeState(log);
+    pending.clear();
+    for (const [id, n] of current.notices) pending.set(id, n);
+  } else for (const id of index.changed) {
+    if (index.get(id)?.confirmation) pending.delete(id);
+    else pending.set(id, noticeAt(log, index, id).notice);
   }
-  return end;
+  return index.end;
 }

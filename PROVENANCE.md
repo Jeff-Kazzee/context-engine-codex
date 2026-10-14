@@ -167,6 +167,13 @@ CI integration shared-core source pin: `6e893ea12b6a85810fd0d88d8cab38f25bfa39d3
 
 The skipped MAX_SAFE_INTEGER fixture cannot test numerical allocation exhaustion without a complete prefix. The allocation guard retains its prior predicate. These synthetic checks do not establish model delivery, installation in an ordinary account, or power-loss durability. The original snapshot metadata and importedPaths remain unchanged.
 
-Codex hook restore transport correction, verified 2026-10-14 with offline fixtures. Native hooks keep durable restore notices pending because stdout emission does not establish host acceptance. A post-output SIGKILL fixture and prompt, tool, reset, and compaction controls cover conservative reoffer. Resets remain refused until a separate observed transport confirms the represented IDs. The turn loop retains its existing turn/start reply boundary.
+Codex hook restore transport correction, verified 2026-10-14 with offline fixtures. Native hooks keep durable restore notices pending because stdout emission does not establish host acceptance. A post-output SIGKILL fixture and prompt, tool, reset, and compaction controls cover conservative reoffer. That transport-only correction retained the existing reset refusal while IDs were pending. The following repair separates warning confirmation from reset safety. The turn loop retains its existing turn/start reply boundary.
 
-Shared core bytes, manifests, and pin remain unchanged. These fixtures do not establish provider or ordinary-account acceptance.
+That transport-only correction kept shared core bytes, manifests and pin unchanged. These fixtures do not establish provider or ordinary-account acceptance.
+
+
+Confirmed-history and native reset repair, verified 2026-10-14 with focused offline fixtures. Both distributions retain pending restore payloads and use bounded disposable lookup shards for historical identities. Cold conflict refusal, unknown-ID refusal and continuous runner evidence remain required. Source logs and rejected edits remain authoritative.
+
+Codex separates a complete observed read from warning acknowledgment. Its barrier binds owner, revision, digest and every pending attempt ID. Native compaction retains readability and unrecorded-input checks while carrying pending notices forward. No host acceptance or model ingestion is inferred.
+
+The focused checks cover cache damage, interrupted rebuild, unsafe cache links and requested-ID reads. They do not establish live provider acceptance, ordinary-profile loading or power-loss durability. Shared-core source pin: `a58503a9d3565807fa7debee8f6821170854bcb5` (67 identical core files), verified 2026-10-14. Original snapshot metadata and imported paths remain unchanged.

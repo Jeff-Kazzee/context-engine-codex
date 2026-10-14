@@ -24,7 +24,8 @@ for (const [name, fields] of [
     const log = layout(f.projectRoot, 'S1', f.stateDir).events;
     if (!closed) {
       assert.equal(out.status, 0, out.stderr);
-      assert.match(out.stdout, /restore request\(s\).*pending/);
+      if (name === 'compact') assert.equal(out.stdout, '', 'readable native compaction retains warnings for the next hook');
+      else assert.match(out.stdout, /restore request\(s\).*pending/);
       const next = await runHook(f, 'S1', prompt('NEXT_REQUEST'));
       assert.equal(next.status, 0, next.stderr);
       assert.match(next.stdout, /restore request\(s\).*pending/, 'the next hook reoffers a notice without a host acknowledgment');
