@@ -120,10 +120,23 @@ process.exit(run.status ?? 1);
   const result = await runHook(f, SID, preCompact, { CONTEXT_ENGINE_CLI: wrapper });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /SYNC_FAULT/);
-  assert.equal(result.stdout, '');
+  assert.equal(JSON.parse(result.stdout).continue, false, 'uncertain sync requires a current read');
+  assert.match(result.stdout, /read every part/);
   assert.match(readFileSync(wcPath(f), 'utf8'), /Context window reset/);
+  const unread = await runHook(f, SID, preCompact);
+  assert.equal(JSON.parse(unread.stdout).continue, false, 'retry without a current read remains refused');
   const next = await runHook(f, SID, prompt('NEXT_REQUEST'));
   assert.equal(next.status, 0, next.stderr);
   assert.match(next.stdout, /was validated/);
+  assert.match(readFileSync(wcPath(f), 'utf8'), /COMPACTION_EDIT/);
+  const current = await startBounded([process.execPath, CLI, 'read', '--session', SID], {
+    cwd: f.projectRoot, env: hookEnv(f), input: '', timeoutMs: 30_000,
+  }).done;
+  assert.equal(current.status, 0, current.stderr);
+  const observed = await runHook(f, SID, toolUse('Bash', { command: `context-engine read --session ${SID}` }, current.stdout, 'compaction-current-read'));
+  assert.equal(observed.status, 0, observed.stderr);
+  const retried = await runHook(f, SID, preCompact);
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.equal(retried.stdout, '');
   assert.match(readFileSync(wcPath(f), 'utf8'), /COMPACTION_EDIT/);
 });

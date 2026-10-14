@@ -234,3 +234,42 @@ test('[issue29] two simultaneous repairers preserve semantic ignore behavior and
     assert.deepEqual(fs.readFileSync(ignore), stable, 'later opens do not keep adding blocks');
   } finally { for (const run of runs) await stopGroup(run.child); }
 });
+
+for (const mode of ['managed-append', 'conflicting-tail', 'changed-prefix', 'oversized', 'linked'] as const) test(`[issue29 final flush] ${mode} after the repaired sample`, t => {
+  const { f, paths, ignore } = emptyIgnore();
+  const open = fs.openSync, write = fs.writeSync;
+  let repaired = false, reads = 0, fired = false;
+  const writeSpy = t.mock.method(fs, 'writeSync', (...args: unknown[]) => {
+    const result = Reflect.apply(write, fs, args);
+    if (shown(args[0]) === ignore) repaired = true;
+    return result;
+  });
+  const openSpy = t.mock.method(fs, 'openSync', (...args: unknown[]) => {
+    const fd = Reflect.apply(open, fs, args);
+    const flags = args[1];
+    const reading = typeof flags === 'number' ? (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0 : flags === 'r';
+    if (repaired && !fired && reading && shown(fd) === ignore && ++reads === 2) {
+      fired = true;
+      if (mode === 'managed-append') fs.appendFileSync(ignore, `\n${MANAGED}`);
+      else if (mode === 'conflicting-tail') fs.appendFileSync(ignore, '!S1/context.md\n');
+      else if (mode === 'changed-prefix') fs.writeFileSync(ignore, '# replacement\n*\n');
+      else if (mode === 'oversized') fs.appendFileSync(ignore, Buffer.alloc(65537, 'X'));
+      else fs.linkSync(ignore, `${ignore}.other`);
+    }
+    return fd;
+  });
+  syncBuiltinESMExports();
+  let error: unknown;
+  try { ensureDirs(paths, f.stateDir); }
+  catch (e) { error = e; }
+  finally { openSpy.mock.restore(); writeSpy.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(fired, true, 'mutation landed after the repaired bytes were sampled');
+  if (mode === 'managed-append') {
+    assert.equal(error, undefined, 'the other already-racing repairer appended the same managed block');
+    assert.equal(fs.readFileSync(ignore, 'utf8'), `\n${MANAGED}\n${MANAGED}`);
+  } else {
+    assert.match(String(error), /changed before flush/);
+    assert.equal(fs.existsSync(paths.events), false);
+    assert.equal(fs.existsSync(paths.head), false);
+  }
+});

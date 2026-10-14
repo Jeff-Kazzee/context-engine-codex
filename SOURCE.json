@@ -17,7 +17,7 @@
     "core/hosted-regressions.test.ts": "e7dc670e7a64667621e2853a601dc765388cff5a3c53f497fd0b66ef4c578d1a",
     "core/index.ts": "a8652d46060b72ade024f4f0f18b3d6e13ae7aa04fda1986760d9d038055f206",
     "core/isolation.test.ts": "d7c66e27a62db5698ec573a8bf63773ab2189df3c90e2d1bd3f99193b70ff189",
-    "core/issue29-ignore-repair.test.ts": "5ace69e10b19091d5258fd52d36f6c8437d07e2cb70e5a59ae95ba0255ac52ff",
+    "core/issue29-ignore-repair.test.ts": "57f1cb2ff0542c34348d50200c4fd7098c2d8f63622db1481cef9c20f3b78149",
     "core/issue30-legacy-ignore.test.ts": "f4eb5e6ea0bd0fef3a5d0d4c964f24f16341b2f0349fe3deaa73ed1ac3fcfd84",
     "core/issue31-restore-notices.test.ts": "1c8f822cb026c19b990fa5832007ee0fd4fc86db75a9a4ef9adefa9bb3d8092a",
     "core/issue32-late-write.test.ts": "5d0b52dc2cf4281a547d78d1835b09e91a090eda8866361a8891f499d772517e",
@@ -51,7 +51,7 @@
     "core/session.ts": "289eb68b9db8ab044506035e0f1e48acafbb7ec1e3842c6493cfc22fc70dd33b",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "c45f31b360bf8e6d8737ca54906448ba2688b99dfc3db432bfef03d9daa77a0b",
+    "core/store.ts": "3d10f334c6b0153a8c220eba28c9eaabe8e432304f8942f6dcf2e22e4e6d1e9f",
     "core/temp-hygiene.test.ts": "7495b5b45299db20a4e0b8ef0627838c163013675bf1c9e8537f9e7d77389ee1",
     "core/testing.ts": "89fa6f05e3e4f2dee67092cdb4dee824500dfd9f43b4442d143a6bc86dbda639",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
@@ -139,7 +139,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "a58503a9d3565807fa7debee8f6821170854bcb5",
+  "corePatchCommit": "28ae4d3e5e869244df7d4ffa0fdb6ffdb9d9bc6b",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -175,6 +175,7 @@
     "Issue 31 adds unique durable restore-intent identities before publication and explicit carried-ID confirmation after adapter transport, separate from fresh operation receipts and revision delivery. Results carry at most 64 pending IDs and a bounded static summary with total count. Unrepresented IDs stay durable. Confirmation binds the offered owner generation and validates HEAD/log evidence without Working Context or ignore repair. Pending intents survive recovery/cache and external acknowledgments refresh through complete appended rows. Disposable cache 4 becomes 5, with no historical rewrite or HEAD migration. New attempts always get distinct IDs, including identical rejected bytes. Ambiguous crash retries may duplicate retained rejected-edit rows. Existing local materialization sample dedup remains. Claude compact/tool carriers conservatively reoffer without automatic acknowledgment, while per-step, Codex hooks and turn-loop confirm their observed transport boundaries. No model ingestion or exactly-once delivery claim is made.",
     "Issue 32 samples a verified predecessor descriptor up to four times after Working Context publication and during preserved-artifact recovery, continuing only after durable changed-byte logging. Stable or locally deduplicated samples stop. Append failure retains the artifact and marker and refuses completion. Controlled suffixes completed during logging are captured, while a suffix after the fourth sample remains outside the explicit final-sample contract. No arbitrary writer-completion, complete-capture or power-loss guarantee is introduced. No format or cache version change is needed.",
     "CI integration repair: uncertain-append refusal precedes restore refresh. Maintained fixtures verify owner generations, distinct at-least-once retry intents, torn-log close refusal and released locks, warm tail reads without historical payload, and continuous-evidence refusal before HEAD creation. Direct numeric sequence overflow is not exercised by the invalid skipped-prefix fixture. No model or account acceptance is inferred.",
-    "2026-10-14 confirmed-history repair: bounded disposable restore lookup shards retain only pending notice bodies in memory. Cold conflict and unknown-confirmation refusal, source-row verification, corrupt-cache rebuild and the independent full runner-evidence scan remain required. Unsafe or oversized cache files refuse. No Event Log or HEAD migration, model/provider trial or ordinary-profile acceptance is inferred."
+    "2026-10-14 confirmed-history repair: bounded disposable restore lookup shards retain only pending notice bodies in memory. Cold conflict and unknown-confirmation refusal, source-row verification, corrupt-cache rebuild and the independent full runner-evidence scan remain required. Unsafe or oversized cache files refuse. No Event Log or HEAD migration, model/provider trial or ordinary-profile acceptance is inferred.",
+    "2026-10-14 concurrent ignore repair correction: final verification accepts an unchanged sampled prefix followed only by complete identical managed-repair blocks. Conflicting tails, changed prefixes, oversized files and hardlinks still refuse. Focused deterministic and simultaneous-session controls preserve both records. No broader concurrency, arbitrary editor-completion or live-provider guarantee is inferred."
   ]
 }

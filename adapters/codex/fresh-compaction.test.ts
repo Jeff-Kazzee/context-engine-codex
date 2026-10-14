@@ -149,3 +149,37 @@ if(process.argv[1]?.endsWith('/codex-hook.ts')){const original=cp.spawnSync,call
     assert.deepEqual([...pendingRestoreNotices(t.log).keys()], ids);
   } finally { t.s.close(); }
 });
+
+for (const format of ['plain', 'framed', 'raw'] as const) test(`restore read payload proof distinguishes ${format} header text`, async () => {
+  const f = enabledFixture();
+  const opened = openSession({ ...f, sessionId: 'S1', runner: 'codex', hardLimit: 400000 });
+  assert.equal(opened.status, 'open');
+  const s = opened.session;
+  try {
+    s.record([{ role: 'user', text: 'INITIAL_TASK' }]);
+    const text = format === 'framed' ? 'framed Working Context v1' : 'This is the last part.';
+    writeFileSync(s.workingContextPath, text);
+    s.sync();
+    assert.equal(readFileSync(s.workingContextPath, 'utf8'), text);
+    rmSync(s.workingContextPath);
+    refused((await runHook(f, 'S1', preCompact)).stdout);
+    const log = layout(f.projectRoot, 'S1', f.stateDir).events;
+    const ids = [...pendingRestoreNotices(log).keys()];
+    if (format !== 'raw') {
+      const value = readWorkingContext({ ...f, sessionId: 'S1', framed: format === 'framed' });
+      const header = value.text.split('\n')[0]!;
+      assert.ok(header.includes(text), 'fixture content appears in the CLI header');
+      const command = `context-engine read --session S1 --sha ${value.sha}${format === 'framed' ? ' --framed' : ''}`;
+      const truncated = await runHook(f, 'S1', toolUse('Bash', { command }, header, 'header-only'));
+      assert.equal(truncated.status, 0, truncated.stderr);
+      refused((await runHook(f, 'S1', preCompact)).stdout);
+      const full = await runHook(f, 'S1', toolUse('Bash', { command }, value.text, 'complete-payload'));
+      assert.equal(full.status, 0, full.stderr);
+    } else {
+      const raw = await runHook(f, 'S1', toolUse('Bash', { command: `cat ${s.workingContextPath}` }, text, 'raw-file'));
+      assert.equal(raw.status, 0, raw.stderr);
+    }
+    assert.equal((await runHook(f, 'S1', preCompact)).stdout, '');
+    assert.deepEqual([...pendingRestoreNotices(log).keys()], ids);
+  } finally { s.close(); }
+});

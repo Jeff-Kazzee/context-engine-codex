@@ -79,10 +79,20 @@ test('[PERF-010] a stalled core CLI bounds every hook event below the 30 s hook 
     assert.equal(run.timedOut, false, name);
     assert.ok(run.ms < 26_000, `${name} took ${Math.round(run.ms)} ms`);
     assert.match(run.stderr, /ETIMEDOUT|timed out/, name);
-    if (name === 'PreCompact') assert.equal(run.stdout, '', 'a valid file passes the readability fallback');
+    if (name === 'PreCompact') {
+      assertRefused(name, run);
+      assert.match(run.stdout, /complete current read/);
+    }
     else assertRefused(name, run);
   });
-  for (const i of [3, 4]) assert.deepEqual(sessionBytes(f, sessions[i]!), before[i], `${FIVE_EVENTS[i]![0]} leaves state unchanged`);
+  for (const i of [3, 4]) {
+    const after = sessionBytes(f, sessions[i]!);
+    if (i === 4) {
+      assert.ok(after['codex-precompact-read.json'], 'uncertain mutation retains its durable read intent');
+      delete after['codex-precompact-read.json'];
+    }
+    assert.deepEqual(after, before[i], `${FIVE_EVENTS[i]![0]} preserves all prior state`);
+  }
 });
 
 test('[PERF-002] a core reply that overflows the IPC buffer fails explicitly per event', async () => {
@@ -104,12 +114,17 @@ cp.spawnSync=function(file,args,...rest){
     const before = sessionBytes(f, sid);
     const run = await runHook(f, sid, fields, { NODE_OPTIONS: `--import=${preload}` });
     assert.match(run.stderr, /ENOBUFS/, name);
-    if (name === 'PreCompact') assert.equal(run.stdout, '', 'the readability fallback allows a valid file');
+    if (name === 'PreCompact') {
+      assertRefused(name, run);
+      assert.match(run.stdout, /complete current read/);
+      assert.ok(sessionBytes(f, sid)['codex-precompact-read.json']);
+    }
     else assertRefused(name, run);
     if (name === 'new_context') assert.match(denial(run), /core could not be reached/);
     const after = sessionBytes(f, sid);
     assert.equal(after.events, before.events, `${name}: Event Log unchanged`);
     assert.equal(after.head, before.head, `${name}: HEAD unchanged`);
+    assert.equal(after.context, before.context, `${name}: Working Context unchanged`);
   }
 });
 

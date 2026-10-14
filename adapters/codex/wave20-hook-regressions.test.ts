@@ -7,10 +7,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { fixture } from '../../core/testing.ts';
 import { setParticipation } from '../../core/index.ts';
-import { layout } from '../../core/store.ts';
+import { layout, sha } from '../../core/store.ts';
 const HOOK=fileURLToPath(new URL('./plugin/hooks/codex-hook.ts',import.meta.url)),CLI=fileURLToPath(new URL('../../core/cli.ts',import.meta.url)),sid='WAVE20';
 function setup(){const f=fixture();setParticipation({...f,state:'on'});return f;}
 function hook(f:ReturnType<typeof fixture>,event:any,extra:NodeJS.ProcessEnv={}){return spawnSync(process.execPath,[HOOK],{cwd:f.projectRoot,input:JSON.stringify({cwd:f.projectRoot,session_id:sid,...event}),encoding:'utf8',env:{...process.env,CONTEXT_ENGINE_STATE_DIR:f.stateDir,CONTEXT_ENGINE_CLI:CLI,CONTEXT_ENGINE:'',...extra}});}
+function observeCurrentRead(f: ReturnType<typeof fixture>): void {
+ const digest = sha(fs.readFileSync(join(f.projectRoot, '.context-engine', sid, 'context.md'), 'utf8'));
+ const read = spawnSync(process.execPath, [CLI, 'read', '--session', sid, '--sha', digest], {
+  cwd: f.projectRoot, encoding: 'utf8', env: { ...process.env, CONTEXT_ENGINE_STATE_DIR: f.stateDir, CONTEXT_ENGINE: '' }, timeout: 10000,
+ });
+ assert.equal(read.status, 0, read.stderr);
+ const observed = hook(f, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: `context-engine read --session ${sid} --sha ${digest}` }, tool_response: read.stdout, tool_use_id: 'complete-current-read' });
+ assert.equal(observed.status, 0, observed.stderr);
+}
 
 test('wave29: completed intent after prompt commit does not duplicate an exact retry',()=>{
  const f=setup(),state=layout(f.projectRoot,sid,f.stateDir).stateDir,marker=join(state,'codex-record-pending-00000000-0000-0000-0000-000000000001.json'),preload=join(f.projectRoot,'after-record-intent.mjs');
@@ -48,7 +57,9 @@ test('wave20: compaction marker cannot make the materialized context exceed read
  const wc=join(f.projectRoot,'.context-engine',sid,'context.md'),before=fs.readFileSync(wc),preload=join(f.projectRoot,'byte-limit-fixture.mjs');
  // Exercise the real hook -> CLI append transaction at the byte boundary without allocating 16 MiB output.
  fs.writeFileSync(preload,`const original=Buffer.byteLength;Buffer.byteLength=function(value,...args){return typeof value==='string'&&value.includes('Context window reset')?16*1024*1024+1:original(value,...args)};`);
- const result=hook(f,{hook_event_name:'PreCompact',trigger:'manual'},{NODE_OPTIONS:'--import='+preload});assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'');assert.deepEqual(fs.readFileSync(wc),before);
+ const result=hook(f,{hook_event_name:'PreCompact',trigger:'manual'},{NODE_OPTIONS:'--import='+preload});assert.equal(result.status,0,result.stderr);assert.equal(JSON.parse(result.stdout).continue,false);assert.match(result.stdout,/read every part/);assert.deepEqual(fs.readFileSync(wc),before);
+ observeCurrentRead(f);
+ const retried=hook(f,{hook_event_name:'PreCompact',trigger:'manual'},{NODE_OPTIONS:'--import='+preload});assert.equal(retried.status,0,retried.stderr);assert.equal(retried.stdout,'');assert.deepEqual(fs.readFileSync(wc),before,'the oversized marker is still omitted after a complete read');
 });
 
 test('wave20: overlapping prompt hooks cannot clear another failed request intent',async()=>{
@@ -75,7 +86,10 @@ test('wave20: stalled compaction CLI calls finish below the hook timeout without
  const preload=join(f.projectRoot,'stall-cli.mjs'),wc=join(f.projectRoot,'.context-engine',sid,'context.md'),before=fs.readFileSync(wc);
  fs.writeFileSync(preload,"if(process.argv[1]?.endsWith('/core/cli.ts'))await new Promise(resolve=>setTimeout(resolve,60000));");
  const start=performance.now(),result=hook(f,{hook_event_name:'PreCompact',trigger:'manual'},{NODE_OPTIONS:'--import='+preload});
- assert.equal(result.status,0);assert.ok(performance.now()-start<22000,'three stalled calls leave time under the 30s hook declaration');assert.match(result.stderr,/timed out|ETIMEDOUT/);assert.equal(result.stdout,'');assert.deepEqual(fs.readFileSync(wc),before);
+ assert.equal(result.status,0);assert.ok(performance.now()-start<22000,'three stalled calls leave time under the 30s hook declaration');assert.match(result.stderr,/timed out|ETIMEDOUT/);assert.equal(JSON.parse(result.stdout).continue,false);assert.match(result.stdout,/complete current read/);assert.deepEqual(fs.readFileSync(wc),before);
+ assert.ok(fs.existsSync(join(layout(f.projectRoot,sid,f.stateDir).stateDir,'codex-precompact-read.json')));
+ observeCurrentRead(f);
+ const retried=hook(f,{hook_event_name:'PreCompact',trigger:'manual'});assert.equal(retried.status,0,retried.stderr);assert.equal(retried.stdout,'');assert.match(fs.readFileSync(wc,'utf8'),/Context window reset/);
 });
 
 for (const fault of ['publish', 'clear-flush']) test('wave26: completed-record intent '+fault+' failure refuses continuation', () => {

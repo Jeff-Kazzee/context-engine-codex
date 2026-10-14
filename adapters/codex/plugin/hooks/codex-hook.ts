@@ -670,7 +670,9 @@ function observeRestoreRead(input: HookInput, result: CoreResult): void {
   for (const output of outputs) {
     if (Buffer.byteLength(output) > lib.READ_MAX_BYTES) continue;
     const base = { owner: result.sessionGeneration, restore: result.restoreNoticeGeneration ?? store.sha(''), revision: result.revision, sha256: digest };
-    if (output.includes(result.workingContextText)) {
+    // CLI headers can contain the complete short file text. Only parsed payload counts.
+    const cliOutput = output.startsWith('[Context Engine: Working Context ') || output.startsWith('[Context Engine: framed Working Context ');
+    if (!cliOutput && output.includes(result.workingContextText)) {
       store.atomicWrite(restoreReadPath(input), JSON.stringify({ ...base, offset: whole.length, nextPart: 2, parts: 1, complete: true }), 'frame-key-tmp');
       return;
     }

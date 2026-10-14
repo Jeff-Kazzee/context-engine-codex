@@ -240,7 +240,15 @@ export function ensureDirs(l: Layout, stateRoot: string): void {
       const st = fstatSync(file);
       if (!st.isFile() || st.nlink !== 1 || openedPath(file) !== join(managed, '.gitignore')) throw new Error('managed ignore file changed before flush');
       const current = boundedRead(file, st.size, 65536);
-      if (current === 'too-large' || !current.equals(existing)) throw new Error('managed ignore file changed before flush');
+      if (current === 'too-large') throw new Error('managed ignore file changed before flush');
+      // An already-racing repairer may append the same whole block after our sample.
+      // Preserve the sampled prefix and reject every other suffix or conflicting edit.
+      const appended = current.subarray(existing.length), block = Buffer.from(`\n${MANAGED_IGNORE}`);
+      let validRepair = current.subarray(0, existing.length).equals(existing) && appended.length % block.length === 0;
+      for (let offset = 0; validRepair && offset < appended.length; offset += block.length) {
+        validRepair = appended.subarray(offset, offset + block.length).equals(block);
+      }
+      if (!validRepair) throw new Error('managed ignore file changed before flush');
       fsyncSync(file);
     } finally { closeSync(file); }
   }
