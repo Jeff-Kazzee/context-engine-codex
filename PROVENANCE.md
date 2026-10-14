@@ -166,3 +166,7 @@ Issue 32 shared-core source pin: `dd525fafca4d6e0b1a965fe21498f5c7f0e7f52c` (65 
 CI integration shared-core source pin: `6e893ea12b6a85810fd0d88d8cab38f25bfa39d3` (65 identical core files), verified 2026-10-11. An uncertain append now reports close-and-reopen guidance before restore-notice refresh. Fixtures validate owner generations, distinct retry intents, torn-log refusal with lock release, and warm reads of newly appended rows. The core refuses missing event evidence before creating HEAD.
 
 The skipped MAX_SAFE_INTEGER fixture cannot test numerical allocation exhaustion without a complete prefix. The allocation guard retains its prior predicate. These synthetic checks do not establish model delivery, installation in an ordinary account, or power-loss durability. The original snapshot metadata and importedPaths remain unchanged.
+
+Codex hook restore transport correction, verified 2026-10-14 with offline fixtures. Native hooks keep durable restore notices pending because stdout emission does not establish host acceptance. A post-output SIGKILL fixture and prompt, tool, reset, and compaction controls cover conservative reoffer. Resets remain refused until a separate observed transport confirms the represented IDs. The turn loop retains its existing turn/start reply boundary.
+
+Shared core bytes, manifests, and pin remain unchanged. These fixtures do not establish provider or ordinary-account acceptance.
