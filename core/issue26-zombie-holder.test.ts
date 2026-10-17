@@ -31,6 +31,7 @@ if (mode === 'idle') hold();
 else if (mode === 'serialized') serialized(lockPath, hold);
 else {
   if (mode === 'publish') {
+    // This relies on platform.ts looking up host().unlinkSync at each call, not once at import.
     const unlink = linuxPlatform.unlinkSync;
     linuxPlatform.unlinkSync = (path) => { if (String(path).endsWith('.new')) hold(); unlink(path); };
   }
@@ -112,7 +113,7 @@ test('[issue 26] a session lock held by a zombie is taken over, and refused whil
   } finally { await reap(h.parent, h.pid); }
 });
 
-test('[issue 26] a serialize lease held by a zombie lets the next call run at once', async () => {
+test('[issue 26] a serialize lease held by a zombie lets the next call run and release it', async () => {
   const lock = join(tempDir('zombie-serialize'), 'codex-prompt.lock');
   const h = await startHolder(lock, 'serialized');
   try {
@@ -126,7 +127,7 @@ test('[issue 26] a serialize lease held by a zombie lets the next call run at on
   } finally { await reap(h.parent, h.pid); }
 });
 
-test('[issue 26] the next core CLI call runs at once after a zombie held the session operation lease', async () => {
+test('[issue 26] the next core CLI call succeeds and releases a session operation lease a zombie held', async () => {
   const f = fixture();
   const run = (...args: string[]) => spawnSync(process.execPath, [CLI, ...args, '--session', 'S26'], {
     cwd: f.projectRoot, encoding: 'utf8', timeout: 30_000,
