@@ -17,21 +17,21 @@
     "core/hosted-regressions.test.ts": "e7dc670e7a64667621e2853a601dc765388cff5a3c53f497fd0b66ef4c578d1a",
     "core/index.ts": "a8652d46060b72ade024f4f0f18b3d6e13ae7aa04fda1986760d9d038055f206",
     "core/isolation.test.ts": "d7c66e27a62db5698ec573a8bf63773ab2189df3c90e2d1bd3f99193b70ff189",
-    "core/issue26-zombie-holder.test.ts": "2c53155896928e443396eed3b0dd5e02a9eb08fd97376121809a4dcae838bcdc",
+    "core/issue26-zombie-holder.test.ts": "a3702f4918fa5bc5142808913981432d716ccd78ca8f65f923b76975dfbb911b",
     "core/issue29-ignore-repair.test.ts": "57f1cb2ff0542c34348d50200c4fd7098c2d8f63622db1481cef9c20f3b78149",
     "core/issue30-legacy-ignore.test.ts": "f4eb5e6ea0bd0fef3a5d0d4c964f24f16341b2f0349fe3deaa73ed1ac3fcfd84",
     "core/issue31-restore-notices.test.ts": "1c8f822cb026c19b990fa5832007ee0fd4fc86db75a9a4ef9adefa9bb3d8092a",
     "core/issue32-late-write.test.ts": "5d0b52dc2cf4281a547d78d1835b09e91a090eda8866361a8891f499d772517e",
     "core/late-review-regressions.test.ts": "7da4becc6f261703e8b12ae04f5854b87f9e5dc3c9da481cb2c46e86c5601c83",
     "core/lock.test.ts": "00545e037055298371db7a0d1fd5cbffc5fa9ffe2a7f65cf82fec91789a1b3b2",
-    "core/lock.ts": "7a3e3038353169f12fd019f241b630683bd3681acf1bc92e1e3be25869364abe",
+    "core/lock.ts": "bb9f7c2c487bcc7108b14453ed356848d761915c865559aca318c42f8a19982c",
     "core/native-compaction.test.ts": "e1bb45b88ae2089b49da6b0106e3abfd400e8dfd23af11e7e5362009c5457039",
     "core/participation.test.ts": "4b77377ac94cfb840630d670e9186c835be933ef5d12962f1e4b6fdc157244c7",
     "core/participation.ts": "c24201567ccaa21aa8e1bb2ff47ff0f99bbf8181f65e716124bbe8c078df1617",
-    "core/platform-contract.ts": "fb9f92ff013fc53c4738cf7d8506d2d8b4f375ac37eda1f908bbf9f5b11654f3",
-    "core/platform-linux.ts": "f379c7eb2746292cbc17f1e4a0798bbc667616fe38410d91d0c6c5d848665e3b",
+    "core/platform-contract.ts": "3538c967425b676d8733069e5195f23885de2f952025220b60309720542c3007",
+    "core/platform-linux.ts": "4e80688f031a7bc5ab4b9cfb690fd48165538da168c5209f610c8a8a1135077c",
     "core/platform.test.ts": "96e5d85f1b68360e7d100598575f57da985f99162ce79c376c862f336270480c",
-    "core/platform.ts": "0fcb078b41c5e9a35108b12039c048be31fbadc6a9a9dc4438b3876d14201371",
+    "core/platform.ts": "242ae2f90c40cf2f94a89cd525c6bda799d22279902ba612d38cb728a6925ab3",
     "core/pr6-preservation.test.ts": "32fbbc025a0cfd02e91c5cb22e6b6fe619fb786f594796c6dd30c4ee6ee6952b",
     "core/preserved-edits.test.ts": "078a1d076536a3369146ffd8c180f3ac47142b1cfc27479a791850bd9f384f47",
     "core/process-concurrency.test.ts": "885f5d3e8cf5d04ed0a8e6e6c1ff47cad5a93eeedee0d7afbaf430385aa7e130",
@@ -52,7 +52,7 @@
     "core/session.ts": "289eb68b9db8ab044506035e0f1e48acafbb7ec1e3842c6493cfc22fc70dd33b",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "3d10f334c6b0153a8c220eba28c9eaabe8e432304f8942f6dcf2e22e4e6d1e9f",
+    "core/store.ts": "2eee588d6fa0dfa1babaed125d141a6599f5919e2e63d79ff6fb77d894d404dd",
     "core/temp-hygiene.test.ts": "7495b5b45299db20a4e0b8ef0627838c163013675bf1c9e8537f9e7d77389ee1",
     "core/testing.ts": "89fa6f05e3e4f2dee67092cdb4dee824500dfd9f43b4442d143a6bc86dbda639",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
@@ -140,7 +140,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "0ecd9f1f634d41d4b939a052bde84f8217e9a8c8",
+  "corePatchCommit": "2be71b8a23dea2383f81f7ebb89f4ac005b3cae2",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-claude",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -178,6 +178,6 @@
     "CI integration repair: uncertain-append refusal precedes restore refresh. Maintained fixtures verify owner generations, distinct at-least-once retry intents, torn-log close refusal and released locks, warm tail reads without historical payload, and continuous-evidence refusal before HEAD creation. Direct numeric sequence overflow is not exercised by the invalid skipped-prefix fixture. No model or account acceptance is inferred.",
     "2026-10-14 confirmed-history repair: bounded disposable restore lookup shards retain only pending notice bodies in memory. Cold conflict and unknown-confirmation refusal, source-row verification, corrupt-cache rebuild and the independent full runner-evidence scan remain required. Unsafe or oversized cache files refuse. No Event Log or HEAD migration, model/provider trial or ordinary-profile acceptance is inferred.",
     "2026-10-14 concurrent ignore repair correction: final verification accepts an unchanged sampled prefix followed only by complete identical managed-repair blocks. Conflicting tails, changed prefixes, oversized files and hardlinks still refuse. Focused deterministic and simultaneous-session controls preserve both records. No broader concurrency, arbitrary editor-completion or live-provider guarantee is inferred.",
-    "2026-10-17 issue 26 zombie lock holder: a holder that has exited but is not yet reaped counts as dead when /proc/<pid>/stat reports state Z or X with one thread. A zombie leader with running threads, a stopped holder, a reused PID with a different start marker and an unreadable or malformed status keep the earlier answers. Real-process controls use a holder whose parent is stopped. No container without a reaping PID 1 and no live Codex hook timeout was exercised."
+    "2026-10-17 issue 26 zombie lock holder: a lock holder, a lock publisher killed between link and unlink, and a legacy ignore temporary's creator count as gone when /proc/<pid>/stat reports state Z or X with one thread. A zombie leader with running threads, a stopped holder, a reused PID with a different start marker and an unreadable or malformed status keep the earlier answers. One parser reads /proc/<pid>/stat for both status and start marker. Real-process controls use a holder whose parent is stopped. No container without a reaping PID 1 and no live Codex hook timeout was exercised."
   ]
 }
