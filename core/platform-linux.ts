@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { anchoredPath, type AnchoredPath, type FileTarget, type FileInfo, type HostPlatform, type OpenIntent } from './platform-contract.ts';
+import { anchoredPath, type AnchoredPath, type FileTarget, type FileInfo, type HostPlatform, type OpenIntent, type ProcessStatus } from './platform-contract.ts';
 
 let descriptorDirectory = '/proc/self/fd';
 
@@ -48,6 +48,25 @@ function inspect(st: fs.Stats): FileInfo {
   };
 }
 
+/**
+ * Parses /proc/<pid>/stat. The command name may hold spaces and parentheses, so fields are counted
+ * from the last ')': state is field 3, num_threads field 20 and starttime field 22. Returns null for
+ * any text that does not have that shape.
+ */
+export function parseProcessStat(stat: string): ProcessStatus | null {
+  const close = stat.lastIndexOf(')');
+  if (close < 0 || stat[close + 1] !== ' ') return null;
+  const fields = stat.slice(close + 2).split(' ');
+  const [state, threads, startMarker] = [fields[0], fields[17], fields[19]];
+  if (!state || !/^[A-Za-z]$/.test(state) || !threads || !/^[0-9]+$/.test(threads) || !startMarker || !/^[0-9]+$/.test(startMarker)) return null;
+  return { state, threads: Number(threads), startMarker };
+}
+
+function readProcessStatus(pid: number): ProcessStatus | null {
+  try { return parseProcessStat(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); }
+  catch { return null; }
+}
+
 /** Linux syscall choices. Storage and lock algorithms remain in their callers. */
 export const linuxPlatform: HostPlatform = {
   anchor: fd => new LinuxPath(`${descriptorDirectory}/${fd}`),
@@ -84,11 +103,6 @@ export const linuxPlatform: HostPlatform = {
   linkSync: (from, to) => fs.linkSync(nativePath(from), nativePath(to)),
   unlinkSync: path => fs.unlinkSync(nativePath(path)),
   rmdirSync: path => fs.rmdirSync(nativePath(path)),
-  processStartMarker: pid => {
-    try {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
-      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-      return fields[19] ?? null;
-    } catch { return null; }
-  },
+  processStartMarker: pid => readProcessStatus(pid)?.startMarker ?? null,
+  processStatus: readProcessStatus,
 };

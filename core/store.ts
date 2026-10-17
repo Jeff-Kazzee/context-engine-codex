@@ -1,4 +1,4 @@
-import { anchor, childTarget, absoluteName, openedPath, sameParent, suffix, targetBasename, requireSupportedPlatform, type FileTarget } from './platform.ts';
+import { anchor, childTarget, absoluteName, openedPath, processGone, sameParent, suffix, targetBasename, requireSupportedPlatform, type FileTarget } from './platform.ts';
 // File primitives and layout for the core. Replacement writes use temp + fsync + rename.
 // The Event Log and empty managed-ignore repair use explicit append protocols.
 import { createHash, randomBytes } from 'node:crypto';
@@ -1063,10 +1063,12 @@ export function removeDirectoryEntries(dir: string, own: (name: string) => boole
   } finally { closeSync(parent); }
 }
 
-/** A legacy ignore repair's PID has no start marker. Keep every present or uncertain PID. */
+/**
+ * A legacy ignore repair's PID has no start marker. Keep every present or uncertain PID. A creator
+ * that exited and is not yet reaped is gone.
+ */
 function definitelyGone(pid: number): boolean {
-  try { process.kill(pid, 0); return false; }
-  catch (e) { return (e as NodeJS.ErrnoException).code === 'ESRCH'; }
+  return processGone(pid);
 }
 
 /** Remove only a dead creator's exact private legacy ignore artifact in the core-owned namespace. */

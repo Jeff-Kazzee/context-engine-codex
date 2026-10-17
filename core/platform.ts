@@ -1,6 +1,6 @@
-import type { FileTarget, HostPlatform, OpenIntent } from './platform-contract.ts';
+import type { FileTarget, HostPlatform, OpenIntent, ProcessStatus } from './platform-contract.ts';
 import { linuxPlatform } from './platform-linux.ts';
-export type { AnchoredPath, Descriptor, FileInfo, FileTarget, HostPlatform, OpenIntent } from './platform-contract.ts';
+export type { AnchoredPath, Descriptor, FileInfo, FileTarget, HostPlatform, OpenIntent, ProcessStatus } from './platform-contract.ts';
 
 export class UnsupportedPlatformError extends Error {
   readonly code = 'CE_UNSUPPORTED_PLATFORM';
@@ -51,3 +51,19 @@ export const linkSync: HostPlatform['linkSync'] = (from, to) => host().linkSync(
 export const unlinkSync: HostPlatform['unlinkSync'] = path => host().unlinkSync(path);
 export const rmdirSync: HostPlatform['rmdirSync'] = path => host().rmdirSync(path);
 export const processStartMarker: HostPlatform['processStartMarker'] = pid => host().processStartMarker(pid);
+export const processStatus: HostPlatform['processStatus'] = pid => host().processStatus(pid);
+
+/** True when a status shows an exited process: a zombie or dead entry with no thread left running. */
+export const exitedStatus = (status: ProcessStatus | null): boolean =>
+  status !== null && (status.state === 'Z' || status.state === 'X') && status.threads <= 1;
+
+/**
+ * True only when `pid` is known to have exited: no such process, or one that exited and is not yet
+ * reaped. A PID held by a zombie cannot belong to a newer process, so no start marker is needed.
+ * Any other answer, including EPERM or an unreadable status, counts as present.
+ */
+export function processGone(pid: number): boolean {
+  try { process.kill(pid, 0); }
+  catch (e) { return (e as NodeJS.ErrnoException).code === 'ESRCH'; }
+  return exitedStatus(processStatus(pid));
+}

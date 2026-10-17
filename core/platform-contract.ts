@@ -21,6 +21,16 @@ export interface FileInfo {
   isSymbolicLink(): boolean;
 }
 
+/** Fields of one process's status, as the host reports them. */
+export interface ProcessStatus {
+  /** One-letter scheduler state. Linux reports Z for a zombie and X for a dead process. */
+  state: string;
+  /** Threads in the process. A zombie leader whose other threads still run reports more than one. */
+  threads: number;
+  /** The same start marker that `processStartMarker` returns. */
+  startMarker: string;
+}
+
 /** Synchronous operations already used by storage, locking, and setup. */
 export interface HostPlatform {
   anchor(fd: Descriptor): AnchoredPath;
@@ -53,4 +63,6 @@ export interface HostPlatform {
   unlinkSync(path: FileTarget): void;
   rmdirSync(path: FileTarget): void;
   processStartMarker(pid: number): string | null;
+  /** The process's status from one read, or null when it is absent, unreadable or does not parse. */
+  processStatus(pid: number): ProcessStatus | null;
 }
