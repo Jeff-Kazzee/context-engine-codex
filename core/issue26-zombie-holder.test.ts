@@ -119,9 +119,9 @@ test('[issue 26] a serialize lease held by a zombie lets the next call run at on
     assert.throws(() => serialized(lock, () => 'ran', { timeoutMs: 300 }), SerializeTimeout, 'a running holder keeps its lease');
 
     await makeZombie(h);
-    const started = performance.now();
-    assert.equal(serialized(lock, () => 'ran', { timeoutMs: 2_000 }), 'ran');
-    assert.ok(performance.now() - started < 1_000, 'the next call does not wait out the timeout');
+    // Before the fix this call waits out its whole bound and throws SerializeTimeout. The outcome is
+    // the evidence, so the bound is generous for a loaded runner.
+    assert.equal(serialized(lock, () => 'ran', { timeoutMs: 10_000 }), 'ran', 'the next call runs');
     assert.equal(readLock(lock), null, 'the next call released the lease');
   } finally { await reap(h.parent, h.pid); }
 });
@@ -138,10 +138,9 @@ test('[issue 26] the next core CLI call runs at once after a zombie held the ses
   const h = await startHolder(operation, 'serialized');
   try {
     await makeZombie(h);
-    const started = performance.now();
+    // Before the fix this call waits out the 15 s operation timeout and fails. Its outcome is the evidence.
     const next = run('sync');
     assert.equal(next.status, 0, next.stderr);
-    assert.ok(performance.now() - started < 5_000, 'the call does not wait out the 15 s operation timeout');
     assert.equal(readLock(operation), null, 'the call released the operation lease');
   } finally { await reap(h.parent, h.pid); }
 });

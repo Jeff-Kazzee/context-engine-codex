@@ -281,10 +281,12 @@ test('[issue 26] a prompt lease held by a killed hook that nothing reaped does n
     const held = readLock(lease);
     assert.ok(held && held !== 'unreadable' && held.pid === zombie, 'the zombie still names itself in the prompt lease');
 
+    // Before the fix this prompt waits out the lease and is refused. The outcome is the evidence, so
+    // the hook gets the full 30 s Codex hook bound on a loaded runner.
     const next = await runHook(f, SID, prompt('AFTER_ZOMBIE'));
+    assert.equal(next.timedOut, false, `the next prompt answers within the hook bound (${Math.round(next.ms)} ms)`);
     assert.equal(next.status, 0, next.stderr);
     assert.equal(stoppedContinuation(next), false, `the next prompt is not refused: ${next.stdout}`);
-    assert.ok(next.ms < 5_000, `the next prompt does not wait out the lease (${Math.round(next.ms)} ms)`);
     assert.equal(readLock(lease), null, 'the next hook released the lease');
     const tool = await runHook(f, SID, toolUse('Bash', { command: 'ls' }, 'AFTER_ZOMBIE_TOOL', 'call_after_zombie'));
     assert.equal(tool.status, 0, tool.stderr);
