@@ -164,6 +164,25 @@ test('[issue 26] a lock publication left by a zombie between link and unlink is 
   } finally { await reap(h.parent, h.pid); }
 });
 
+test('[issue 26] a legacy ignore temporary left by a zombie is removed, and a live creator keeps its own', async () => {
+  const managed = join(tempDir('zombie-legacy'), '.context-engine');
+  const MANAGED = '# Context Engine Working Contexts are never committed.\n*\n';
+  mkdirSync(managed, { mode: 0o700 });
+  writeFileSync(join(managed, '.gitignore'), MANAGED, { mode: 0o600 });
+  const h = await startHolder(join(managed, 'unused'), 'idle');
+  try {
+    const temp = join(managed, `.gitignore.ce-${h.pid}-12345678.tmp`);
+    writeFileSync(temp, MANAGED, { mode: 0o600 });
+    assert.deepEqual(removeTemps([], [], [managed]), [], 'a live creator keeps its temporary');
+    assert.ok(existsSync(temp));
+
+    await makeZombie(h);
+    assert.deepEqual(removeTemps([], [], [managed]), [temp], 'a zombie creator is gone');
+    assert.equal(existsSync(temp), false);
+    assert.equal(readFileSync(join(managed, '.gitignore'), 'utf8'), MANAGED);
+  } finally { await reap(h.parent, h.pid); }
+});
+
 test('[issue 26] a stopped holder is still alive, and a reused PID still needs its start marker', async () => {
   const lock = join(tempDir('zombie-stopped'), 'session.lock');
   const h = await startHolder(lock, 'acquire');
