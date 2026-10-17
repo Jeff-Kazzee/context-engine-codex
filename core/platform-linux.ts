@@ -63,6 +63,11 @@ export function parseProcessStat(stat: string): ProcessStatus | null {
   return { state, threads: Number(threads), startMarker };
 }
 
+function readProcessStatus(pid: number): ProcessStatus | null {
+  try { return parseProcessStat(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); }
+  catch { return null; }
+}
+
 export const linuxPlatform: HostPlatform = {
   anchor: fd => new LinuxPath(`${descriptorDirectory}/${fd}`),
   openedPath: fd => {
@@ -98,15 +103,6 @@ export const linuxPlatform: HostPlatform = {
   linkSync: (from, to) => fs.linkSync(nativePath(from), nativePath(to)),
   unlinkSync: path => fs.unlinkSync(nativePath(path)),
   rmdirSync: path => fs.rmdirSync(nativePath(path)),
-  processStartMarker: pid => {
-    try {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
-      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-      return fields[19] ?? null;
-    } catch { return null; }
-  },
-  processStatus: pid => {
-    try { return parseProcessStat(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); }
-    catch { return null; }
-  },
+  processStartMarker: pid => readProcessStatus(pid)?.startMarker ?? null,
+  processStatus: readProcessStatus,
 };
