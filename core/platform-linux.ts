@@ -48,7 +48,6 @@ function inspect(st: fs.Stats): FileInfo {
   };
 }
 
-/** Linux syscall choices. Storage and lock algorithms remain in their callers. */
 /**
  * Parses /proc/<pid>/stat. The command name may hold spaces and parentheses, so fields are counted
  * from the last ')': state is field 3, num_threads field 20 and starttime field 22. Returns null for
@@ -68,6 +67,7 @@ function readProcessStatus(pid: number): ProcessStatus | null {
   catch { return null; }
 }
 
+/** Linux syscall choices. Storage and lock algorithms remain in their callers. */
 export const linuxPlatform: HostPlatform = {
   anchor: fd => new LinuxPath(`${descriptorDirectory}/${fd}`),
   openedPath: fd => {

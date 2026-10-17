@@ -21,7 +21,6 @@ export interface FileInfo {
   isSymbolicLink(): boolean;
 }
 
-/** Synchronous operations already used by storage, locking, and setup. */
 /** Fields of one process's status, as the host reports them. */
 export interface ProcessStatus {
   /** One-letter scheduler state. Linux reports Z for a zombie and X for a dead process. */
@@ -32,6 +31,7 @@ export interface ProcessStatus {
   startMarker: string;
 }
 
+/** Synchronous operations already used by storage, locking, and setup. */
 export interface HostPlatform {
   anchor(fd: Descriptor): AnchoredPath;
   openedPath(fd: Descriptor): string;
