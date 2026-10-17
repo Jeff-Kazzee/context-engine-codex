@@ -6,26 +6,37 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { CLI, fixture, tempDir } from './testing.ts';
-import { layout } from './store.ts';
+import { layout, removeTemps } from './store.ts';
 import { acquireLock, holderFor, isAlive, processStartMarker, readLock, serialized, SerializeTimeout, type LockHolder } from './lock.ts';
 
 const LOCK = fileURLToPath(new URL('./lock.ts', import.meta.url));
+const LINUX = fileURLToPath(new URL('./platform-linux.ts', import.meta.url));
 
-// Takes the lock at argv[1] by `acquireLock` or `serialized` (argv[2]), writes its PID to argv[3],
-// then holds the lock until it is killed.
+// Mode argv[2] on the lock at argv[1]: `acquire` or `serialized` takes and holds the lock. `publish`
+// runs the core's own acquireLock but stops it after the lock's hard link is published and before
+// its candidate name is unlinked. `idle` takes nothing. Each then writes its PID to argv[3] and
+// waits until it is killed.
 const HOLDER = `
 import { writeFileSync } from 'node:fs';
 const [lockPath, mode, ready] = process.argv.slice(1);
 const { acquireLock, holderFor, serialized } = await import(${JSON.stringify(LOCK)});
+const { linuxPlatform } = await import(${JSON.stringify(LINUX)});
 const hold = () => { writeFileSync(ready, String(process.pid)); for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000); };
-if (mode === 'serialized') serialized(lockPath, hold);
-else if (acquireLock(lockPath, holderFor(process.pid, 'test', 1000)).status === 'acquired') hold();
-else process.exit(3);
+if (mode === 'idle') hold();
+else if (mode === 'serialized') serialized(lockPath, hold);
+else {
+  if (mode === 'publish') {
+    const unlink = linuxPlatform.unlinkSync;
+    linuxPlatform.unlinkSync = (path) => { if (String(path).endsWith('.new')) hold(); unlink(path); };
+  }
+  if (acquireLock(lockPath, holderFor(process.pid, 'test', 1000)).status === 'acquired') hold();
+  else process.exit(3);
+}
 `;
 
 /** State letter and thread count from /proc/<pid>/stat, read here independently of the code under test. */
@@ -45,12 +56,13 @@ async function until(check: () => boolean, what: string, ms = 15_000): Promise<v
 interface Holding { pid: number; parent: ChildProcess; holder: LockHolder }
 
 /** Starts a real holder of `lockPath` as the child of a shell that forks it and does not exec. */
-async function startHolder(lockPath: string, mode: 'acquire' | 'serialized'): Promise<Holding> {
+async function startHolder(lockPath: string, mode: 'acquire' | 'serialized' | 'publish' | 'idle'): Promise<Holding> {
   const ready = join(tempDir('holder'), 'ready');
   const parent = spawn('sh', ['-c', '"$0" --input-type=module -e "$1" "$2" "$3" "$4"; :', process.execPath, HOLDER, lockPath, mode, ready], { detached: true, stdio: ['ignore', 'ignore', 'inherit'] });
   try {
     await until(() => existsSync(ready) && readFileSync(ready, 'utf8') !== '', 'the holder took the lock');
     const pid = Number(readFileSync(ready, 'utf8'));
+    if (mode === 'publish' || mode === 'idle') return { pid, parent, holder: holderFor(pid, 'test', 1000) };
     const holder = readLock(lockPath);
     assert.ok(holder && holder !== 'unreadable' && holder.pid === pid, 'the lock names the holder');
     return { pid, parent, holder };
@@ -131,6 +143,24 @@ test('[issue 26] the next core CLI call runs at once after a zombie held the ses
     assert.equal(next.status, 0, next.stderr);
     assert.ok(performance.now() - started < 5_000, 'the call does not wait out the 15 s operation timeout');
     assert.equal(readLock(operation), null, 'the call released the operation lease');
+  } finally { await reap(h.parent, h.pid); }
+});
+
+test('[issue 26] a lock publication left by a zombie between link and unlink is recovered and taken over', async () => {
+  const dir = tempDir('zombie-publish'), lock = join(dir, 'session.lock');
+  const h = await startHolder(lock, 'publish');
+  try {
+    const candidates = () => readdirSync(dir).filter(name => name.startsWith(`session.lock.${h.pid}.`) && name.endsWith('.new'));
+    assert.equal(candidates().length, 1, 'the holder stopped with its candidate name still linked');
+    assert.equal(statSync(lock).nlink, 2, 'the lock has two names');
+    assert.throws(() => readLock(lock), { code: 'CE_STATE_LINK_COUNT' }, 'a live publisher keeps its publication');
+
+    await makeZombie(h);
+    const got = acquireLock(lock, holderFor(process.pid, 'test', 1000));
+    assert.equal(got.status, 'acquired', 'a zombie publisher no longer blocks the lock');
+    assert.ok(got.status === 'acquired' && got.takeoverFrom && got.takeoverFrom !== 'unreadable' && got.takeoverFrom.pid === h.pid, 'the takeover names the zombie');
+    assert.deepEqual(candidates(), [], 'recovery removed the zombie candidate name');
+    assert.equal(statSync(lock).nlink, 1);
   } finally { await reap(h.parent, h.pid); }
 });
 

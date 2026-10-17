@@ -1,4 +1,4 @@
-import { anchor, childTarget, suffix, processStartMarker as hostProcessStartMarker, processStatus } from './platform.ts';
+import { anchor, childTarget, suffix, processStartMarker as hostProcessStartMarker, processStatus, exitedStatus, processGone } from './platform.ts';
 // Single-writer session lock. The holder is identified by pid + hostname + process start marker
 // (Linux: start time from /proc/<pid>/stat, so a recycled pid is not mistaken for the holder).
 import { randomBytes } from 'node:crypto';
@@ -45,7 +45,7 @@ export function isAlive(h: LockHolder): boolean {
     if ((e as NodeJS.ErrnoException).code === 'ESRCH') return false;
   }
   const status = processStatus(h.pid);
-  if (status && (status.state === 'Z' || status.state === 'X') && status.threads <= 1) return false;
+  if (exitedStatus(status)) return false;
   const marker = status?.startMarker ?? null;
   return !(h.startMarker && marker && marker !== h.startMarker);
 }
@@ -90,8 +90,9 @@ function recoverPublication(path: string, parentFd?: number): boolean {
         const a=lstatSync(candidate),b=lstatSync(target);
         if(a.dev!==b.dev||a.ino!==b.ino||a.nlink!==2||b.nlink!==2)continue;
         const publisher=Number(name.slice(basename(path).length+1).split('.')[0]);
-        // Check process liveness before allowing even this exceptional bounded read.
-        try {process.kill(publisher,0);continue;}catch(e){if((e as NodeJS.ErrnoException).code!=='ESRCH')continue;}
+        // Check process liveness before allowing even this exceptional bounded read. A publisher
+        // killed between link and unlink and not yet reaped is gone too.
+        if(!processGone(publisher))continue;
         const bytes=readLockPublicationCandidate(candidate,target,join(real,name));if(!bytes)continue;
         const holder=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as LockHolder;
         if(!holder || !Number.isSafeInteger(holder.pid) || holder.pid<=0 || holder.hostname!==hostname() || !(holder.startMarker===null||typeof holder.startMarker==='string') || typeof holder.runner!=='string' || !Number.isFinite(holder.hardLimit) || holder.hardLimit<0 || typeof holder.acquiredAt!=='string')continue;
