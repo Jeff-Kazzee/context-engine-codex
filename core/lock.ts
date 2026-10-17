@@ -1,4 +1,4 @@
-import { anchor, childTarget, suffix, processStartMarker as hostProcessStartMarker } from './platform.ts';
+import { anchor, childTarget, suffix, processStartMarker as hostProcessStartMarker, processStatus } from './platform.ts';
 // Single-writer session lock. The holder is identified by pid + hostname + process start marker
 // (Linux: start time from /proc/<pid>/stat, so a recycled pid is not mistaken for the holder).
 import { randomBytes } from 'node:crypto';
@@ -30,7 +30,13 @@ export function holderFor(pid: number, runner: string, hardLimit: number): LockH
 
 const sameProcess = (a: LockHolder, b: LockHolder) => a.pid === b.pid && a.hostname === b.hostname && a.startMarker === b.startMarker;
 
-/** True unless the holder is known to be dead. A holder on another host is assumed alive. */
+/**
+ * True unless the holder is known to be dead. A holder on another host is assumed alive.
+ * A holder that has exited but is not yet reaped (a zombie) still answers kill(pid, 0) and keeps
+ * its start marker, so it counts as dead only when the host reports it exited with no thread
+ * left running. A PID held by a zombie cannot belong to a newer process, so this needs no marker.
+ * An unreadable or unparsable status keeps the earlier answer.
+ */
 export function isAlive(h: LockHolder): boolean {
   if (h.hostname !== hostname()) return true;
   try {
@@ -38,7 +44,9 @@ export function isAlive(h: LockHolder): boolean {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ESRCH') return false;
   }
-  const marker = processStartMarker(h.pid);
+  const status = processStatus(h.pid);
+  if (status && (status.state === 'Z' || status.state === 'X') && status.threads <= 1) return false;
+  const marker = status?.startMarker ?? null;
   return !(h.startMarker && marker && marker !== h.startMarker);
 }
 

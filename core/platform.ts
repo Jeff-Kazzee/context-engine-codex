@@ -51,3 +51,4 @@ export const linkSync: HostPlatform['linkSync'] = (from, to) => host().linkSync(
 export const unlinkSync: HostPlatform['unlinkSync'] = path => host().unlinkSync(path);
 export const rmdirSync: HostPlatform['rmdirSync'] = path => host().rmdirSync(path);
 export const processStartMarker: HostPlatform['processStartMarker'] = pid => host().processStartMarker(pid);
+export const processStatus: HostPlatform['processStatus'] = pid => host().processStatus(pid);

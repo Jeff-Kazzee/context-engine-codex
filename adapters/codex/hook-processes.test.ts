@@ -4,6 +4,8 @@
 import './testing/private-tmp.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -223,7 +225,7 @@ test('[REC-014] a hook killed mid-record keeps its tool debt until the same tool
     const hook = readLock(lease);
     assert.ok(hook && hook !== 'unreadable' && hook.pid !== runner.pid, 'the tool hook holds the prompt lease');
     // The runner, the hook's parent, reaps it. A hook orphaned by a group kill stays a zombie where
-    // PID 1 does not reap orphans, and a zombie still counts as a live lease holder.
+    // PID 1 does not reap orphans. The core counts such a zombie as dead (issue 26, tested below).
     process.kill(hook.pid, 'SIGKILL');
     first = await runner.done;
     assert.equal(isAlive(hook), false, 'the killed hook no longer holds the lease');
@@ -244,6 +246,59 @@ test('[REC-014] a hook killed mid-record keeps its tool debt until the same tool
   assert.equal(texts.filter(t => t.includes('KILLED_TOOL_OUTPUT')).length, 1, 'the tool output is recorded exactly once');
   assert.equal(texts.filter(t => t === 'AFTER_RESTART').length, 1, 'the refused prompt is recorded once, on retry');
   assert.deepEqual(pendingMarkers(f, SID), []);
+});
+
+/** State letter and thread count from /proc/<pid>/stat. */
+function procStat(pid: number): { state: string; threads: number } | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return { state: fields[0]!, threads: Number(fields[17]) };
+  } catch { return null; }
+}
+
+test('[issue 26] a prompt lease held by a killed hook that nothing reaped does not refuse the next hooks', async () => {
+  const f = enabledFixture();
+  const before = await runHook(f, SID, prompt('BEFORE_ZOMBIE'));
+  assert.equal(stoppedContinuation(before), false, before.stdout);
+  const lease = join(layout(f.projectRoot, SID, f.stateDir).stateDir, 'codex-prompt.lock');
+  const ready = join(f.projectRoot, 'lease-held'), holder = join(f.projectRoot, 'lease-holder.mjs');
+  const lock = new URL('../../core/lock.ts', import.meta.url).href;
+  writeFileSync(holder, `import fs from 'node:fs';import {serialized} from ${JSON.stringify(lock)};serialized(${JSON.stringify(lease)},()=>{fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));for(;;)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1000);});`);
+  // The holder takes the lease through the core's own code. Its parent is a shell that forks it and is
+  // then stopped, so nothing reaps the killed holder, as in a container whose PID 1 does not reap.
+  const shell = spawn('sh', ['-c', '"$0" "$1"; :', process.execPath, holder], { cwd: f.projectRoot, env: hookEnv(f), detached: true, stdio: 'ignore' });
+  const shellExited = once(shell, 'exit');
+  let zombie = 0;
+  try {
+    await waitUntil(() => existsSync(ready) && readFileSync(ready, 'utf8') !== '', 'the holder took the prompt lease');
+    zombie = Number(readFileSync(ready, 'utf8'));
+    process.kill(shell.pid!, 'SIGSTOP');
+    await waitUntil(() => procStat(shell.pid!)?.state === 'T', 'the shell is stopped');
+    process.kill(zombie, 'SIGKILL');
+    await waitUntil(() => procStat(zombie)?.state === 'Z' && procStat(zombie)?.threads === 1, 'the killed holder is a zombie');
+    process.kill(zombie, 0); // Still present: this throws if anything reaped it.
+    const held = readLock(lease);
+    assert.ok(held && held !== 'unreadable' && held.pid === zombie, 'the zombie still names itself in the prompt lease');
+
+    const next = await runHook(f, SID, prompt('AFTER_ZOMBIE'));
+    assert.equal(next.status, 0, next.stderr);
+    assert.equal(stoppedContinuation(next), false, `the next prompt is not refused: ${next.stdout}`);
+    assert.ok(next.ms < 5_000, `the next prompt does not wait out the lease (${Math.round(next.ms)} ms)`);
+    assert.equal(readLock(lease), null, 'the next hook released the lease');
+    const tool = await runHook(f, SID, toolUse('Bash', { command: 'ls' }, 'AFTER_ZOMBIE_TOOL', 'call_after_zombie'));
+    assert.equal(tool.status, 0, tool.stderr);
+    assert.equal(tool.stdout, '', 'the tool hook after it records normally');
+    const texts = loggedEvents(f, SID).map(e => e.event.text);
+    assert.equal(texts.filter(t => t === 'AFTER_ZOMBIE').length, 1, 'the next prompt is recorded once');
+    assert.equal(texts.filter(t => t.includes('AFTER_ZOMBIE_TOOL')).length, 1, 'the tool output is recorded once');
+    assert.deepEqual(pendingMarkers(f, SID), []);
+  } finally {
+    killGroup(shell.pid!);
+    await shellExited;
+    // The orphaned zombie now belongs to the host's init, which reaps it.
+    if (zombie) await waitUntil(() => procStat(zombie) === null, 'the host reaped the zombie', 10_000).catch(() => {});
+  }
 });
 
 test('[CDX-025] sub-agent events on the root session leave a pending root edit uncommitted', async () => {
