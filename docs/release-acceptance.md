@@ -17,7 +17,7 @@ In a disposable project and isolated state root, exercise install, enable, statu
 3. With harmless sentinels, verify complete digest-bound read-back in the later native request, then test the documented agent reset and compaction boundaries separately. Preserve the current human request and native permissions.
 4. Disable and uninstall; verify configuration restoration and retained session data. Do not delete data or intent markers to force recovery.
 
-The handoff reports native request acceptance on 2026-10-15. That historical result is not acceptance of every later source head. Current-head installed loading, request delivery and bounded long-session behavior require their own evidence. Do not perform a live trial while the owner is absent.
+One scripted interactive TUI session on 2026-10-15, on an earlier source version, reached a functional pass with installed hooks. Its live request proof was unverified, and its request-boundary check passed only in a later offline re-evaluation. That historical result is not acceptance of any later source head. Current-head installed loading, request delivery and bounded long-session behavior require their own evidence. Do not perform a live trial while the owner is absent.
 
 ## Limitations and open decisions
 
