@@ -158,9 +158,8 @@ test('[CDX-002] disabling a project mid-session makes the next hooks stand aside
   assert.deepEqual(sessionBytes(f, SID), before);
 });
 
-test('[CDX-002] unverifiable activation with live project guidance does not allow an unchecked reset', {
-  todo: 'design decision for the parent: README.md documents stand-aside on unverifiable activation, while CDX-002 asks the gate to deny while the project guidance stays live',
-}, async () => {
+// Owner decision 2026-10-18: keep stand-aside on unverifiable activation and document the unrecorded gap.
+test('[CDX-002] unverifiable activation with live project guidance stands aside and records nothing', async () => {
   const w = world();
   assert.equal(w.ce(['install', '--codex']).status, 0);
   const enable = w.ce(['enable']);
@@ -171,8 +170,13 @@ test('[CDX-002] unverifiable activation with live project guidance does not allo
   chmodSync(join(w.stateDir, 'participation'), 0o755);
   try {
     writeFileSync(wcPath(f), '');
-    const gate = await runHook(f, SID, newContext);
-    assert.match(denial(gate), /participation/);
+    const before = sessionBytes(f, SID);
+    for (const fields of [prompt('SYNTHETIC_GAP'), newContext]) {
+      const run = await runHook(f, SID, fields);
+      assert.equal(run.status, 0, run.stderr);
+      assert.equal(run.stdout, '', `${fields.hook_event_name} stands aside`);
+    }
+    assert.deepEqual(sessionBytes(f, SID), before, 'turns during the gap are not recorded');
   } finally { chmodSync(join(w.stateDir, 'participation'), 0o700); }
 });
 
