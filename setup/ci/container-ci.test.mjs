@@ -42,6 +42,8 @@ test('native checkout is bound to the exact event SHA and reviewed source', () =
   const end = linux.indexOf('\n      - name:', start + marker.length);
   const body = linux.slice(start + '        run: |\n'.length, end).split('\n').map(line => line.slice(10)).join('\n').trimEnd();
   assert.equal(body, source);
+  assert.ok(source.indexOf("printf 'Native checkout CA package:") < source.indexOf('dpkg --compare-versions'));
+  assert.ok(source.includes('CI_NATIVE_CHECKOUT_REFUSED:'));
   assert.match(linux, /EXPECTED_SHA: \$\{\{ github.event.pull_request.head.sha \|\| github.sha \}\}/);
   for (const token of ['CI_CHECKOUT_TOKEN', '::add-mask::', 'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null', 'credential.helper=', 'core.hooksPath=/dev/null', '--no-recurse-submodules', 'unset CI_CHECKOUT_TOKEN auth', 'git rev-parse HEAD']) assert.ok(source.includes(token), token);
   assert.equal(/git config|github_pat_|ghp_|authorization:.*\$\{\{/i.test(source), false);
