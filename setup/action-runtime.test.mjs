@@ -16,6 +16,10 @@ test('action interpreter policy, actual probe and collector fail closed', {
     encoding: 'utf8', timeout: 20000,
     env: { ...process.env, CE_TEST_NODE: process.execPath, CE_TEST_NODE_VERSION: process.versions.node },
   });
+  if (process.platform === 'linux' && result.error?.code === 'ENOENT') {
+    t.skip('PowerShell is unavailable on this Linux host; native Windows/macOS CI still requires it.');
+    return;
+  }
   assert.equal(result.status, 0, result.stderr || String(result.error));
   assert.match(result.stdout, /Action runtime probe: \d+ checks passed; only fixed Node/);
   t.diagnostic(result.stdout.trim());
