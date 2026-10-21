@@ -1,3 +1,4 @@
+import { assertSupportedNode } from './node-runtime.mjs';
 import { anchor, childTarget } from '../core/platform.ts';
 // Install and uninstall one runner's adapter through the runner's own plugin commands, with every
 // config file they touch backed up byte for byte first (ledger.ts).
@@ -141,10 +142,12 @@ export function installedLedger(ctx: SetupContext, id: string, spec?: RunnerSpec
 export class SetupError extends Error {}
 
 export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
+  assertSupportedNode();
   return withSetupLock(join(ctx.setupDir, `${spec.id}.setup.lock`), () => installLocked(ctx, spec));
 }
 
 export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
+  assertSupportedNode();
   checkOwnedDirectory(spec.home);
   const prior = installedLedger(ctx, spec.id, spec);
   if (prior) {

@@ -1,0 +1,8 @@
+{
+  "packageManager": "pnpm@11.28.6",
+  "inputs": {
+    "package.json": "5d289b186379f4faa290fbec816c5416628563e50f84e13493d2ceff32be7790",
+    "package-lock.json": "441c3c1bec03991e14fc789d05ebcd0f6ddcd7509f0b9f651f96f6200f6bfad4"
+  },
+  "bracesScope": "GHSA-vfj7-8cjw-p6xm: conditional CE-only exclusion for the exact artifact, frozen npm inputs and fixed command flow; no arbitrary patterns, hooks, workspace configuration or script execution."
+}

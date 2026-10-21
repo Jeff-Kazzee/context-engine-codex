@@ -7,7 +7,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.22.1 <25 || >=26.12.1 <27"
   },
   "bin": {
     "context-engine": "core/cli.ts",
@@ -19,8 +19,10 @@
     "./codex-turn-loop": "./adapters/codex/turn-loop/index.ts"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 \"core/**/*.test.ts\" \"setup/*.test.ts\" \"adapters/codex/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit -p ."
+    "test": "node setup/check-node.mjs && node --test --test-concurrency=1 \"core/**/*.test.ts\" \"setup/*.test.ts\" \"adapters/codex/**/*.test.ts\" \"setup/*.test.mjs\"",
+    "typecheck": "node setup/check-node.mjs && tsc --noEmit -p .",
+    "check:runtime": "node setup/check-node.mjs",
+    "preinstall": "node setup/check-node.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
