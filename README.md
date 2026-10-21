@@ -84,8 +84,7 @@ cd context-engine-codex
 # Replace APPROVED_COMMIT with the exact reviewed commit approved for this trial.
 git checkout --detach APPROVED_COMMIT
 git rev-parse HEAD
-npm ci
-npm link
+node setup/check-node.mjs && npm ci && npm link
 context-engine-codex install
 # Replace this path with a NEW disposable project, not the repo checkout.
 mkdir -p /tmp/context-engine-codex-trial

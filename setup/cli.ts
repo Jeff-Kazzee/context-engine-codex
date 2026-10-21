@@ -20,7 +20,11 @@ Uninstall keeps session data. See README.md and adapters/codex/README.md.
 `;
 
 export async function runSetup(argv: string[]): Promise<number> {
-  assertSupportedNode();
+  try { assertSupportedNode(); }
+  catch (e) {
+    process.stderr.write(refusal(e));
+    return 1;
+  }
   const [command, ...args] = argv;
   const { values } = parseArgs({
     args,

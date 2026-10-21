@@ -14,7 +14,7 @@ for (const version of ['24.22.1', '24.22.2', '24.23.0', '26.12.1', '26.12.2', '2
   test(`supported security release ${version}`, () => assert.doesNotThrow(() => assertSupportedNode(version)));
 }
 
-for (const version of ['18.20.8', '20.20.0', '22.23.3', '22.23.4', '23.11.0', '24.0.0', '24.21.0', '24.22.0', '25.5.0', '26.0.0', '26.11.1', '26.12.0', '27.0.0', '28.0.0']) {
+for (const version of ['18.20.8', '20.20.0', '22.23.3', '22.23.4', '23.11.0', '24.0.0', '24.19.0', '24.21.0', '24.22.0', '25.5.0', '26.0.0', '26.11.1', '26.12.0', '27.0.0', '28.0.0']) {
   test(`refuse unsupported or affected release ${version}`, () => {
     assert.throws(() => assertSupportedNode(version), { code: 'CE_UNSUPPORTED_NODE' });
   });
@@ -54,6 +54,7 @@ test('setup refuses an affected version before creating state', () => {
     });
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /CE_UNSUPPORTED_NODE.*24\.21\.0/);
+    assert.match(result.stderr, /^CE_UNSUPPORTED_NODE: [^\r\n]+\r?\n$/);
     assert.deepEqual(readdirSync(root), []);
   } finally {
     rmSync(root, { recursive: true, force: true });
