@@ -4,7 +4,13 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-test('action interpreter policy, actual probe and collector fail closed', (t) => {
+function nativeWorkflow() {
+  return readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n').split('\n  linux:')[0];
+}
+
+test('action interpreter policy, actual probe and collector fail closed', {
+  skip: process.platform === 'linux' && process.env.CE_CONTAINER_CI === '1' && 'Docker uses no JavaScript actions; the PowerShell probe remains covered by native Windows/macOS checks.',
+}, (t) => {
   const script = fileURLToPath(new URL('./action-runtime.test.ps1', import.meta.url));
   const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script], {
     encoding: 'utf8', timeout: 20000,
@@ -16,7 +22,7 @@ test('action interpreter policy, actual probe and collector fail closed', (t) =>
 });
 
 test('the first workflow step is the exact reviewed shell probe', () => {
-  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+  const workflow = nativeWorkflow();
   const source = readFileSync(new URL('./action-runtime.ps1', import.meta.url), 'utf8').replaceAll('\r\n', '\n').trimEnd();
   const prefix = '    steps:\n      - name: Verify bundled JavaScript action runtime\n        id: action-runtime\n        shell: pwsh\n        timeout-minutes: 2\n        run: |\n';
   const start = workflow.indexOf(prefix);
@@ -35,7 +41,7 @@ test('the first workflow step is the exact reviewed shell probe', () => {
 });
 
 test('unverified package-manager execution is explicitly blocked', () => {
-  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const workflow = nativeWorkflow();
   const hold = workflow.indexOf('name: Hold unverified package manager bootstrap');
   const refusal = workflow.indexOf("run: throw 'CI_UNVERIFIED_PACKAGE_MANAGER", hold);
   const dependency = workflow.indexOf('run: pnpm import');

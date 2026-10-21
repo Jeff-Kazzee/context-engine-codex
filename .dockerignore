@@ -1,0 +1,10 @@
+*
+!.github/
+!.github/actions/
+!.github/actions/security-ci/
+!.github/actions/security-ci/**
+!setup/
+!setup/check-node.mjs
+!setup/node-runtime.mjs
+!setup/ci/
+!setup/ci/**

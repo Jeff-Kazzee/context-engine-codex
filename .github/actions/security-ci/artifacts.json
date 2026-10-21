@@ -1,0 +1,20 @@
+{
+  "artifacts": [
+    {
+      "url": "https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.xz",
+      "sha256": "6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6",
+      "destination": "/opt/node/bin/node",
+      "member": "node-v24.22.1-linux-x64/bin/node",
+      "maxBytes": 67108864
+    }
+  ],
+  "nodeAuthentication": {
+    "clearSignedManifestSha256": "458c81e98060760ddadc152cd6d2a06e1d5b8cc8018863758e9f64fe72abc809",
+    "releaseSignerFingerprint": "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356",
+    "buildProvenanceVerified": false
+  },
+  "ceException": {
+    "status": "pending",
+    "scope": "Both CE repositories: Linux x64 CI image build/version check, constrained container workload and per-job offline native-contract runtime only; no host/profile installation, other projects, publication or release."
+  }
+}

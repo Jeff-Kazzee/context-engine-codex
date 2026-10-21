@@ -92,8 +92,9 @@ test('CI gates precede dependency execution and cannot ignore failure', () => {
   assert.ok(workflow.indexOf(guardStep) < workflow.indexOf('run: pnpm import'));
   assert.ok(workflow.indexOf('- name: Hold unverified package manager bootstrap') < workflow.indexOf('uses: actions/setup-node@'));
   assert.ok(workflow.indexOf(auditStep) < workflow.indexOf('pnpm install --frozen-lockfile --ignore-scripts'));
-  const nativeAudit = workflow.indexOf('pnpm --dir "$runtime" audit --audit-level=low');
-  assert.ok(nativeAudit > 0 && nativeAudit < workflow.indexOf('pnpm --dir "$runtime" install'));
+  const container = readFileSync(new URL('../.github/actions/security-ci/run.sh', import.meta.url), 'utf8');
+  const nativeAudit = container.indexOf('pnpm --dir "$runtime" audit --audit-level=low');
+  assert.ok(nativeAudit > 0 && nativeAudit < container.indexOf('pnpm --dir "$runtime" install'));
   assert.doesNotMatch(workflow, /continue-on-error|always\(\)|audit[^\n]*(?:\|\||--prod|--production)/);
   assert.match(workflow, /permissions:\n  contents: read/);
   assert.match(workflow, /node-version: '24\.22\.1'/);

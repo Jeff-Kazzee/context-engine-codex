@@ -41,7 +41,7 @@ named project and report exact mode, versions, commands, config/backups changed,
 evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
 
-The [CI workflow](.github/workflows/ci.yml) checks the exact PR source commit on three hosts with Node 24.22.1. Before checkout or any JavaScript action, a bounded PowerShell probe verifies the actual runner-bundled Node 24 interpreter and refuses affected or unverifiable versions. The selected package runtime is checked separately before package setup. After the interpreter probe, CI stops before checkout or setup-node pending package-manager bundle and bootstrap review; no successful current-head CI is claimed during this hold. CI audits all locked development dependencies and the temporary native-test package before installation. Audit errors and reported advisories fail the job. Its platform coverage is:
+The [CI workflow](.github/workflows/ci.yml) keeps separate Linux, Windows and macOS checks at the exact source SHA. The Linux Docker candidate uses native checkout and an authenticated Node-only runtime; it is blocked before checkout or image build pending the CE-specific artifact exception; its reviewed manager-input boundary must remain intact. Windows/macOS retain the pre-action interpreter probe and their existing typecheck and pure/refusal coverage; their affected provider interpreter still blocks execution. Linux cannot establish native Windows/macOS acceptance. Root and temporary native-package audits remain before installation. Its platform coverage is:
 
 | Host | Maintained coverage | Stateful support |
 | --- | --- | --- |
