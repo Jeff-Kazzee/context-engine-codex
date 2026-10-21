@@ -89,7 +89,7 @@ test('CI gates precede dependency execution and cannot ignore failure', () => {
   const auditStep = '      - name: Audit all locked dependencies before installation\n        run: pnpm audit --audit-level=low\n';
   assert.ok(workflow.includes(guardStep));
   assert.ok(workflow.includes(auditStep));
-  assert.ok(workflow.indexOf(guardStep) < workflow.indexOf('- name: Set up pnpm'));
+  assert.ok(workflow.indexOf(guardStep) < workflow.indexOf('- name: Hold unverified package manager bootstrap'));
   assert.ok(workflow.indexOf(auditStep) < workflow.indexOf('pnpm install --frozen-lockfile --ignore-scripts'));
   const nativeAudit = workflow.indexOf('pnpm --dir "$runtime" audit --audit-level=low');
   assert.ok(nativeAudit > 0 && nativeAudit < workflow.indexOf('pnpm --dir "$runtime" install'));

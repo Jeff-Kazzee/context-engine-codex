@@ -41,7 +41,7 @@ named project and report exact mode, versions, commands, config/backups changed,
 evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
 
-The [CI workflow](.github/workflows/ci.yml) checks the exact PR source commit on three hosts with Node 24.22.1. The actual Node runtime is checked before package setup. CI audits all locked development dependencies and the temporary native-test package before installation. Audit errors and reported advisories fail the job. Its platform coverage is:
+The [CI workflow](.github/workflows/ci.yml) checks the exact PR source commit on three hosts with Node 24.22.1. Before checkout or any JavaScript action, a bounded PowerShell probe verifies the actual runner-bundled Node 24 interpreter and refuses affected or unverifiable versions. The selected package runtime is checked separately before package setup. Package-manager execution is currently blocked pending bundled-dependency and bootstrap review; no successful current-head CI is claimed during this hold. CI audits all locked development dependencies and the temporary native-test package before installation. Audit errors and reported advisories fail the job. Its platform coverage is:
 
 | Host | Maintained coverage | Stateful support |
 | --- | --- | --- |
