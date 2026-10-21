@@ -83,7 +83,7 @@ test('ordinary package commands require the runtime guard', () => {
 });
 
 test('CI gates precede dependency execution and cannot ignore failure', () => {
-  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   const guardStep = '      - name: Refuse unsupported or affected Node runtimes\n        run: node setup/check-node.mjs\n';
   const auditStep = '      - name: Audit all locked dependencies before installation\n        run: pnpm audit --audit-level=low\n';
   assert.ok(workflow.includes(guardStep));
