@@ -178,11 +178,6 @@ jobs:
     env:
       EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - name: Require CE artifact provenance approval
-        shell: bash
-        run: |
-          echo 'CI_CE_ARTIFACT_APPROVAL_REQUIRED - exact Node artifact exception for CE is pending; preserve the reviewed manager input boundary.' >&2
-          exit 1
       - name: Native checkout of the exact event commit
         shell: bash
         env:

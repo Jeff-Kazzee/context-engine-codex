@@ -14,7 +14,13 @@
     "buildProvenanceVerified": false
   },
   "ceException": {
-    "status": "pending",
-    "scope": "Both CE repositories: Linux x64 CI image build/version check, constrained container workload and per-job offline native-contract runtime only; no host/profile installation, other projects, publication or release."
+    "status": "approved",
+    "scope": "Both CE repositories: Linux x64 CI image build/version check, constrained container workload and per-job offline native-contract runtime only; no host/profile installation, other projects, publication or release.",
+    "approvedOnUtc": "2026-10-21",
+    "testOnly": true,
+    "repositories": [
+      "Jeff-Kazzee/context-engine-codex",
+      "Jeff-Kazzee/context-engine-claude"
+    ]
   }
 }

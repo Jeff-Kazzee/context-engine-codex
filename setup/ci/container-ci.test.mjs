@@ -19,14 +19,14 @@ function validateLinux(source) {
   assert.ok(source.includes('run: bash setup/ci/run-container.sh'));
   assert.equal(/hashFiles\s*\(|continue-on-error|always\(\)|failure\(\)|\b(?:setup-node|checkout)@/.test(source), false);
   assert.equal(/privileged|cap-add|docker\.sock|id-token:|contents: write/.test(source), false);
-  assert.ok(source.indexOf('CI_CE_ARTIFACT_APPROVAL_REQUIRED') < source.indexOf('Native checkout of the exact event commit'));
-  assert.match(source, /CI_CE_ARTIFACT_APPROVAL_REQUIRED[^\n]+\n          exit 1\n/);
+  assert.match(source, /steps:\n      - name: Native checkout of the exact event commit\n/);
+  assert.doesNotMatch(source, /CI_CE_ARTIFACT_APPROVAL_REQUIRED/);
 }
 
-test('Linux uses only native checkout and the held native Docker driver', () => {
+test('Linux uses only native checkout and the approved native Docker driver', () => {
   validateLinux(linux);
   assert.equal(existsSync(new URL('../../.github/actions/security-ci/action.yml', import.meta.url)), false);
-  for (const mutation of [linux.replace('run: bash setup/ci/run-container.sh', 'uses: actions/checkout@bad'), linux.replace('exit 1', 'exit 0'), linux + '\n    if: always()']) {
+  for (const mutation of [linux.replace('run: bash setup/ci/run-container.sh', 'uses: actions/checkout@bad'), linux.replace('Native checkout of the exact event commit', 'Skipped native checkout'), linux + '\n    if: always()']) {
     assert.throws(() => validateLinux(mutation));
   }
   assert.match(workflow, /permissions:\n  contents: read/);
@@ -47,7 +47,7 @@ test('native checkout is bound to the exact event SHA and reviewed source', () =
   assert.equal(/git config|github_pat_|ghp_|authorization:.*\$\{\{/i.test(source), false);
 });
 
-test('the image and authenticated Node-only artifact remain pinned and unactivated', () => {
+test('the image and approved test-only Node artifact remain pinned', () => {
   assert.ok(docker.includes('ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517'));
   assert.ok(docker.includes('ca-certificates=20260816ubuntu0.24.04.1'));
   assert.equal(artifact.artifacts.length, 1);
@@ -55,7 +55,10 @@ test('the image and authenticated Node-only artifact remain pinned and unactivat
   assert.equal(artifact.artifacts[0].destination, '/opt/node/bin/node');
   assert.equal(artifact.artifacts[0].member, 'node-v24.22.1-linux-x64/bin/node');
   assert.equal(artifact.nodeAuthentication.buildProvenanceVerified, false);
-  assert.equal(artifact.ceException.status, 'pending');
+  assert.equal(artifact.ceException.status, 'approved');
+  assert.equal(artifact.ceException.testOnly, true);
+  assert.deepEqual(artifact.ceException.repositories, ['Jeff-Kazzee/context-engine-codex', 'Jeff-Kazzee/context-engine-claude']);
+  assert.equal(artifact.ceException.approvedOnUtc, '2026-10-21');
   assert.ok(bootstrap.indexOf('hashlib.sha256(data).hexdigest() != digest') < bootstrap.indexOf('with tarfile.open'));
   assert.ok(bootstrap.includes('response.url != url'));
   assert.match(bootstrap, /test ! -e \/opt\/node\/bin\/npm/);

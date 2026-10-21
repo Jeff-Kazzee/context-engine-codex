@@ -41,7 +41,7 @@ named project and report exact mode, versions, commands, config/backups changed,
 evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
 
-The [CI workflow](.github/workflows/ci.yml) keeps separate Linux, Windows and macOS checks at the exact source SHA. The Linux Docker candidate uses native checkout and an authenticated Node-only runtime; it is blocked before checkout or image build pending the CE-specific artifact exception; its reviewed manager-input boundary must remain intact. Windows/macOS retain the pre-action interpreter probe and their existing typecheck and pure/refusal coverage; their affected provider interpreter still blocks execution. Linux cannot establish native Windows/macOS acceptance. Root and temporary native-package audits remain before installation. Its platform coverage is:
+The [CI workflow](.github/workflows/ci.yml) keeps separate Linux, Windows and macOS checks at the exact source SHA. The Linux Docker candidate uses native checkout and an authenticated Node-only runtime; the owner approved its exact-artifact exception on 2026-10-21 for CI tests only. Its reviewed manager-input boundary must remain intact, and container/native compatibility requires actual CI evidence. Windows/macOS retain the pre-action interpreter probe and their existing typecheck and pure/refusal coverage; their affected provider interpreter still blocks execution. Linux cannot establish native Windows/macOS acceptance. Root and temporary native-package audits remain before installation. Its platform coverage is:
 
 | Host | Maintained coverage | Stateful support |
 | --- | --- | --- |
