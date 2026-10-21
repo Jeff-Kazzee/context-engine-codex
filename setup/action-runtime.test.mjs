@@ -40,5 +40,7 @@ test('unverified package-manager execution is explicitly blocked', () => {
   const refusal = workflow.indexOf("run: throw 'CI_UNVERIFIED_PACKAGE_MANAGER", hold);
   const dependency = workflow.indexOf('run: pnpm import');
   assert.ok(hold > 0 && refusal > hold && dependency > refusal);
+  assert.ok(refusal < workflow.indexOf('uses: actions/checkout@'));
+  assert.ok(refusal < workflow.indexOf('uses: actions/setup-node@'));
   assert.equal(/uses: pnpm\/action-setup|^\s+run:\s+(?:npm|corepack)\b/m.test(workflow), false, 'no unreviewed manager bootstrap');
 });

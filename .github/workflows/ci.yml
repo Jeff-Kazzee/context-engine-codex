@@ -142,6 +142,9 @@ jobs:
 
           # Enumerate every effective JavaScript action runtime from the reviewed manifests.
           Assert-RunnerActionRuntimes -Runtimes @('node24')
+      - name: Hold unverified package manager bootstrap
+        shell: pwsh
+        run: throw 'CI_UNVERIFIED_PACKAGE_MANAGER - bundled dependency review and a verified bootstrap are required before running pnpm. No npm or action-setup fallback is approved.'
       - name: Check out the exact source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -154,9 +157,6 @@ jobs:
           package-manager-cache: false
       - name: Refuse unsupported or affected Node runtimes
         run: node setup/check-node.mjs
-      - name: Hold unverified package manager bootstrap
-        shell: pwsh
-        run: throw 'CI_UNVERIFIED_PACKAGE_MANAGER - bundled dependency review and a verified bootstrap are required before running pnpm. No npm or action-setup fallback is approved.'
       - name: Verify the checked-out commit
         run: node -e "const actual=require('node:child_process').execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); require('node:assert/strict').equal(actual,process.env.EXPECTED_HEAD); console.log(actual)"
       - name: Convert the committed dependency lockfile
