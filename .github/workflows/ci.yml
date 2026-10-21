@@ -37,11 +37,13 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Set up Node 24.21.0
+      - name: Set up Node 24.22.1
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24.21.0'
+          node-version: '24.22.1'
           package-manager-cache: false
+      - name: Refuse unsupported or affected Node runtimes
+        run: node setup/check-node.mjs
       - name: Set up pnpm 11.4.0
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
@@ -49,9 +51,12 @@ jobs:
           run_install: false
       - name: Verify the checked-out commit
         run: node -e "const actual=require('node:child_process').execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); require('node:assert/strict').equal(actual,process.env.EXPECTED_HEAD); console.log(actual)"
+      - name: Convert the committed dependency lockfile
+        run: pnpm import
+      - name: Audit all locked dependencies before installation
+        run: pnpm audit --audit-level=low
       - name: Install the committed dependency versions without lifecycle scripts
         run: |
-          pnpm import
           pnpm install --frozen-lockfile --ignore-scripts
           git diff --exit-code -- package.json package-lock.json
       - name: Typecheck maintained modules
@@ -61,7 +66,7 @@ jobs:
         run: pnpm test
       - name: Verify pure operations and no-write refusal on the actual host
         if: runner.os != 'Linux'
-        run: node --test --test-concurrency=1 core/platform.test.ts
+        run: node --test --test-concurrency=1 core/platform.test.ts "setup/*.test.mjs"
       - name: Prepare the pinned Codex offline test runtime
         if: runner.os == 'Linux'
         shell: bash
@@ -70,6 +75,7 @@ jobs:
           mkdir -p "$runtime"
           printf '{"private":true}\n' > "$runtime/package.json"
           pnpm --dir "$runtime" add --lockfile-only --ignore-scripts --save-exact @openai/codex@0.161.0-linux-x64
+          pnpm --dir "$runtime" audit --audit-level=low
           pnpm --dir "$runtime" install --frozen-lockfile --ignore-scripts
           binary="$runtime/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
           printf '9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c  %s\n' "$binary" | sha256sum --check

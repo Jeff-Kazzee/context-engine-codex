@@ -1,6 +1,6 @@
 # Codex adapter contract
 
-Start with the [agent setup prompt and workflow](../../README.md). Baseline: codex-cli 0.161.0, Node 24+, Linux `/proc`.
+Start with the [agent setup prompt and workflow](../../README.md). Baseline: codex-cli 0.161.0, stable Node 24.22.1+ (24.x) or 26.12.1+ (26.x), Linux `/proc`.
 
 The plugin is hooks-only. Install with `context-engine-codex install`; review its five hooks through `/hooks`, or explicitly approve `install --trust-hooks`. Enabling a project writes marked and backed-up `developer_instructions` and `[features.token_budget]` blocks only to its `.codex/config.toml`. Codex must trust the project; an existing incompatible block is left alone and reported.
 

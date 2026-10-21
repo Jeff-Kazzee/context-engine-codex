@@ -1,3 +1,4 @@
+import { assertSupportedNode } from './node-runtime.mjs';
 // Setup commands for people: install, uninstall, enable, disable, status. Text output.
 import { parseArgs } from 'node:util';
 import { realpathSync } from 'node:fs';
@@ -19,6 +20,7 @@ Uninstall keeps session data. See README.md and adapters/codex/README.md.
 `;
 
 export async function runSetup(argv: string[]): Promise<number> {
+  assertSupportedNode();
   const [command, ...args] = argv;
   const { values } = parseArgs({
     args,

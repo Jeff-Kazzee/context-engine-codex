@@ -41,7 +41,7 @@ named project and report exact mode, versions, commands, config/backups changed,
 evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
 
-The [CI workflow](.github/workflows/ci.yml) checks the exact PR source commit on three hosts with Node 24.21.0. Its platform coverage is:
+The [CI workflow](.github/workflows/ci.yml) checks the exact PR source commit on three hosts with Node 24.22.1. The actual Node runtime is checked before package setup. CI audits all locked development dependencies and the temporary native-test package before installation. Audit errors and reported advisories fail the job. Its platform coverage is:
 
 | Host | Maintained coverage | Stateful support |
 | --- | --- | --- |
@@ -57,7 +57,7 @@ The shared core separates host operations through `core/platform-contract.ts`. I
 
 Shared core 0.1.5 uses the full SHA-256 of the canonical project path for private state and participation keys. Legacy 0.1.0 directories and backups are preserved, but are not automatically migrated or merged. Uninstall an old installation using its original checkout/CLI first; retain its backups and session data. After coordinated runner updates, re-enable a fresh disposable project and start a fresh session. Do not mix 0.1.0 with 0.1.5 under a shared `CONTEXT_ENGINE_STATE_DIR`; use a separate, consistently configured state root for a trial. Existing legacy data remains available through the old checkout with its old state root. Valid full-digest keys from 0.1.1 remain unchanged in 0.1.2, 0.1.3 and 0.1.5.
 
-- Linux with `/proc` mounted and Node **24 or newer** is the supported stateful target. Native Windows and macOS have no verified host backend. Stateful storage, locking, install and uninstall refuse with `CE_UNSUPPORTED_PLATFORM` before mutation. Use the original supported Linux environment and checkout to remove a prior installation. Do not relax confinement checks or sandbox permissions.
+- Linux with `/proc` mounted and stable Node **24.22.1+ in 24.x or 26.12.1+ in 26.x** is the supported stateful target. Native Windows and macOS have no verified host backend. Stateful storage, locking, install and uninstall refuse with `CE_UNSUPPORTED_PLATFORM` before mutation. Use the original supported Linux environment and checkout to remove a prior installation. Do not relax confinement checks or sandbox permissions.
 - Working Context publication requires hard links on the project filesystem. A bounded private probe refuses unsupported filesystems before the materializing commit writes its snapshot or HEAD. Preserved predecessor artifacts require an inode-bound private-state marker. An older artifact or a kill between link creation and marker publication is retained and refused. Keep the original checkout for older artifacts, and review the exact artifact and marker before repair. Storage repair alone does not authenticate an unknown backup.
 
 Internal probe and retirement paths belong to the core after exclusive creation, including their directory names in the managed parent. Mode 0700 excludes other OS users, but another process running as the same OS user can still replace those paths. Active same-user replacement of these internal paths is unsupported. Rename, unlink and directory removal there remain pathname operations, with no atomic inode-conditional deletion guarantee. Preexisting name collisions refuse before adoption or overwrite. Working Context edits and unrelated public backup names retain the documented preservation rules and final-sample limits.
