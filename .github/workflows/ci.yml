@@ -14,72 +14,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  maintained:
-    name: ${{ matrix.coverage }}
-    runs-on: ${{ matrix.os }}
+  linux:
+    name: Linux maintained suite
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            coverage: Linux maintained suite
-          - os: windows-2022
-            coverage: Windows pure operations and refusal
-          - os: macos-15
-            coverage: macOS pure operations and refusal
     env:
       EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-      CONTEXT_ENGINE_REAL_CODEX_TESTS: '0'
     steps:
-      - name: Check out the exact source commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - name: Set up Node 24.21.0
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24.21.0'
-          package-manager-cache: false
-      - name: Set up pnpm 11.4.0
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: '11.4.0'
-          run_install: false
-      - name: Verify the checked-out commit
-        run: node -e "const actual=require('node:child_process').execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); require('node:assert/strict').equal(actual,process.env.EXPECTED_HEAD); console.log(actual)"
-      - name: Install the committed dependency versions without lifecycle scripts
-        run: |
-          pnpm import
-          pnpm install --frozen-lockfile --ignore-scripts
-          git diff --exit-code -- package.json package-lock.json
-      - name: Typecheck maintained modules
-        run: pnpm run typecheck
-      - name: Run the maintained Linux core, setup and adapter tests
-        if: runner.os == 'Linux'
-        run: pnpm test
-      - name: Verify pure operations and no-write refusal on the actual host
-        if: runner.os != 'Linux'
-        run: node --test --test-concurrency=1 core/platform.test.ts
-      - name: Prepare the pinned Codex offline test runtime
-        if: runner.os == 'Linux'
+      - name: Native checkout of the exact event commit
         shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_CHECKOUT_TOKEN: ${{ github.token }}
         run: |
-          runtime="$RUNNER_TEMP/ce-codex-runtime"
-          mkdir -p "$runtime"
-          printf '{"private":true}\n' > "$runtime/package.json"
-          pnpm --dir "$runtime" add --lockfile-only --ignore-scripts --save-exact @openai/codex@0.161.0-linux-x64
-          pnpm --dir "$runtime" install --frozen-lockfile --ignore-scripts
-          binary="$runtime/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
-          printf '9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c  %s\n' "$binary" | sha256sum --check
-      - name: Run the native Codex hook trust and status check without network access
-        if: runner.os == 'Linux'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          set +x
+
+          refuse() { printf 'CI_NATIVE_CHECKOUT_REFUSED: %s\n' "$1" >&2; exit 1; }
+
+          # This first native step must not invoke a JavaScript action or package manager.
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted || refuse 'Require a GitHub-hosted runner.'
+          test "${RUNNER_OS:-}" = Linux || refuse 'Require native Linux.'
+          test "${RUNNER_ARCH:-}" = X64 || refuse 'Require X64 architecture.'
+          test "${GITHUB_SERVER_URL:-}" = https://github.com || refuse 'Require github.com.'
+          test "${GITHUB_REPOSITORY:-}" = Jeff-Kazzee/context-engine-codex || refuse 'Require the reviewed CE repository.'
+          [[ "${EXPECTED_SHA:-}" =~ ^[a-f0-9]{40}$ ]] || refuse 'Require an exact source SHA.'
+          test -z "${ACTIONS_RUNNER_HOOK_JOB_STARTED:-}${ACTIONS_RUNNER_HOOK_JOB_COMPLETED:-}" || refuse 'Unreviewed runner hooks are configured.'
+          grep --quiet --fixed-strings 'VERSION_ID="24.04"' /etc/os-release || refuse 'Require Ubuntu 24.04.'
+          ca_version=$(dpkg-query --show --showformat='${Version}' ca-certificates) || refuse 'Cannot read the native CA package version.'
+          printf 'Native checkout CA package: %s\n' "$ca_version"
+          dpkg --compare-versions "$ca_version" ge 20260816ubuntu0.24.04.1 || refuse 'Native CA package is below the reviewed 20260816ubuntu0.24.04.1 floor.'
+          test -z "${GIT_SSL_NO_VERIFY:-}${GIT_SSL_CAINFO:-}${CURL_CA_BUNDLE:-}${SSL_CERT_FILE:-}${SSL_CERT_DIR:-}" || refuse 'Unreviewed TLS overrides are configured.'
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+          : "${GITHUB_WORKSPACE:?The hosted workspace is required.}"
+          : "${CI_CHECKOUT_TOKEN:?The scoped workflow token is required.}"
+          cd -- "$GITHUB_WORKSPACE"
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)" || refuse 'Require an empty checkout directory.'
+
+          # Never persist credentials in the remote URL, repository config or a helper.
+          auth=$(printf 'x-access-token:%s' "$CI_CHECKOUT_TOKEN" | base64 -w 0)
+          printf '::add-mask::%s\n' "$auth"
+          trap 'unset CI_CHECKOUT_TOKEN auth' EXIT
+          git -c init.templateDir= init --quiet .
+          git remote add origin https://github.com/Jeff-Kazzee/context-engine-codex.git
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+          git -c credential.helper= -c core.hooksPath=/dev/null -c protocol.file.allow=never \
+            fetch --quiet --no-tags --depth=1 --no-recurse-submodules origin "$EXPECTED_SHA"
+          unset CI_CHECKOUT_TOKEN auth
+          git -c core.hooksPath=/dev/null checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          printf 'Checked out exact event commit %s without persistent credentials.\n' "$EXPECTED_SHA"
+      - name: Maintained Linux checks in the fixed-runtime container
         shell: bash
-        run: |
-          binary="$RUNNER_TEMP/ce-codex-runtime/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
-          home="$RUNNER_TEMP/ce-codex-home"
-          mkdir -p "$home"
-          sudo -n unshare --net -- runuser --user "$(id -un)" -- env -i \
-            PATH="$PATH" HOME="$home" CONTEXT_ENGINE_NATIVE_CODEX="$binary" \
-            node --test --test-concurrency=1 setup/native-codex.test.ts
+        run: bash setup/ci/run-container.sh
+      - name: Native offline contracts with the verified exported runtime
+        shell: bash
+        run: bash setup/ci/native-contract.sh
