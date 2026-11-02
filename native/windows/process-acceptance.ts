@@ -73,7 +73,7 @@ await test('a live native owner refuses contenders and confirmed exit permits ta
   try {
     const active = await ready(child); assert.equal(active.pid, child.pid); marker = active.startMarker;
     assert.match(marker, /^win32:[1-9][0-9]+$/);
-    const refused = openSession(ref); assert.equal(refused.status, 'refused');
+    const refused = openSession(ref);
     if (refused.status !== 'refused') { refused.session.close(); throw new Error('second owner unexpectedly opened'); }
     assert.equal(refused.holder.pid, child.pid); assert.equal(refused.holder.startMarker, marker);
   } finally { await stopOwnedChild(child); }

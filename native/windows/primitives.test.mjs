@@ -96,7 +96,7 @@ try {
     } finally { call('close', held); }
   });
   await test('reserved names, traversal and ADS refuse before creation', () => {
-    for (const invalid of ['CON', 'con.txt', 'NUL', 'LPT1', 'COM9', 'COM\u00b9', 'x.', 'x ', '..', 'one.txt:secret', 'a/b', 'a\\b']) {
+    for (const invalid of ['CON', 'con.txt', 'NUL', 'LPT1', 'COM9', 'COM\u00b9', 'x.', 'x ', '..', 'one.txt:secret', 'a/b', 'a\\b', '\ud800', '\udfff', 'a\ud800b']) {
       assert.throws(() => call('open', directory, invalid, 'exclusive'), { code: 'EINVAL' }, invalid);
     }
     const iterator = call('dup', directory); const names = [];
@@ -104,6 +104,22 @@ try {
     finally { call('close', iterator); }
     assert.deepEqual(names.sort(), ['one.txt']);
     assert.throws(() => call('inspect', iterator), { code: 'EBADF' });
+  });
+  await test('well-formed Unicode names roundtrip through native handles and canonical paths', () => {
+    const name = 'evidence-\u00e9-\u{1f600}.txt';
+    const file = call('open', directory, name, 'exclusive');
+    const bytes = Buffer.from('Unicode bridge');
+    try {
+      call('write', file, bytes, 0, bytes.length, null);
+      assert.ok(call('path', file).endsWith('\\' + name));
+    } finally { call('close', file); }
+    const read = call('open', directory, name, 'read');
+    try {
+      const out = Buffer.alloc(bytes.length);
+      assert.equal(call('read', read, out, 0, out.length, 0), bytes.length);
+      assert.deepEqual(out, bytes);
+    } finally { call('close', read); }
+    call('unlink', directory, name);
   });
   await test('inspection-only junction descriptors cannot become traversal parents', () => {
     call('mkdir', directory, 'target');

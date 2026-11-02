@@ -125,7 +125,17 @@ struct State {
     return Handle(raw);
   }
 };
+void wellFormedUtf16(const std::wstring& text) {
+  for (size_t i = 0; i < text.size(); ++i) {
+    const WCHAR c = text[i];
+    if (c >= 0xD800 && c <= 0xDBFF) {
+      require(i+1 < text.size() && text[i+1] >= 0xDC00 && text[i+1] <= 0xDFFF,"unpaired UTF-16 high surrogate refused");
+      ++i;
+    } else require(c < 0xDC00 || c > 0xDFFF,"unpaired UTF-16 low surrogate refused");
+  }
+}
 void component(const std::wstring& name) {
+  wellFormedUtf16(name);
   require(!name.empty() && name.size() <= 255 && name != L"." && name != L"..", "invalid Windows path component");
   require(name.back() != L'.' && name.back() != L' ', "ambiguous Windows trailing dot or space");
   for (WCHAR c : name) require(c >= 32 && wcschr(L"\\/:*?\"<>|",c) == nullptr, "invalid Windows path or alternate stream");
@@ -160,7 +170,14 @@ std::wstring finalPath(HANDLE handle) {
   if (!count || count >= bytes.size()) winFail("final file path");
   std::wstring path(bytes.data(),count);
   require(path.size() >= 7 && path.substr(0,4) == L"\\\\?\\" && path[5] == L':' && path[6] == L'\\', "non-local canonical file path refused");
-  return path.substr(4);
+  const std::wstring ordinary = path.substr(4);
+  for (size_t start = 3; start < ordinary.size();) {
+    const size_t end = ordinary.find(L'\\',start);
+    component(ordinary.substr(start,end == std::wstring::npos ? end : end-start));
+    if (end == std::wstring::npos) break;
+    start = end+1;
+  }
+  return ordinary;
 }
 bool privateAcl(HANDLE handle,PSID current, bool& owned) {
   PSID owner = nullptr; PACL dacl = nullptr; PSECURITY_DESCRIPTOR raw = nullptr;
