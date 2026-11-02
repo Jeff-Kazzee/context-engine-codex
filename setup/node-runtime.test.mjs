@@ -89,9 +89,11 @@ test('CI gates precede dependency execution and cannot ignore failure', () => {
   const guard = container.indexOf('node /opt/ce/check-node.mjs');
   const rootAudit = container.indexOf('pnpm audit --audit-level=low');
   const nativeAudit = container.indexOf('pnpm --dir "$runtime" audit --audit-level=low');
-  assert.ok(guard > 0 && guard < rootAudit);
+  assert.ok(guard > 0 && guard < container.indexOf('bash /opt/ce/ci/install-ci-pnpm.sh'));
+  assert.ok(guard < rootAudit);
   assert.ok(rootAudit < container.indexOf('pnpm install --frozen-lockfile --ignore-scripts'));
   assert.ok(nativeAudit > 0 && nativeAudit < container.indexOf('pnpm --dir "$runtime" install'));
-  assert.doesNotMatch(workflow, /continue-on-error|always\(\)|audit[^\n]*(?:\|\||--prod|--production)/);
+  assert.doesNotMatch(workflow, /continue-on-error|always\(\)/);
+  assert.doesNotMatch(container, /audit[^\n]*(?:\|\||--prod|--production)/);
   assert.match(workflow, /permissions:\n  contents: read/);
 });

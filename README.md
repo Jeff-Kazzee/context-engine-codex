@@ -41,7 +41,7 @@ named project and report exact mode, versions, commands, config/backups changed,
 evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
 
-The [CI workflow](.github/workflows/ci.yml) runs one Linux job at the exact source SHA. It uses native checkout and an authenticated Node-only runtime in a fixed container. The owner approved its exact-artifact exception on 2026-10-21 for CI tests only. Its reviewed manager-input boundary must remain intact. Root and temporary native-package audits run before installation. On 2026-11-02 the owner dropped the Windows and macOS CI jobs. Their package manager bootstrap was never verified, so they could not run. Its platform coverage is:
+The [CI workflow](.github/workflows/ci.yml) runs one Linux job at the exact source SHA. It uses native checkout and an authenticated Node-only runtime in a fixed container. The owner approved its exact-artifact exception on 2026-10-21 for CI tests only. Its reviewed manager-input boundary must remain intact. Root and temporary native-package audits run before installation. On 2026-11-02 the owner dropped the Windows and macOS CI jobs. They had no verified package manager bootstrap, so every run stopped at a deliberate hold step. Its platform coverage is:
 
 | Host | Maintained coverage | Stateful support |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ The [CI workflow](.github/workflows/ci.yml) runs one Linux job at the exact sour
 | Windows | None since 2026-11-02. Pure operations and refusal last passed in CI for 0.1.5 | Unsupported |
 | macOS | None since 2026-11-02. Pure operations and refusal last passed in CI for 0.1.5 | Unsupported |
 
-Windows and macOS CI jobs last ran for release 0.1.5. Those results do not validate later commits. Each updated PR head requires its own successful CI. Offline contract checks do not prove provider delivery, model behavior or interactive acceptance.
+Windows and macOS CI jobs last passed for release 0.1.5 and on this change through 2026-10-21. Those results do not validate later commits. Each updated PR head requires its own successful CI. Offline contract checks do not prove provider delivery, model behavior or interactive acceptance.
 
 ## 1. Check compatibility before installing
 
