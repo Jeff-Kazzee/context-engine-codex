@@ -1,6 +1,6 @@
-import type { Dir } from 'node:fs';
+import type { FileIdentity } from './file-identity.ts';
 
-/** An open Node handle. Callers do not derive filesystem paths from its number. */
+/** A backend-owned handle. Use only this backend to operate on or close it. */
 export type Descriptor = number;
 export const anchoredPath = Symbol('opened-directory reference');
 /** A backend-owned location relative to an open directory, not a filesystem path. */
@@ -9,9 +9,7 @@ export type FileTarget = string | AnchoredPath;
 export type OpenIntent = 'directory' | 'read' | 'exclusive' | 'exclusive-nofollow' | 'append' | 'append-existing' | 'read-write';
 
 /** Facts inspected by the backend from the actual handle or target. */
-export interface FileInfo {
-  readonly dev: number;
-  readonly ino: number;
+export interface FileInfo extends FileIdentity {
   readonly nlink: number;
   readonly size: number;
   readonly owner: 'current' | 'other' | 'unknown';
@@ -21,14 +19,29 @@ export interface FileInfo {
   isSymbolicLink(): boolean;
 }
 
-/** Fields of one process's status, as the host reports them. */
-export interface ProcessStatus {
-  /** One-letter scheduler state. Linux reports Z for a zombie and X for a dead process. */
+/** Linux reports actual scheduler state and thread count from one /proc read. */
+export interface LinuxProcessStatus {
+  readonly kind?: 'linux-proc';
   state: string;
-  /** Threads in the process. A zombie leader whose other threads still run reports more than one. */
   threads: number;
-  /** The same start marker that `processStartMarker` returns. */
   startMarker: string;
+}
+
+/** Windows tests one process HANDLE, with its exact creation marker. */
+export interface WindowsProcessStatus {
+  readonly kind: 'windows-process';
+  alive: boolean;
+  startMarker: string;
+}
+export type ProcessStatus = LinuxProcessStatus | WindowsProcessStatus;
+
+export interface FileObservation {
+  dev: string; ino: string; size: number; mtime: string; ctime: string;
+}
+
+export interface DirectoryCursor {
+  readSync(): { readonly name: string } | null;
+  closeSync(): void;
 }
 
 /** Synchronous operations already used by storage, locking, and setup. */
@@ -43,6 +56,8 @@ export interface HostPlatform {
   openSync(path: FileTarget, intent: OpenIntent): Descriptor;
   closeSync(fd: Descriptor): void;
   fstatSync(fd: Descriptor): FileInfo;
+  /** Exact identity/change fields for one unlinked regular log file. */
+  observeFileSync(path: FileTarget): FileObservation;
   restrictPrivateAccess(fd: Descriptor, kind: 'file' | 'directory'): void;
   fsyncSync(fd: Descriptor): void;
   ftruncateSync(fd: Descriptor, size: number): void;
@@ -57,7 +72,7 @@ export interface HostPlatform {
   existsSync(path: FileTarget): boolean;
   mkdirPrivateSync(path: FileTarget, options?: { recursive?: boolean }): void;
   readdirSync(path: FileTarget): string[];
-  opendirSync(path: FileTarget): Dir;
+  opendirSync(path: FileTarget): DirectoryCursor;
   renameSync(from: FileTarget, to: FileTarget): void;
   linkSync(from: FileTarget, to: FileTarget): void;
   unlinkSync(path: FileTarget): void;

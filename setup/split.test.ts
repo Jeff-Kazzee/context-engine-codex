@@ -30,6 +30,7 @@ test('shared core hashes match the pinned source manifest', async () => {
  const {createHash}=await import('node:crypto');
  const root=new URL('../',import.meta.url); const source=JSON.parse(readFileSync(new URL('SOURCE.json',root),'utf8'));
  for(const [path,sha] of Object.entries(source.coreSha256)) assert.equal(createHash('sha256').update(readFileSync(new URL(path,root))).digest('hex'),sha,path);
+ for(const [path,sha] of Object.entries(source.nativeWindowsSha256 ?? {})) assert.equal(createHash('sha256').update(readFileSync(new URL(path,root))).digest('hex'),sha,path);
 });
 
 test('failed installation restores both runner homes and can be retried', () => {

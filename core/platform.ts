@@ -1,5 +1,6 @@
 import type { FileTarget, HostPlatform, OpenIntent, ProcessStatus } from './platform-contract.ts';
 import { linuxPlatform } from './platform-linux.ts';
+import { createWindowsPlatform } from './platform-windows.ts';
 export type { AnchoredPath, Descriptor, FileInfo, FileTarget, HostPlatform, OpenIntent, ProcessStatus } from './platform-contract.ts';
 
 export class UnsupportedPlatformError extends Error {
@@ -12,13 +13,18 @@ export class UnsupportedPlatformError extends Error {
   }
 }
 
+let windowsBackend: HostPlatform | undefined;
+function windowsHost(): HostPlatform { return windowsBackend ??= createWindowsPlatform(); }
+
 export function requireSupportedPlatform(platform: NodeJS.Platform = process.platform): void {
-  if (platform !== 'linux') throw new UnsupportedPlatformError(platform);
+  if (platform === 'linux') return;
+  if (platform === 'win32' && process.platform === 'win32') { windowsHost(); return; }
+  throw new UnsupportedPlatformError(platform);
 }
 
 function host(): HostPlatform {
   requireSupportedPlatform();
-  return linuxPlatform;
+  return process.platform === 'win32' ? windowsHost() : linuxPlatform;
 }
 
 export const anchor = (fd: number) => host().anchor(fd);
@@ -31,6 +37,7 @@ export const absoluteName = (path: FileTarget) => host().absoluteName(path);
 export const openSync = (path: FileTarget, intent: OpenIntent) => host().openSync(path, intent);
 export const closeSync: HostPlatform['closeSync'] = fd => host().closeSync(fd);
 export const fstatSync: HostPlatform['fstatSync'] = fd => host().fstatSync(fd);
+export const observeFileSync: HostPlatform['observeFileSync'] = path => host().observeFileSync(path);
 export const restrictPrivateAccess: HostPlatform['restrictPrivateAccess'] = (fd, kind) => host().restrictPrivateAccess(fd, kind);
 export const fsyncSync: HostPlatform['fsyncSync'] = fd => host().fsyncSync(fd);
 export const ftruncateSync: HostPlatform['ftruncateSync'] = (fd, size) => host().ftruncateSync(fd, size);
@@ -55,7 +62,7 @@ export const processStatus: HostPlatform['processStatus'] = pid => host().proces
 
 /** True when a status shows an exited process: a zombie or dead entry with no thread left running. */
 export const exitedStatus = (status: ProcessStatus | null): boolean =>
-  status !== null && (status.state === 'Z' || status.state === 'X') && status.threads <= 1;
+  status !== null && (status.kind === 'windows-process' ? !status.alive : (status.state === 'Z' || status.state === 'X') && status.threads <= 1);
 
 /**
  * True only when `pid` is known to have exited: no such process, or one that exited and is not yet

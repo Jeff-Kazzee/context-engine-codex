@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { anchoredPath, type AnchoredPath, type FileTarget, type FileInfo, type HostPlatform, type OpenIntent, type ProcessStatus } from './platform-contract.ts';
+import { anchoredPath, type AnchoredPath, type FileTarget, type FileInfo, type HostPlatform, type OpenIntent, type LinuxProcessStatus } from './platform-contract.ts';
 
 let descriptorDirectory = '/proc/self/fd';
 
@@ -53,7 +53,7 @@ function inspect(st: fs.Stats): FileInfo {
  * from the last ')': state is field 3, num_threads field 20 and starttime field 22. Returns null for
  * any text that does not have that shape.
  */
-export function parseProcessStat(stat: string): ProcessStatus | null {
+export function parseProcessStat(stat: string): LinuxProcessStatus | null {
   const close = stat.lastIndexOf(')');
   if (close < 0 || stat[close + 1] !== ' ') return null;
   const fields = stat.slice(close + 2).split(' ');
@@ -62,7 +62,7 @@ export function parseProcessStat(stat: string): ProcessStatus | null {
   return { state, threads: Number(threads), startMarker };
 }
 
-function readProcessStatus(pid: number): ProcessStatus | null {
+function readProcessStatus(pid: number): LinuxProcessStatus | null {
   try { return parseProcessStat(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); }
   catch { return null; }
 }
@@ -84,6 +84,11 @@ export const linuxPlatform: HostPlatform = {
   openSync: (path, intent) => fs.openSync(nativePath(path), openFlags[intent], intent === 'directory' || intent === 'read' ? undefined : 0o600),
   closeSync: fd => fs.closeSync(fd),
   fstatSync: fd => inspect(fs.fstatSync(fd)),
+  observeFileSync: path => {
+    const st = fs.statSync(nativePath(path), { bigint: true });
+    if (!st.isFile() || st.nlink !== 1n || !Number.isSafeInteger(Number(st.size))) throw new Error('invalid regular log observation');
+    return { dev: String(st.dev), ino: String(st.ino), size: Number(st.size), mtime: String(st.mtimeNs), ctime: String(st.ctimeNs) };
+  },
   restrictPrivateAccess: (fd, kind) => fs.fchmodSync(fd, kind === 'directory' ? 0o700 : 0o600),
   fsyncSync: fd => fs.fsyncSync(fd),
   ftruncateSync: (fd, size) => fs.ftruncateSync(fd, size),

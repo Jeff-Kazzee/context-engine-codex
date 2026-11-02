@@ -1,3 +1,5 @@
+import { assertWindowsComponent } from './windows-path.ts';
+import { validFileIdentity, type FileIdentity } from './file-identity.ts';
 import { anchor, childTarget, absoluteName, openedPath, processGone, sameParent, suffix, targetBasename, requireSupportedPlatform, type FileTarget } from './platform.ts';
 // File primitives and layout for the core. Replacement writes use temp + fsync + rename.
 // The Event Log and empty managed-ignore repair use explicit append protocols.
@@ -36,6 +38,7 @@ const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function assertSessionId(id: string): void {
   if (!SESSION_ID.test(id)) throw new Error(`invalid session id ${JSON.stringify(id)}: use letters, digits, '.', '_' or '-' (max 128)`);
+  if (process.platform === 'win32') assertWindowsComponent(id);
 }
 
 /** State root: explicit option, then $CONTEXT_ENGINE_STATE_DIR, then $XDG_STATE_HOME/context-engine. */
@@ -349,22 +352,24 @@ function credentialTargets(): { files: string[]; dirs: string[] } {
  * credential file, a hard link to one (same dev+ino), or lies in a key-store directory. The
  * identity comes from the open descriptor, so nothing can be swapped between this check and the read.
  */
-function isCredential(real: string, st: { dev: number; ino: number }): boolean {
+function isCredential(real: string, st: FileIdentity): boolean {
   // Project-local secret stores are just as sensitive as their home equivalents.
   // Classify by known location before reading any bytes, never inspect secrets.
-  const parts = real.split(sep), name = parts.at(-1) ?? '';
+  const policyPath = (path: string) => process.platform === 'win32' ? path.toLowerCase() : path;
+  const policyReal = policyPath(real);
+  const parts = policyReal.split(sep), name = parts.at(-1) ?? '';
   if (parts.some(p => ['.ssh', '.gnupg', '.aws'].includes(p))) return true;
   if (name === '.env' || name.startsWith('.env.') || ['.npmrc', '.pypirc', '.netrc', '.git-credentials', 'id_rsa', 'id_ed25519'].includes(name) || /\.(?:pem|p12|pfx|key)$/.test(name)) return true;
   if ((parts.at(-2) === '.codex' && name === 'auth.json') || (parts.at(-2) === '.claude' && name === '.credentials.json') || (parts.at(-2) === '.docker' && name === 'config.json') || (parts.at(-2) === 'gh' && name === 'hosts.yml')) return true;
   const { files, dirs } = credentialTargets();
   for (const f of files) {
-    if (realOrResolved(f) === real) return true;
+    if (policyPath(realOrResolved(f)) === policyReal) return true;
     try {
       const c = statSync(f);
       if (c.dev === st.dev && c.ino === st.ino) return true;
     } catch {}
   }
-  return dirs.some((d) => isWithin(realOrResolved(d), real));
+  return dirs.some((d) => isWithin(policyPath(realOrResolved(d)), policyReal));
 }
 
 /** Why a confined read refused: out of the project, a credential, or not one regular file with one name. */
@@ -550,18 +555,16 @@ export function assertWorkingContextHardLinks(wc: string): void {
   }
 }
 
-type PreservationRecord = { version: 1; sha: string; dev: number; ino: number } & (
+type PreservationRecord = { version: 1; sha: string; dev: FileIdentity['dev']; ino: FileIdentity['ino'] } & (
   | { stage: 'linked' }
-  | { stage: 'retiring' | 'retired'; retirement: { name: string; dev: number; ino: number } }
+  | { stage: 'retiring' | 'retired'; retirement: { name: string; dev: FileIdentity['dev']; ino: FileIdentity['ino'] } }
 );
 
 function preservationRecord(path: string, digest: string): PreservationRecord | undefined {
   const bytes = readBytes(path, 4096);
   if (!bytes) return undefined;
   const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-  const identity = (v: unknown): v is { dev: number; ino: number } => typeof v === 'object' && v !== null
-    && 'dev' in v && Number.isSafeInteger(v.dev) && Number(v.dev) >= 0
-    && 'ino' in v && Number.isSafeInteger(v.ino) && Number(v.ino) > 0;
+  const identity = validFileIdentity;
   if (!identity(value) || !('version' in value) || value.version !== 1 || !('sha' in value) || value.sha !== digest || !('stage' in value)) {
     throw new Error('unverified Working Context preservation marker; refusing recovery artifact');
   }
@@ -821,7 +824,7 @@ export function readLockPublicationCandidate(path: FileTarget, target: FileTarge
   return readPrivateBytes(path,16384,expectedPath,2,{dev:a.dev,ino:a.ino,target});
 }
 
-function readPrivateBytes(path: FileTarget, maxBytes: number | undefined, expectedPath: string, links: 1 | 2, publication?: {dev:number;ino:number;target:FileTarget}): Buffer | undefined {
+function readPrivateBytes(path: FileTarget, maxBytes: number | undefined, expectedPath: string, links: 1 | 2, publication?: {dev:FileIdentity['dev'];ino:FileIdentity['ino'];target:FileTarget}): Buffer | undefined {
   let fd: number;
   try { fd=openSync(path,'read'); }
   catch(e) {if((e as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw e;}

@@ -21,12 +21,17 @@ export type CrashPoint =
 export class InjectedCrash extends Error {}
 
 let armed: CrashPoint | null = null;
+let crashHook: ((point: CrashPoint) => void) | null = null;
+
+/** Private native-process test seam. Production never selects a hook from the environment. */
+export function setCrashPointHook(fn: ((point: CrashPoint) => void) | null): void { crashHook = fn; }
 
 export function armCrash(point: CrashPoint | null): void {
   armed = point;
 }
 
 export function crashPoint(point: CrashPoint): void {
+  crashHook?.(point);
   if (armed !== point) return;
   armed = null;
   throw new InjectedCrash(`injected crash at ${point}`);

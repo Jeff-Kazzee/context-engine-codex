@@ -7,7 +7,8 @@
 // prompt input (`codex debug prompt-input`, offline, no model call) carries Context Engine's
 // token_budget guidance. Otherwise the Codex line says "inactive here" and why. The per-user-turn
 // path (the turn loop) is never switched to automatically: it is a separate command.
-import { closeSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { closeSync } from '../core/platform.ts';
 import { delimiter, dirname, join } from 'node:path';
 import { CODEX_TOKEN_LIMIT_RESET, KILL_SWITCH_ENV, killSwitchOn, participation } from '../core/index.ts';
 import { GUIDANCE_PROBE, RESET_MODE } from '../adapters/codex/guidance.ts';
