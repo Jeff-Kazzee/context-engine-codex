@@ -55,7 +55,7 @@
     "core/session.ts": "78a52d48dca43210715b10934430b0ee38f9eb993faa73450af5d2ccc5db0028",
     "core/size.ts": "5485e0c7ca3a37055d65a61fd0d48f6636d3d591bab108697c77372224652a0d",
     "core/stale-refs.test.ts": "430475b2de4ae19e5c8100b1389d90a0536691112a47e700fff885e64c84fc6a",
-    "core/store.ts": "6f3963d89b9195a9d01a1fe9947fadb43d2fe86306ef0ca40de979e26ba8e563",
+    "core/store.ts": "496d165a6f8e0720f0b92006f531799f6a3244612258840fde5f4859e87ccabb",
     "core/temp-hygiene.test.ts": "7495b5b45299db20a4e0b8ef0627838c163013675bf1c9e8537f9e7d77389ee1",
     "core/testing.ts": "89fa6f05e3e4f2dee67092cdb4dee824500dfd9f43b4442d143a6bc86dbda639",
     "core/turns.test.ts": "88dc30538736529e1b02b57ec3c5d46ffc72ff34d5a3ccdd63a156e88f105d08",
@@ -145,7 +145,7 @@
     "tsconfig.json"
   ],
   "omitted": "Original Git history, research/prototypes, eval/regression captures, e2e evidence and other runner plugin. Setup specialized for this runtime.",
-  "corePatchCommit": "6b2512cc45ec371b08f47b38eb812bdbe8ea43d1",
+  "corePatchCommit": "038b38b05bede9f027ffdc024a26b7f883ae421c",
   "corePatchSource": "https://github.com/Jeff-Kazzee/context-engine-codex",
   "distributionChanges": [
     "Shared core 0.1.2: exclusive validated ignore file, full-digest compatible bounded keys, anchored Working Context writes, failed-open lock cleanup, accurate references, optional fully applied recovery checkpoints; same vendored core in both distributions",
@@ -184,12 +184,12 @@
     "2026-10-14 confirmed-history repair: bounded disposable restore lookup shards retain only pending notice bodies in memory. Cold conflict and unknown-confirmation refusal, source-row verification, corrupt-cache rebuild and the independent full runner-evidence scan remain required. Unsafe or oversized cache files refuse. No Event Log or HEAD migration, model/provider trial or ordinary-profile acceptance is inferred.",
     "2026-10-14 concurrent ignore repair correction: final verification accepts an unchanged sampled prefix followed only by complete identical managed-repair blocks. Conflicting tails, changed prefixes, oversized files and hardlinks still refuse. Focused deterministic and simultaneous-session controls preserve both records. No broader concurrency, arbitrary editor-completion or live-provider guarantee is inferred.",
     "2026-10-17 issue 26 zombie lock holder: a lock holder, a lock publisher killed between link and unlink, and a legacy ignore temporary's creator count as gone when /proc/<pid>/stat reports state Z or X with one thread. A zombie leader with running threads, a stopped holder, a reused PID with a different start marker and an unreadable or malformed status keep the earlier answers. One parser reads /proc/<pid>/stat for both status and start marker. Real-process controls use a holder whose parent is stopped. No container without a reaping PID 1 and no live Codex hook timeout was exercised.",
-    "Windows native core development imports the reviewed shared core and native sources from context-engine-codex@6b2512cc45ec371b08f47b38eb812bdbe8ea43d1. Full volume/128-bit identities and well-formed canonical UTF-16 names preserve path and state isolation. The native-source hash closure includes the existing external setup/node-runtime.mjs policy and its declaration. Native x64 NTFS core controls ran on the Windows laptop, with no Windows plugin/profile or live-delivery acceptance. Installer/hooks remain held, Linux behavior retains its separate regression/CI gates, and no Windows release is authorized."
+    "Windows native core development imports the reviewed shared core and native sources from context-engine-codex@038b38b05bede9f027ffdc024a26b7f883ae421c. Full volume/128-bit identities and well-formed canonical UTF-16 names preserve path and state isolation. The native-source hash closure includes the existing external setup/node-runtime.mjs policy and its declaration. Native x64 NTFS core controls ran on the Windows laptop, with no Windows plugin/profile or live-delivery acceptance. Installer/hooks remain held, Linux behavior retains its separate regression/CI gates, and no Windows release is authorized."
   ],
   "nativeWindowsSha256": {
     "native/windows/build-native.cmd": "255b508625b84927ffe78662df5331865c2f425cc963ff6e9a41f6eded36fa08",
     "native/windows/ce_windows.cpp": "cb37e8291f580a4b11fc783a5efebf7fd438254e03aec584822604b7b9dd006c",
-    "native/windows/core-acceptance.ts": "841a0ada0806983a461703b863e18100486c1cf064d4ea859bfa96cff1043465",
+    "native/windows/core-acceptance.ts": "ae546f49012e1a915dc433b1105a06e560a3ef1c113cc09dbcb53ee0c0ace5b0",
     "native/windows/host-platform.test.ts": "37e74f92878f557fe99bcc08c95119e3582ed2a411b9397a7a602532b33d2f7b",
     "native/windows/owner-child.ts": "e99dae94725dc584133ac67363722c464d8fe48dbc8f7f4f03862f46bb8570e7",
     "native/windows/primitives.test.mjs": "3e234759cc2c19aad2f47552cfd6dcb0228399e3889112ec1cd962fc08905138",
