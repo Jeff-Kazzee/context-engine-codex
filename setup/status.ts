@@ -1,3 +1,4 @@
+import { requireVerifiedIntegration } from './platform.ts';
 // `context-engine status`: what is installed, which Delivery Mode each runner gets, and whether
 // it applies to this project. Every mode is printed with its exact label and granularity.
 //
@@ -75,6 +76,7 @@ function onPath(env: NodeJS.ProcessEnv): string | null {
 
 /** `interrupted` names a setup lock and an interrupted install record that may belong to a running install. */
 export async function statusText(ctx: SetupContext, projectRoot: string, interrupted: string | null = null): Promise<{ lines: string[]; json: Record<string, unknown> }> {
+  requireVerifiedIntegration();
   const rootFd = openPrivateDirectory(dirname(ctx.setupDir));
   if (rootFd !== undefined) closeSync(rootFd);
   const p = participation({ projectRoot, stateDir: dirname(ctx.setupDir), env: ctx.env });
