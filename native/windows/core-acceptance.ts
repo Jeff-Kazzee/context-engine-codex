@@ -1,11 +1,11 @@
 import { assertSupportedNode } from '../../setup/node-runtime.mjs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { openSession, inspectSession, recall, show, readWorkingContext } from '../../core/index.ts';
-import { readConfined, readLog } from '../../core/store.ts';
+import { readConfined, readLog, projectKeyForCanonicalPath } from '../../core/store.ts';
 import { requireVerifiedIntegration } from '../../setup/platform.ts';
 assert.equal(process.platform, 'win32');
 const fixture = resolve(process.argv[2]!);
@@ -63,6 +63,16 @@ try {
     mkdirSync(join(project, '.SSH'));
     writeFileSync(join(project, '.SSH', 'sentinel'), 'synthetic private sentinel');
     assert.deepEqual(readConfined(project, '.SSH/sentinel'), { refused: 'credential' });
+  });
+  await test('recorded missing-project identities reject malformed UTF-16 before hashing', () => {
+    const missing = join(root, 'missing');
+    for (const name of ['a\ud800', 'a\udfff']) {
+      const record = JSON.parse(JSON.stringify({ projectRoot: join(missing, name) }));
+      assert.throws(() => projectKeyForCanonicalPath(record.projectRoot), /well-formed UTF-16/);
+    }
+    const valid = JSON.parse(JSON.stringify({ projectRoot: join(missing, 'evidence-\u00e9-\u{1f600}') }));
+    assert.doesNotThrow(() => projectKeyForCanonicalPath(valid.projectRoot));
+    assert.equal(existsSync(missing), false);
   });
   await test('Windows loader retains the fixed Node runtime policy', () => {
     for (const version of ['24.19.0', '24.21.0', '24.22.0', '24.22.1-rc.1', '25.0.0', '27.0.0', 'invalid']) {

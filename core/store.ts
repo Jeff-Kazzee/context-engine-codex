@@ -66,6 +66,7 @@ export function projectKey(projectRoot: string): string {
 
 /** A recorded canonical project identity remains usable after the project moves or disappears. */
 export function projectKeyForCanonicalPath(real: string): string {
+  if (process.platform === 'win32' && !real.isWellFormed()) throw new Error('recorded project root must have well-formed UTF-16 on Windows');
   if (!isAbsolute(real) || resolve(real) !== real) throw new Error('recorded project root must be an absolute canonical path');
   // Preserve every previously valid state-directory key (255-byte component).
   // Only longer, previously unusable names need a shorter readable prefix.
