@@ -41,15 +41,15 @@ named project and report exact mode, versions, commands, config/backups changed,
 evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
 
-The [CI workflow](.github/workflows/ci.yml) keeps separate Linux, Windows and macOS checks at the exact source SHA. The Linux Docker candidate uses native checkout and an authenticated Node-only runtime; the owner approved its exact-artifact exception on 2026-10-21 for CI tests only. Its reviewed manager-input boundary must remain intact, and container/native compatibility requires actual CI evidence. Windows/macOS retain the pre-action interpreter probe and their existing typecheck and pure/refusal coverage; their affected provider interpreter still blocks execution. Linux cannot establish native Windows/macOS acceptance. Root and temporary native-package audits remain before installation. Its platform coverage is:
+The [CI workflow](.github/workflows/ci.yml) runs one Linux job at the exact source SHA. It uses native checkout and an authenticated Node-only runtime in a fixed container. The owner approved its exact-artifact exception on 2026-10-21 for CI tests only. Its reviewed manager-input boundary must remain intact. Root and temporary native-package audits run before installation. On 2026-11-02 the owner dropped the Windows and macOS CI jobs. Their package manager bootstrap was never verified, so they could not run. Its platform coverage is:
 
 | Host | Maintained coverage | Stateful support |
 | --- | --- | --- |
 | Linux | Core, setup and adapter suites | Supported with the documented Linux requirements |
-| Windows | Pure operations and refusal before state or setup mutation | Unsupported |
-| macOS | Pure operations and refusal before state or setup mutation | Unsupported |
+| Windows | None since 2026-11-02. Pure operations and refusal last passed in CI for 0.1.5 | Unsupported |
+| macOS | None since 2026-11-02. Pure operations and refusal last passed in CI for 0.1.5 | Unsupported |
 
-Actual Windows and macOS jobs passed on 2026-10-08 in [the initial CI run](https://github.com/Jeff-Kazzee/context-engine-codex/actions/runs/37730433891) at `1e63576690d435cbec35f8cc192b49fcdb4fa798`. These baseline results do not validate later commits. Each updated PR head requires its own successful CI. Offline contract checks do not prove provider delivery, model behavior or interactive acceptance.
+Windows and macOS CI jobs last ran for release 0.1.5. Those results do not validate later commits. Each updated PR head requires its own successful CI. Offline contract checks do not prove provider delivery, model behavior or interactive acceptance.
 
 ## 1. Check compatibility before installing
 

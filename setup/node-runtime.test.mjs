@@ -85,17 +85,13 @@ test('ordinary package commands require the runtime guard', () => {
 
 test('CI gates precede dependency execution and cannot ignore failure', () => {
   const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
-  const guardStep = '      - name: Refuse unsupported or affected Node runtimes\n        run: node setup/check-node.mjs\n';
-  const auditStep = '      - name: Audit all locked dependencies before installation\n        run: pnpm audit --audit-level=low\n';
-  assert.ok(workflow.includes(guardStep));
-  assert.ok(workflow.includes(auditStep));
-  assert.ok(workflow.indexOf(guardStep) < workflow.indexOf('run: pnpm import'));
-  assert.ok(workflow.indexOf('- name: Hold unverified package manager bootstrap') < workflow.indexOf('uses: actions/setup-node@'));
-  assert.ok(workflow.indexOf(auditStep) < workflow.indexOf('pnpm install --frozen-lockfile --ignore-scripts'));
   const container = readFileSync(new URL('../.github/actions/security-ci/run.sh', import.meta.url), 'utf8');
+  const guard = container.indexOf('node /opt/ce/check-node.mjs');
+  const rootAudit = container.indexOf('pnpm audit --audit-level=low');
   const nativeAudit = container.indexOf('pnpm --dir "$runtime" audit --audit-level=low');
+  assert.ok(guard > 0 && guard < rootAudit);
+  assert.ok(rootAudit < container.indexOf('pnpm install --frozen-lockfile --ignore-scripts'));
   assert.ok(nativeAudit > 0 && nativeAudit < container.indexOf('pnpm --dir "$runtime" install'));
   assert.doesNotMatch(workflow, /continue-on-error|always\(\)|audit[^\n]*(?:\|\||--prod|--production)/);
   assert.match(workflow, /permissions:\n  contents: read/);
-  assert.match(workflow, /node-version: '24\.22\.1'/);
 });

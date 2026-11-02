@@ -13,6 +13,8 @@ import { spawnSync } from 'node:child_process';
 import { tempDir } from '../core/testing.ts';
 import { FAKE_CODEX, tree, world } from './testing/world.ts';
 
+const PLUGIN_VERSION = JSON.parse(readFileSync(new URL('../adapters/codex/plugin/.codex-plugin/plugin.json', import.meta.url), 'utf8')).version;
+
 const SETTINGS = '{"theme": "dark",\n  "env": {"FOO": "1"}}\n';
 
 otherRuntimeTest('Claude Code: install adds both plugins; uninstall leaves the config dir byte-identical', () => {
@@ -74,7 +76,7 @@ test('Codex: install, trust the hooks, uninstall: config bytes restore exactly; 
   assert.match(config, /\[plugins\."context-engine@context-engine"\]/);
   assert.ok(config.startsWith(CODEX_CONFIG));
   // The installed hook commands call this checkout's CLI.
-  const hooks = readFileSync(join(w.codexHome, 'plugins', 'cache', 'context-engine', 'context-engine', '0.1.5', 'hooks', 'hooks.json'), 'utf8');
+  const hooks = readFileSync(join(w.codexHome, 'plugins', 'cache', 'context-engine', 'context-engine', PLUGIN_VERSION, 'hooks', 'hooks.json'), 'utf8');
   assert.match(hooks, /CONTEXT_ENGINE_CLI='[^']*\/core\/cli\.ts' '[^']*node' \\"\$PLUGIN_ROOT\/hooks\/codex-hook\.ts\\"/);
   assert.match(inst.stdout, /\/hooks/, 'tells the user the hooks need trust');
   trustAll(w);

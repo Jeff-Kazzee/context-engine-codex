@@ -30,8 +30,8 @@ test('Linux uses only native checkout and the approved native Docker driver', ()
     assert.throws(() => validateLinux(mutation));
   }
   assert.match(workflow, /permissions:\n  contents: read/);
-  assert.match(workflow, /os: windows-2022\n\s+coverage: Windows pure operations and refusal/);
-  assert.match(workflow, /os: macos-15\n\s+coverage: macOS pure operations and refusal/);
+  assert.match(workflow, /^jobs:\n  linux:\n/m);
+  assert.doesNotMatch(workflow, /runs-on: (?:windows|macos)-/);
   assert.match(linux, /name: Linux maintained suite/);
 });
 
