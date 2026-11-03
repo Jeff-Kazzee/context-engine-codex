@@ -1,5 +1,9 @@
 # Provenance
 
+## Windows core development, 2026-11-02
+
+The shared core and native Windows source are pinned to [`038b38b05bede9f027ffdc024a26b7f883ae421c`](https://github.com/Jeff-Kazzee/context-engine-codex/commit/038b38b05bede9f027ffdc024a26b7f883ae421c). Both distributions record identical shared-core and native-source hashes, including the external Node policy dependency. The Windows implementation was independently authored against the public Node-API and Microsoft interfaces cited in the Windows milestone. No upstream implementation examples, private captures or credentials were imported. Native laptop tests establish the stated x64/NTFS core controls only. Native plugin installation, request delivery, archive lifecycle, ordinary profiles and power-loss durability remain unverified. Released v0.1.6 plugins remain Linux-only.
+
 The Wave10 coordinated repair pins `a30ff15e25aabc23f1625dd9eb791c0b2117855e` from the Claude distribution, with 37 identical shared core files in both runtime repositories. New controls use synthetic filesystem failures and runner doubles. They import no private captures or credentials and do not extend the prior live-trial acceptance to these revised heads. Source review, publication, owner merge approval and runtime acceptance remain separate gates.
 
 The independently implemented Context Engine core is MIT-licensed (see `LICENSE`). This file lists every external

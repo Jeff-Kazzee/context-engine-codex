@@ -1,3 +1,4 @@
+import { observeFileSync } from './platform.ts';
 // The shared core: one deep module behind openSession / sync / record / close.
 //
 // Write protocol (decided in issue #7, prototyped on prototype/core-state):
@@ -484,9 +485,8 @@ class Core {
   // missing/corrupt cache and interrupted publication all take the full rebuild.
   private checkpointLog(): {dev: string; ino: string; size: string; mtime: string; ctime: string} | null {
     try {
-      const st = statSync(this.l.events, { bigint: true });
-      if (!st.isFile() || st.nlink !== 1n) return null;
-      return { dev: String(st.dev), ino: String(st.ino), size: String(st.size), mtime: String(st.mtimeNs), ctime: String(st.ctimeNs) };
+      const st = observeFileSync(this.l.events);
+      return { ...st, size: String(st.size) };
     } catch { return null; }
   }
 
@@ -834,8 +834,8 @@ class Core {
 
   private logIdentity(): { dev: string; ino: string; size: number } | undefined {
     try {
-      const st = statSync(this.l.events, { bigint: true });
-      return { dev: String(st.dev), ino: String(st.ino), size: Number(st.size) };
+      const st = observeFileSync(this.l.events);
+      return { dev: st.dev, ino: st.ino, size: st.size };
     } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
   }
 

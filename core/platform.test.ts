@@ -22,6 +22,7 @@ test('pure public context operations work without selecting a host backend', () 
 
 test('unsupported host selection has a stable refusal type', () => {
   for (const platform of ['win32', 'darwin'] as const) {
+    if (platform === 'win32' && process.platform === 'win32') continue;
     assert.throws(() => requireSupportedPlatform(platform), (e: unknown) =>
       e instanceof UnsupportedPlatformError && e.code === 'CE_UNSUPPORTED_PLATFORM' && e.platform === platform);
   }
@@ -32,7 +33,7 @@ function inventory(dir: string): Record<string, string> {
     .map(e => [join(e.parentPath, e.name).slice(dir.length), e.isFile() ? readFileSync(join(e.parentPath, e.name)).toString('hex') : 'directory']));
 }
 
-test('real unsupported hosts refuse state, lock, install and uninstall before any write', { skip: process.platform === 'linux' }, () => {
+test('real unsupported hosts refuse state, lock, install and uninstall before any write', { skip: process.platform === 'linux' || process.platform === 'win32' }, () => {
   const root = mkdtempSync(join(process.env.CONTEXT_ENGINE_TEST_TMP || tmpdir(), 'ce-platform-refusal-'));
   try {
     const projectRoot = join(root, 'project'), stateDir = join(root, 'absent-state'), home = join(root, 'runner');

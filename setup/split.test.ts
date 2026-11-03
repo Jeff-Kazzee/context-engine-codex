@@ -30,6 +30,9 @@ test('shared core hashes match the pinned source manifest', async () => {
  const {createHash}=await import('node:crypto');
  const root=new URL('../',import.meta.url); const source=JSON.parse(readFileSync(new URL('SOURCE.json',root),'utf8'));
  for(const [path,sha] of Object.entries(source.coreSha256)) assert.equal(createHash('sha256').update(readFileSync(new URL(path,root))).digest('hex'),sha,path);
+ assert.ok(source.nativeWindowsSha256 && typeof source.nativeWindowsSha256 === 'object', 'native source manifest required');
+ for (const path of ['native/windows/ce_windows.cpp','native/windows/build-native.cmd','setup/platform.ts','setup/node-runtime.mjs','setup/node-runtime.d.mts']) assert.match(source.nativeWindowsSha256[path] ?? '', /^[a-f0-9]{64}$/, path);
+ for(const [path,sha] of Object.entries(source.nativeWindowsSha256)) assert.equal(createHash('sha256').update(readFileSync(new URL(path,root))).digest('hex'),sha,path);
 });
 
 test('failed installation restores both runner homes and can be retried', () => {

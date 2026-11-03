@@ -1,3 +1,4 @@
+import { requireVerifiedIntegration } from './platform.ts';
 import { assertSupportedNode } from './node-runtime.mjs';
 import { anchor, childTarget } from '../core/platform.ts';
 // Install and uninstall one runner's adapter through the runner's own plugin commands, with every
@@ -142,11 +143,13 @@ export function installedLedger(ctx: SetupContext, id: string, spec?: RunnerSpec
 export class SetupError extends Error {}
 
 export function install(ctx: SetupContext, spec: RunnerSpec): string[] {
+  requireVerifiedIntegration();
   assertSupportedNode();
   return withSetupLock(join(ctx.setupDir, `${spec.id}.setup.lock`), () => installLocked(ctx, spec));
 }
 
 export function installLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
+  requireVerifiedIntegration();
   assertSupportedNode();
   checkOwnedDirectory(spec.home);
   const prior = installedLedger(ctx, spec.id, spec);
@@ -203,10 +206,12 @@ function sameBytes(a: string | null, b: string | null): boolean {
 }
 
 export function uninstall(ctx: SetupContext, spec: RunnerSpec): string[] {
+  requireVerifiedIntegration();
   return withSetupLock(join(ctx.setupDir, `${spec.id}.setup.lock`), () => uninstallLocked(ctx, spec));
 }
 
 export function uninstallLocked(ctx: SetupContext, spec: RunnerSpec): string[] {
+  requireVerifiedIntegration();
   const ledger = installedLedger(ctx, spec.id, spec);
   if (!ledger) {
     const recovered = undoInterruptedInstall(ctx, spec);
