@@ -3,7 +3,7 @@ set -euo pipefail
 test "$#" = 0
 test "$(id -u)" != 0
 test "$(command -v node)" = /opt/node/bin/node
-test "$(node --version)" = v24.22.1
+test "$(node --version)" = v24.22.3
 test "${GITHUB_REPOSITORY:-}" = Jeff-Kazzee/context-engine-codex
 cd -- "$GITHUB_WORKSPACE"
 test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"

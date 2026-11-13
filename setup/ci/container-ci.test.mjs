@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
+import { assertSupportedNode } from '../node-runtime.mjs';
 
 const read = path => readFileSync(new URL('../../' + path, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const workflow = read('.github/workflows/ci.yml');
@@ -49,22 +50,35 @@ test('native checkout is bound to the exact event SHA and reviewed source', () =
   assert.equal(/git config|github_pat_|ghp_|authorization:.*\$\{\{/i.test(source), false);
 });
 
-test('the image and approved test-only Node artifact remain pinned', () => {
+test('the image and candidate test-only Node artifact remain pinned', () => {
   assert.ok(docker.includes('ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517'));
   assert.ok(docker.includes('ca-certificates=20260816ubuntu0.24.04.1'));
   assert.equal(artifact.artifacts.length, 1);
-  assert.equal(artifact.artifacts[0].sha256, '6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6');
+  assert.equal(artifact.artifacts[0].url, 'https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz');
+  assert.equal(artifact.artifacts[0].sha256, '4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb');
   assert.equal(artifact.artifacts[0].destination, '/opt/node/bin/node');
-  assert.equal(artifact.artifacts[0].member, 'node-v24.22.1-linux-x64/bin/node');
+  assert.equal(artifact.artifacts[0].member, 'node-v24.22.3-linux-x64/bin/node');
+  assert.equal(artifact.nodeAuthentication.clearSignedManifestSha256, 'aaaff9ec5c8c5f0997786c06088134ddb4b21a41f74e872b30ed1acca309e2b5');
+  assert.equal(artifact.nodeAuthentication.releaseSignerFingerprint, '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356');
   assert.equal(artifact.nodeAuthentication.buildProvenanceVerified, false);
   assert.equal(artifact.ceException.status, 'approved');
   assert.equal(artifact.ceException.testOnly, true);
   assert.deepEqual(artifact.ceException.repositories, ['Jeff-Kazzee/context-engine-codex', 'Jeff-Kazzee/context-engine-claude']);
   assert.equal(artifact.ceException.approvedOnUtc, '2026-10-21');
+  assert.equal(artifact.ceException.artifactSha256, '6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6');
   assert.ok(bootstrap.indexOf('hashlib.sha256(data).hexdigest() != digest') < bootstrap.indexOf('with tarfile.open'));
   assert.ok(bootstrap.includes('response.url != url'));
   assert.match(bootstrap, /test ! -e \/opt\/node\/bin\/npm/);
   assert.match(bootstrap, /test ! -e \/opt\/node\/bin\/corepack/);
+});
+
+test('all CI runtime selectors agree on a supported fixed release', () => {
+  const version = '24.22.3';
+  assert.doesNotThrow(() => assertSupportedNode(version));
+  assert.ok(bootstrap.includes(`if not url == '${artifact.artifacts[0].url}':`));
+  assert.ok(bootstrap.includes(`test "$(/opt/node/bin/node --version)" = v${version}`));
+  assert.ok(run.includes(`test "$(node --version)" = v${version}`));
+  assert.ok(native.includes(`test "$("$runtime/node" --version)" = v${version}`));
 });
 
 test('non-root tests and the separate host network isolation remain required', () => {
@@ -83,7 +97,7 @@ test('non-root tests and the separate host network isolation remain required', (
   assert.match(run, /python3 -I -B -c 'import ctypes/);
   assert.match(run, /node --test --test-concurrency=1 "core\/\*\*\/\*\.test.ts" "setup\/\*\.test.ts"/);
   assert.match(native, /sudo -n unshare --net -- runuser --user/);
-  assert.ok(native.includes('e32e2d16081cf644f88392934288086e7662529d0d43277c34f7aad2207cfafb'));
+  assert.ok(native.includes('a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01'));
   assert.ok(linux.indexOf('run: bash setup/ci/run-container.sh') < linux.indexOf('run: bash setup/ci/native-contract.sh'));
 });
 

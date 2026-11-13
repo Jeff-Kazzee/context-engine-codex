@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import test from 'node:test';
 import { pnpmVersionError, pnpmPinError, pnpmRuntimeError } from './check-pnpm.mjs';
 import { inputError } from './check-inputs.mjs';
+
+test('committed manager inputs match the reviewed normalized hashes', () => {
+  const policy = JSON.parse(readFileSync(new URL('./policy.json', import.meta.url), 'utf8'));
+  assert.deepEqual(Object.keys(policy.inputs).sort(), ['package-lock.json', 'package.json']);
+  for (const [name, expected] of Object.entries(policy.inputs)) {
+    const text = readFileSync(new URL('../../' + name, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+    assert.equal(createHash('sha256').update(text).digest('hex'), expected, name);
+  }
+});
 
 test('the manager policy accepts only its reviewed exact artifact version', () => {
   assert.equal(pnpmVersionError('11.28.6'), null);
