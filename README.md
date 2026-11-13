@@ -41,7 +41,7 @@ named project and report exact mode, versions, commands, config/backups changed,
 evidence, gaps and disable/uninstall steps. Preserve unrelated work.
 ```
 
-The [CI workflow](.github/workflows/ci.yml) runs one Linux job at the exact source SHA. It uses native checkout and an authenticated Node-only runtime in a fixed container. The owner approved an exact-artifact exception on 2026-10-21 for CI tests only; that historical approval covers Node 24.22.1, and the replacement artifact needs its own authorization as described in the [release checklist](docs/release-acceptance.md#fixed-runtime-linux-ci-candidate). Its reviewed manager-input boundary must remain intact. Root and temporary native-package audits run before installation. On 2026-11-02 the owner dropped the Windows and macOS CI jobs. They had no verified package manager bootstrap, so every run stopped at a deliberate hold step. Its platform coverage is:
+The [CI workflow](.github/workflows/ci.yml) runs one Linux job at the exact source SHA. It uses native checkout and an authenticated Node-only runtime in a fixed container. The owner approved an exact-artifact exception on 2026-10-21 for CI tests only. That historical approval covers Node 24.22.1, and the replacement artifact needs its own authorization as described in the [release checklist](docs/release-acceptance.md#fixed-runtime-linux-ci-candidate). Its reviewed manager-input boundary must remain intact. Root and temporary native-package audits run before installation. On 2026-11-02 the owner dropped the Windows and macOS CI jobs. They had no verified package manager bootstrap, so every run stopped at a deliberate hold step. Its platform coverage is:
 
 | Host | Maintained coverage | Stateful support |
 | --- | --- | --- |
