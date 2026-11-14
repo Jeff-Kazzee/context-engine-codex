@@ -52,7 +52,7 @@ test('native checkout is bound to the exact event SHA and reviewed source', () =
 
 test('the image and candidate test-only Node artifact remain pinned', () => {
   assert.ok(docker.includes('ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517'));
-  assert.ok(docker.includes('ca-certificates=20260816ubuntu0.24.04.1'));
+  assert.ok(docker.includes('ca-certificates=20260816ubuntu0.24.04.2'));
   assert.equal(artifact.artifacts.length, 1);
   assert.equal(artifact.artifacts[0].url, 'https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz');
   assert.equal(artifact.artifacts[0].sha256, '4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb');

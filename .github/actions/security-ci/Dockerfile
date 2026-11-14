@@ -3,8 +3,8 @@ FROM docker.io/library/ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install --yes --no-install-recommends \
-      ca-certificates=20260816ubuntu0.24.04.1 curl xz-utils python3 bash git passwd util-linux \
- && test "$(dpkg-query --show --showformat='${Version}' ca-certificates)" = 20260816ubuntu0.24.04.1 \
+      ca-certificates=20260816ubuntu0.24.04.2 curl xz-utils python3 bash git passwd util-linux \
+ && test "$(dpkg-query --show --showformat='${Version}' ca-certificates)" = 20260816ubuntu0.24.04.2 \
  && rm -rf /var/lib/apt/lists/*
 ARG CE_UID
 ARG CE_GID
