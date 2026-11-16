@@ -3,7 +3,7 @@
 # main stays in the list until the repo renames main to prod. A cleanup PR then drops it.
 name: promotion-guard
 on:
-  pull_request:
+  pull_request_target:
     branches: [prod, main]
     types: [opened, reopened, synchronize, edited]
 permissions: {}
