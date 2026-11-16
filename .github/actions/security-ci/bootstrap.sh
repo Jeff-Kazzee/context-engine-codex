@@ -19,7 +19,7 @@ for item in manifest['artifacts']:
     if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
         raise SystemExit('Artifact authentication is not finalized.')
     url = item['url']
-    if not url == 'https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.xz':
+    if not url == 'https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz':
         raise SystemExit('Unreviewed artifact origin.')
     request = urllib.request.Request(url, headers={'User-Agent': 'ce-fixed-runtime-ci'})
     with urllib.request.urlopen(request, timeout=60) as response:
@@ -47,7 +47,7 @@ for item in manifest['artifacts']:
 PY
 
 # This is the only Node binary in the image. npm, Corepack and Yarn are not extracted.
-test "$(/opt/node/bin/node --version)" = v24.22.1
+test "$(/opt/node/bin/node --version)" = v24.22.3
 test ! -e /opt/node/bin/npm
 test ! -e /opt/node/bin/corepack
 test ! -e /opt/node/bin/yarn

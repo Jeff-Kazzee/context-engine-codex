@@ -3,15 +3,16 @@ FROM docker.io/library/ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install --yes --no-install-recommends \
-      ca-certificates=20260816ubuntu0.24.04.1 curl xz-utils python3 bash git passwd util-linux \
- && test "$(dpkg-query --show --showformat='${Version}' ca-certificates)" = 20260816ubuntu0.24.04.1 \
+      ca-certificates=20260816ubuntu0.24.04.2 curl xz-utils python3 bash git passwd util-linux \
+ && test "$(dpkg-query --show --showformat='${Version}' ca-certificates)" = 20260816ubuntu0.24.04.2 \
  && rm -rf /var/lib/apt/lists/*
 ARG CE_UID
 ARG CE_GID
-RUN case "$CE_UID" in ''|0|*[!0-9]*) exit 1;; esac \
- && case "$CE_GID" in ''|0|*[!0-9]*) exit 1;; esac \
+RUN case "$CE_UID" in ''|0*|*[!0-9]*) exit 1;; esac \
+ && case "$CE_GID" in ''|0*|*[!0-9]*) exit 1;; esac \
+ && test "$CE_UID" -le 4294967294 && test "$CE_GID" -le 4294967294 \
  && (getent group "$CE_GID" >/dev/null || groupadd --gid "$CE_GID" ce-ci) \
- && useradd --no-create-home --uid "$CE_UID" --gid "$CE_GID" --shell /bin/bash ce-ci
+ && (getent passwd "$CE_UID" >/dev/null || useradd --no-create-home --uid "$CE_UID" --gid "$CE_GID" --shell /bin/bash ce-ci)
 COPY .github/actions/security-ci/bootstrap.sh /opt/ce/bootstrap.sh
 COPY .github/actions/security-ci/artifacts.json /opt/ce/artifacts.json
 RUN bash /opt/ce/bootstrap.sh
