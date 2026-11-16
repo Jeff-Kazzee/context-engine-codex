@@ -1,5 +1,5 @@
 import { dirname, join } from 'node:path';
-import { statSync } from 'node:fs';
+import { observeFileSync } from './platform.ts';
 import { appendCommitted, atomicWrite, readBytes, readLogRows, removeDirectoryEntries, sha } from './store.ts';
 
 type Identity = { dev: string; ino: string; size: number; mtime: string; ctime: string };
@@ -18,9 +18,7 @@ const range = (v: unknown): v is Range => !!v && typeof v === 'object' && 'start
 
 function identity(log: string): Identity | undefined {
   try {
-    const s = statSync(log, { bigint: true });
-    if (!s.isFile() || s.nlink !== 1n || !Number.isSafeInteger(Number(s.size))) throw new Error('invalid restore lookup log identity');
-    return { dev: String(s.dev), ino: String(s.ino), size: Number(s.size), mtime: String(s.mtimeNs), ctime: String(s.ctimeNs) };
+    return observeFileSync(log);
   } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
 }
 

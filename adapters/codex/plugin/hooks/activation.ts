@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export function locallyEnabled(project: string): boolean {
   if (new Set(['off', '0', 'false', 'no', 'disable', 'disabled']).has((process.env.CONTEXT_ENGINE ?? '').trim().toLowerCase())) return false;
+  if (process.platform !== 'linux') throw Object.assign(new Error('Native hooks have not passed platform acceptance. Context Engine did not activate.'), { code: 'CE_WINDOWS_INTEGRATION_UNVERIFIED' });
   const override = process.env.CONTEXT_ENGINE_STATE_DIR;
   if (override && !isAbsolute(override)) throw new Error('CONTEXT_ENGINE_STATE_DIR must be absolute');
   const xdg = process.env.XDG_STATE_HOME;

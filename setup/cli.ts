@@ -1,3 +1,4 @@
+import { requireVerifiedIntegration } from './platform.ts';
 import { assertSupportedNode } from './node-runtime.mjs';
 // Setup commands for people: install, uninstall, enable, disable, status. Text output.
 import { parseArgs } from 'node:util';
@@ -45,6 +46,7 @@ export async function runSetup(argv: string[]): Promise<number> {
     process.stderr.write('This distribution supports codex only.\n');
     return 1;
   }
+  try { requireVerifiedIntegration(); } catch (error) { process.stderr.write(refusal(error)); return 1; }
   const ctx = setupContext();
   const projectRoot = realpathSync(resolve(values.project ?? process.cwd()));
   const out = (lines: string[]) => process.stdout.write(`${lines.join('\n')}\n`);

@@ -1,3 +1,4 @@
+import { requireVerifiedIntegration } from './platform.ts';
 // `context-engine status`: what is installed, which Delivery Mode each runner gets, and whether
 // it applies to this project. Every mode is printed with its exact label and granularity.
 //
@@ -7,7 +8,8 @@
 // prompt input (`codex debug prompt-input`, offline, no model call) carries Context Engine's
 // token_budget guidance. Otherwise the Codex line says "inactive here" and why. The per-user-turn
 // path (the turn loop) is never switched to automatically: it is a separate command.
-import { closeSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { closeSync } from '../core/platform.ts';
 import { delimiter, dirname, join } from 'node:path';
 import { CODEX_TOKEN_LIMIT_RESET, KILL_SWITCH_ENV, killSwitchOn, participation } from '../core/index.ts';
 import { GUIDANCE_PROBE, RESET_MODE } from '../adapters/codex/guidance.ts';
@@ -74,6 +76,7 @@ function onPath(env: NodeJS.ProcessEnv): string | null {
 
 /** `interrupted` names a setup lock and an interrupted install record that may belong to a running install. */
 export async function statusText(ctx: SetupContext, projectRoot: string, interrupted: string | null = null): Promise<{ lines: string[]; json: Record<string, unknown> }> {
+  requireVerifiedIntegration();
   const rootFd = openPrivateDirectory(dirname(ctx.setupDir));
   if (rootFd !== undefined) closeSync(rootFd);
   const p = participation({ projectRoot, stateDir: dirname(ctx.setupDir), env: ctx.env });

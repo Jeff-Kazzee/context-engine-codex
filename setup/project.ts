@@ -1,3 +1,4 @@
+import { requireVerifiedIntegration } from './platform.ts';
 // Per-project enable/disable. The participation record (core/participation.ts) is what both
 // adapters check. With the Codex adapter installed, enable also writes the project's Codex
 // settings, because Codex has no per-project switch of its own for features.token_budget. They go
@@ -233,6 +234,7 @@ function revertCodexProjectFiles(ctx: SetupContext, pointerFile: string, retire 
 
 /** Reverts every project's Codex files (uninstall --codex). */
 export function revertAllCodexProjects(ctx: SetupContext): string[] {
+  requireVerifiedIntegration();
   if (!existsSync(projectsDir(ctx))) return [];
   return readdirSync(projectsDir(ctx))
     .filter((f) => f.endsWith('.json'))
@@ -240,6 +242,7 @@ export function revertAllCodexProjects(ctx: SetupContext): string[] {
 }
 
 export function enableProject(ctx: SetupContext, projectRoot: string): string[] {
+  requireVerifiedIntegration();
   // A half-applied install could already be loaded by Codex, so enable changes nothing until it is undone.
   refuseInterruptedInstall(ctx, codexSpec(ctx), true);
   const config = codexConfig(projectRoot), ptr = pointer(ctx, projectRoot);
@@ -278,6 +281,7 @@ export function enableProject(ctx: SetupContext, projectRoot: string): string[] 
 }
 
 export function disableProject(ctx: SetupContext, projectRoot: string): string[] {
+  requireVerifiedIntegration();
   const lines: string[] = [];
   const ptr = pointer(ctx, projectRoot);
   if (existsSync(ptr)) lines.push(...revertCodexProjectFiles(ctx,ptr));

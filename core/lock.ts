@@ -1,8 +1,8 @@
-import { anchor, childTarget, suffix, processStartMarker as hostProcessStartMarker, processStatus, exitedStatus, processGone } from './platform.ts';
+import { openedPath, anchor, childTarget, suffix, processStartMarker as hostProcessStartMarker, processStatus, exitedStatus, processGone } from './platform.ts';
 // Single-writer session lock. The holder is identified by pid + hostname + process start marker
 // (Linux: start time from /proc/<pid>/stat, so a recycled pid is not mistaken for the holder).
 import { randomBytes } from 'node:crypto';
-import { closeSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, readlinkSync, readdirSync, unlinkSync, writeSync } from './platform.ts';
+import { closeSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from './platform.ts';
 import { hostname } from 'node:os';
 import { lockStep } from './faults.ts';
 import { atomicWrite, readBytes, readLockPublicationCandidate, openPrivateDirectory } from './store.ts';
@@ -56,7 +56,7 @@ export function readLock(path: string, parentFd?: number): LockHolder | null | '
   let bytes: Buffer | undefined;
   const deadline=Date.now()+100;
   for(;;){try{
-    const expected = parentFd === undefined ? undefined : join(readlinkSync(anchor(parentFd)), basename(path));
+    const expected = parentFd === undefined ? undefined : join(openedPath(parentFd), basename(path));
     bytes=readBytes(atParent(path,parentFd),16384,expected);break;
   }catch(e){
     // A legitimate link publication briefly has two names. Wait without reading;
@@ -81,7 +81,7 @@ export function readLock(path: string, parentFd?: number): LockHolder | null | '
 function recoverPublication(path: string, parentFd?: number): boolean {
   const parent=parentFd ?? openPrivateDirectory(dirname(path))!;
   try {
-    const real=readlinkSync(anchor(parent)),target=childTarget(anchor(parent),basename(path));
+    const real=openedPath(parent),target=childTarget(anchor(parent),basename(path));
     const names=readdirSync(anchor(parent));if(names.length>4096)return false;
     const candidates=names.filter(name=>name.startsWith(basename(path)+'.') && /^\.[1-9][0-9]*\.[0-9a-f]{8}\.new$/.test(name.slice(basename(path).length)));
     for(const name of candidates){

@@ -46,8 +46,10 @@ The [CI workflow](.github/workflows/ci.yml) runs one Linux job at the exact sour
 | Host | Maintained coverage | Stateful support |
 | --- | --- | --- |
 | Linux | Core, setup and adapter suites | Supported with the documented Linux requirements |
-| Windows | None since 2026-11-02. Pure operations and refusal last passed in CI for 0.1.5 | Unsupported |
+| Windows | Native x64/NTFS core tests on this development branch. No maintained Windows CI yet | Core development slice only. Released v0.1.6 plugins remain unsupported |
 | macOS | None since 2026-11-02. Pure operations and refusal last passed in CI for 0.1.5 | Unsupported |
+
+Windows native setup and live hooks remain held. See [the Windows core milestone](docs/platforms/windows-native-20261102.md) for measured capabilities, commands and remaining acceptance gates. No Windows package or launch is approved by this branch.
 
 Windows and macOS CI jobs last passed for release 0.1.5 and on this change through 2026-10-21. Those results do not validate later commits. Each updated PR head requires its own successful CI. Offline contract checks do not prove provider delivery, model behavior or interactive acceptance.
 
