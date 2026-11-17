@@ -15,7 +15,7 @@ test -z "${ACTIONS_RUNNER_HOOK_JOB_STARTED:-}${ACTIONS_RUNNER_HOOK_JOB_COMPLETED
 grep --quiet --fixed-strings 'VERSION_ID="24.04"' /etc/os-release || refuse 'Require Ubuntu 24.04.'
 ca_version=$(dpkg-query --show --showformat='${Version}' ca-certificates) || refuse 'Cannot read the native CA package version.'
 printf 'Native checkout CA package: %s\n' "$ca_version"
-dpkg --compare-versions "$ca_version" ge 20260816ubuntu0.24.04.1 || refuse 'Native CA package is below the reviewed 20260816ubuntu0.24.04.1 floor.'
+dpkg --compare-versions "$ca_version" ge 20260816ubuntu0.24.04.2 || refuse 'Native CA package is below the reviewed 20260816ubuntu0.24.04.2 floor.'
 test -z "${GIT_SSL_NO_VERIFY:-}${GIT_SSL_CAINFO:-}${CURL_CA_BUNDLE:-}${SSL_CERT_FILE:-}${SSL_CERT_DIR:-}" || refuse 'Unreviewed TLS overrides are configured.'
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 : "${GITHUB_WORKSPACE:?The hosted workspace is required.}"

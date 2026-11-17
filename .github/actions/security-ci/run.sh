@@ -3,7 +3,7 @@ set -euo pipefail
 test "$#" = 0
 test "$(id -u)" != 0
 test "$(command -v node)" = /opt/node/bin/node
-test "$(node --version)" = v24.22.1
+test "$(node --version)" = v24.22.3
 test "${GITHUB_REPOSITORY:-}" = Jeff-Kazzee/context-engine-codex
 cd -- "$GITHUB_WORKSPACE"
 test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
@@ -40,7 +40,12 @@ run_maintained_suite() {
   node /opt/ce/ci/check-lock.mjs verify "$runtime" "$native_receipt"
   python3 -I -B setup/ci/validate-pnpm-archive.test.py
   node node_modules/typescript/bin/tsc --noEmit -p .
-  node --test --test-concurrency=1 "core/**/*.test.ts" "setup/*.test.ts" "adapters/codex/**/*.test.ts" "setup/*.test.mjs" "setup/ci/*.test.mjs"
+  # Reuse compilation across real test children only, inside this job's private HOME.
+  (
+    compile_cache=$(umask 077; mktemp -d "$HOME/ce-node-compile-cache.XXXXXXXX")
+    trap 'status=$?; rm -rf -- "$compile_cache" || { test "$status" -ne 0 || status=1; }; exit "$status"' EXIT
+    NODE_COMPILE_CACHE="$compile_cache" node --test --test-concurrency=1 "core/**/*.test.ts" "setup/*.test.ts" "adapters/codex/**/*.test.ts" "setup/*.test.mjs" "setup/ci/*.test.mjs"
+  )
   binary="$runtime/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
   printf '%s  %s\n' 9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c "$binary" | sha256sum --check --status
   # Preserve the existing host unshare/runuser contracts without extra Docker caps.
